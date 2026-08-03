@@ -1,0 +1,158 @@
+// IriX Node Daemon
+// IriX 本地节点守护进程（Go 实现）。
+//
+// 提供与 MCSManager 面板一致风格的 HTTP API（见 apis/node_api.md），
+// 使得 IriX 客户端可以用同一套客户端代码同时管理 MCSM 节点与本节点。
+// 本守护进程使用纯标准库实现，无任何外部依赖，单文件 go build 即可运行。
+
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+func main() {
+	var (
+		port    = flag.Int("port", 12346, "监听端口")
+		dataDir = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
+		apiKey  = flag.String("apikey", "", "可选 API 密钥；留空表示不校验（与 MCSM 的 apikey 查询参数兼容）")
+	)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
+		fmt.Fprintf(os.Stderr, "用法: irix-node [选项]\n\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n示例:\n")
+		fmt.Fprintf(os.Stderr, "  irix-node\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
+	}
+	flag.Parse()
+
+	if *dataDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			log.Fatalf("无法获取当前目录: %v", err)
+		}
+		*dataDir = wd
+	}
+	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+		log.Fatalf("无法创建数据目录 %s: %v", *dataDir, err)
+	}
+
+	d := NewDaemon(*dataDir, *apiKey)
+	d.Port = *port
+	if err := d.Load(); err != nil {
+		log.Fatalf("加载实例数据失败: %v", err)
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", *port)
+	if strings.EqualFold(os.Getenv("IRIX_NODE_BIND_ALL"), "1") {
+		addr = fmt.Sprintf("0.0.0.0:%d", *port)
+	}
+
+	mux := http.NewServeMux()
+	d.RegisterRoutes(mux)
+
+	log.Printf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
+	log.Printf("数据目录: %s", *dataDir)
+	log.Printf("监听地址: http://%s/api/overview", addr)
+	if *apiKey == "" {
+		log.Printf("警告: 未设置 API 密钥，本地端口可被任意访问")
+	}
+	if err := http.ListenAndServe(addr, logMiddleware(mux)); err != nil {
+		log.Fatalf("HTTP 服务启动失败: %v", err)
+	}
+}
+
+// logMiddleware 记录所有 API 请求。
+func logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			log.Printf("%s %s", r.Method, r.URL.Path)
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Version 守护进程版本号。
+const Version = "1.0.0"
+
+// NormalizePath 将 API 传入的路径规范化为相对目录的绝对路径。
+//
+// 路径以 '/' 开头表示实例工作目录（cwd）的根；Windows 盘符路径（如 C:\x）
+// 直接使用。任何试图逃逸 cwd 的路径（.. 越界）都会被拒绝。
+func NormalizePath(cwd, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return cwd, nil
+	}
+	var full string
+	if filepath.IsAbs(target) {
+		full = filepath.Clean(target)
+	} else {
+		full = filepath.Clean(filepath.Join(cwd, target))
+	}
+	if !pathWithin(cwd, full) {
+		return "", fmt.Errorf("路径越界: %s", target)
+	}
+	return full, nil
+}
+
+// pathWithin 判断 p 是否位于 base 之内（允许相等）。
+func pathWithin(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// SplitCommand 将启动命令字符串拆分为参数列表，支持单/双引号。
+func SplitCommand(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if cur.Len() > 0 {
+			args = append(args, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return args
+}
+
+// FormatSize 将字节数格式化为人类可读字符串。
+func FormatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
