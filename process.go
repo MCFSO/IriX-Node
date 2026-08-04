@@ -114,10 +114,7 @@ func startProcess(startCommand, cwd string) (*Process, error) {
 
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-	}
+	cmd.SysProcAttr = sysProcAttr()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
