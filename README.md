@@ -2,8 +2,7 @@
 
 IriX 客户端「节点」类型中的本地节点守护进程，使用 Go 语言实现、零第三方依赖。
 
-它与 MCSManager 面板提供同一风格的 HTTP API（接口文档见 `../apis/node_api.md`，
-MCSM 侧文档见 `../apis/`），因此 IriX 客户端可以用同一套代码同时管理
+它与 MCSManager 面板提供同一风格的 HTTP API，因此 IriX 客户端可以用同一套代码同时管理
 MCSM 节点与本节点。
 
 ## 构建与运行
