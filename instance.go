@@ -45,16 +45,19 @@ func queryParam(r *http.Request, key string) string {
 	return strings.TrimSpace(r.URL.Query().Get(key))
 }
 
-// authOK 校验 API 密钥。
+// authOK 校验请求凭证：优先校验 -apikey，否则校验配对码（apikey 参数 / X-Api-Key 头）。
 func (d *Daemon) authOK(r *http.Request) bool {
-	if d.APIKey == "" {
-		return true
-	}
 	got := r.URL.Query().Get("apikey")
 	if got == "" {
 		got = r.Header.Get("X-Api-Key")
 	}
-	return got == d.APIKey
+	if d.APIKey != "" {
+		return got == d.APIKey
+	}
+	if d.PairingHash == "" {
+		return true
+	}
+	return checkPairing(got, d.PairingHash)
 }
 
 // RegisterRoutes 注册全部路由。

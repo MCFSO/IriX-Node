@@ -170,13 +170,14 @@ func (i *Instance) Detail() map[string]any {
 
 // Daemon 守护进程根对象。
 type Daemon struct {
-	mu        sync.Mutex
-	DataDir   string
-	APIKey    string
-	Port      int
-	UUID      string
-	Instances []*Instance
-	StartedAt time.Time
+	mu          sync.Mutex
+	DataDir     string
+	APIKey      string
+	PairingHash string
+	Port        int
+	UUID        string
+	Instances   []*Instance
+	StartedAt   time.Time
 }
 
 // NewDaemon 创建守护进程实例。

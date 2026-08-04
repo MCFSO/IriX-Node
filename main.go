@@ -22,7 +22,7 @@ func main() {
 	var (
 		port    = flag.Int("port", 12346, "监听端口")
 		dataDir = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
-		apiKey  = flag.String("apikey", "", "可选 API 密钥；留空表示不校验（与 MCSM 的 apikey 查询参数兼容）")
+		apiKey  = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -30,6 +30,7 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
 	}
 	flag.Parse()
@@ -50,6 +51,22 @@ func main() {
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
+	if *apiKey == "" {
+		code, isNew, err := d.LoadPairing()
+		if err != nil {
+			log.Fatalf("初始化配对码失败: %v", err)
+		}
+		if isNew {
+			log.Printf("======================================================")
+			log.Printf("首次启动：已生成配对码（仅此一次显示，请立即记录）")
+			log.Printf("")
+			log.Printf("  配对码: %s", code)
+			log.Printf("")
+			log.Printf("后续所有 API 请求必须携带配对码：")
+			log.Printf("  ?apikey=%s 或请求头 X-Api-Key: %s", code, code)
+			log.Printf("======================================================")
+		}
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	if strings.EqualFold(os.Getenv("IRIX_NODE_BIND_ALL"), "1") {
@@ -63,7 +80,7 @@ func main() {
 	log.Printf("数据目录: %s", *dataDir)
 	log.Printf("监听地址: http://%s/api/overview", addr)
 	if *apiKey == "" {
-		log.Printf("警告: 未设置 API 密钥，本地端口可被任意访问")
+		log.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 	if err := http.ListenAndServe(addr, logMiddleware(mux)); err != nil {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
