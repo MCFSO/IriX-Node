@@ -18,20 +18,20 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	system := map[string]any{
-		"type":      osType,
-		"hostname":  hostname,
-		"platform":  platform,
-		"release":   release,
-		"uptime":    uptimeSeconds(),
-		"totalmem":  totalMem(),
-		"freemem":   freeMem(),
-		"cpuUsage":  cpuUsage(),
-		"memUsage":  memUsage(),
+		"type":       osType,
+		"hostname":   hostname,
+		"platform":   platform,
+		"release":    release,
+		"uptime":     uptimeSeconds(),
+		"totalmem":   totalMem(),
+		"freemem":    freeMem(),
+		"cpuUsage":   cpuUsage(),
+		"memUsage":   memUsage(),
 		"processCpu": 0,
 		"processMem": 0,
-		"node":      runtime.Version(),
-		"time":      now.UnixMilli(),
-		"cwd":       d.DataDir,
+		"node":       runtime.Version(),
+		"time":       now.UnixMilli(),
+		"cwd":        d.DataDir,
 	}
 
 	processInfo := map[string]any{
@@ -44,14 +44,14 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 	running := d.CountRunning()
 
 	writeOK(w, map[string]any{
-		"version":               Version,
+		"version":                Version,
 		"specifiedDaemonVersion": Version,
-		"process":               processInfo,
+		"process":                processInfo,
 		"record": map[string]any{
-			"logined":     0,
+			"logined":       0,
 			"illegalAccess": 0,
-			"banips":      0,
-			"loginFailed": 0,
+			"banips":        0,
+			"loginFailed":   0,
 		},
 		"system": system,
 		"chart": map[string]any{

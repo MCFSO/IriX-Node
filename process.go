@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -164,21 +163,15 @@ func startProcess(startCommand, cwd string) (*Process, error) {
 }
 
 // IsRunning 进程是否仍在运行。
+// 判据为 done 通道：cmd.Wait() 返回（进程退出）时关闭，跨平台可靠。
+// 注意：不能使用 Signal(0) 探测——Windows 上 os.Process.Signal 除 Kill 外一律报错。
 func (p *Process) IsRunning() bool {
 	select {
 	case <-p.done:
 		return false
 	default:
-		return p.ProcessRunning()
+		return true
 	}
-}
-
-// ProcessRunning 通过信号 0 探测进程存活。
-func (p *Process) ProcessRunning() bool {
-	if p.cmd == nil || p.cmd.Process == nil {
-		return false
-	}
-	return p.cmd.Process.Signal(syscall.Signal(0)) == nil
 }
 
 // WriteCommand 下发命令到标准输入。

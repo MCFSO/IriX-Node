@@ -3,8 +3,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,24 +41,24 @@ type PingConfig struct {
 
 // InstanceConfig 实例配置（与 MCSM InstanceConfig 字段对齐）。
 type InstanceConfig struct {
-	Nickname         string     `json:"nickname"`
-	StartCommand     string     `json:"startCommand"`
-	StopCommand      string     `json:"stopCommand"`
-	Cwd              string     `json:"cwd"`
-	IE               string     `json:"ie"`
-	OE               string     `json:"oe"`
-	CreateDatetime   int64      `json:"createDatetime"`
-	LastDatetime     int64      `json:"lastDatetime"`
-	Type             string     `json:"type"`
-	Tag              []string   `json:"tag"`
-	EndTime          int64      `json:"endTime"`
-	FileCode         string     `json:"fileCode"`
-	ProcessType      string     `json:"processType"`
-	UpdateCommand    string     `json:"updateCommand"`
-	ActionCommandList []string  `json:"actionCommandList"`
-	Crlf             int        `json:"crlf"`
-	EventTask        EventTask  `json:"eventTask"`
-	PingConfig       PingConfig `json:"pingConfig"`
+	Nickname          string     `json:"nickname"`
+	StartCommand      string     `json:"startCommand"`
+	StopCommand       string     `json:"stopCommand"`
+	Cwd               string     `json:"cwd"`
+	IE                string     `json:"ie"`
+	OE                string     `json:"oe"`
+	CreateDatetime    int64      `json:"createDatetime"`
+	LastDatetime      int64      `json:"lastDatetime"`
+	Type              string     `json:"type"`
+	Tag               []string   `json:"tag"`
+	EndTime           int64      `json:"endTime"`
+	FileCode          string     `json:"fileCode"`
+	ProcessType       string     `json:"processType"`
+	UpdateCommand     string     `json:"updateCommand"`
+	ActionCommandList []string   `json:"actionCommandList"`
+	Crlf              int        `json:"crlf"`
+	EventTask         EventTask  `json:"eventTask"`
+	PingConfig        PingConfig `json:"pingConfig"`
 }
 
 // FillDefaults 补齐空字段的默认值。
@@ -115,6 +117,10 @@ type Instance struct {
 	Proc   *Process   // 进程包装（可能为 nil）
 	Stdin  *stdinPipe // 进程标准输入
 	Busy   bool       // 忙碌标记（操作进行中）
+
+	// 自动重启防抖（受 mu 保护）：10 秒窗口内最多自动重启 3 次，防止崩溃循环。
+	arWindowStart time.Time
+	arAttempts    int
 }
 
 // NewInstance 由配置创建实例对象。
@@ -170,7 +176,10 @@ func (i *Instance) Detail() map[string]any {
 
 // Daemon 守护进程根对象。
 type Daemon struct {
-	mu          sync.Mutex
+	mu     sync.Mutex
+	saveMu sync.Mutex // 持久化写盘互斥：保证并发 Save 不互相覆盖
+	// 注意：saveMu 必须始终先于 mu 获取，避免锁顺序反转。
+
 	DataDir     string
 	APIKey      string
 	PairingHash string
@@ -198,6 +207,8 @@ func (d *Daemon) instanceFile() string {
 }
 
 // Load 从磁盘加载实例配置。
+// 若 instances.json 损坏（崩溃中断写盘等），将损坏文件备份为
+// instances.json.corrupt-<时间戳> 后按空列表继续启动，保证守护进程可用。
 func (d *Daemon) Load() error {
 	data, err := os.ReadFile(d.instanceFile())
 	if err != nil {
@@ -208,7 +219,12 @@ func (d *Daemon) Load() error {
 	}
 	var list []PersistedInstance
 	if err := json.Unmarshal(data, &list); err != nil {
-		return fmt.Errorf("解析 instances.json 失败: %w", err)
+		backup := d.instanceFile() + ".corrupt-" + fmt.Sprintf("%d", time.Now().UnixMilli())
+		if rerr := os.Rename(d.instanceFile(), backup); rerr != nil {
+			return fmt.Errorf("解析 instances.json 失败: %w（备份损坏文件也失败: %v）", err, rerr)
+		}
+		log.Printf("警告: instances.json 损坏（%v），已备份到 %s，按空列表继续启动", err, backup)
+		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -221,7 +237,12 @@ func (d *Daemon) Load() error {
 }
 
 // Save 将实例配置持久化到磁盘。
+// 原子写：先写临时文件再 rename，避免崩溃产生半截 JSON；
+// saveMu 串行化保证并发 Save 不会互相覆盖。
 func (d *Daemon) Save() error {
+	d.saveMu.Lock()
+	defer d.saveMu.Unlock()
+
 	d.mu.Lock()
 	list := make([]PersistedInstance, 0, len(d.Instances))
 	for _, inst := range d.Instances {
@@ -239,7 +260,11 @@ func (d *Daemon) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.instanceFile(), data, 0o644)
+	tmp := d.instanceFile() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.instanceFile())
 }
 
 // Find 按 uuid 查找实例。
@@ -350,14 +375,11 @@ func (d *Daemon) CwdOf(uuid string) (string, error) {
 	return inst.Config.Cwd, nil
 }
 
-// newUUID 生成一个简单的随机 UUID。
+// newUUID 生成随机 UUID v4（crypto/rand，跨平台安全随机；
+// 极低概率失败时回退到时间 + 线性同余，仅作兜底）。
 func newUUID() string {
 	var b [16]byte
-	if n, err := os.Open("/dev/urandom"); err == nil {
-		_, _ = n.Read(b[:])
-		_ = n.Close()
-	} else {
-		// Windows 回退：时间 + 随机
+	if _, err := rand.Read(b[:]); err != nil {
 		now := time.Now().UnixNano()
 		for i := 0; i < 8; i++ {
 			b[i] = byte(now >> (i * 8))

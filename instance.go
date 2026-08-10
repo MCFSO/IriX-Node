@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -122,6 +124,7 @@ func (d *Daemon) requireUuid(r *http.Request) (string, error) {
 
 // handleInstanceList 获取实例列表。
 // GET /api/service/remote_service_instances?daemonId&page&page_size&instance_name&status
+// 惰性分页：只构造当前页的实例详情，避免大实例数下全量序列化。
 func (d *Daemon) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(queryParam(r, "page"))
 	pageSize, _ := strconv.Atoi(queryParam(r, "page_size"))
@@ -134,40 +137,62 @@ func (d *Daemon) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 	nameFilter := queryParam(r, "instance_name")
 	statusFilter := queryParam(r, "status")
 
-	all := d.List()
-	filtered := make([]map[string]any, 0, len(all))
-	for _, item := range all {
-		cfg, _ := item["config"].(InstanceConfig)
-		if nameFilter != "" && !strings.Contains(cfg.Nickname, nameFilter) {
+	d.mu.Lock()
+	insts := make([]*Instance, len(d.Instances))
+	copy(insts, d.Instances)
+	d.mu.Unlock()
+
+	// 提取排序键（避免在排序回调中反复加锁）
+	type pair struct {
+		inst *Instance
+		ct   int64
+	}
+	pairs := make([]pair, 0, len(insts))
+	for _, inst := range insts {
+		inst.mu.Lock()
+		pairs = append(pairs, pair{inst, inst.Config.CreateDatetime})
+		inst.mu.Unlock()
+	}
+	sort.Slice(pairs, func(a, b int) bool { return pairs[a].ct < pairs[b].ct })
+
+	// 过滤
+	matched := make([]*Instance, 0, len(pairs))
+	for _, p := range pairs {
+		inst := p.inst
+		inst.mu.Lock()
+		nickname, status := inst.Config.Nickname, inst.Status
+		inst.mu.Unlock()
+		if nameFilter != "" && !strings.Contains(nickname, nameFilter) {
 			continue
 		}
-		if statusFilter != "" {
-			s, _ := item["status"].(int)
-			if strconv.Itoa(s) != statusFilter {
-				continue
-			}
+		if statusFilter != "" && strconv.Itoa(status) != statusFilter {
+			continue
 		}
-		filtered = append(filtered, item)
+		matched = append(matched, inst)
 	}
 
 	start := (page - 1) * pageSize
-	if start > len(filtered) {
-		start = len(filtered)
+	if start > len(matched) {
+		start = len(matched)
 	}
 	end := start + pageSize
-	if end > len(filtered) {
-		end = len(filtered)
+	if end > len(matched) {
+		end = len(matched)
 	}
 	maxPage := 1
-	if len(filtered) > 0 {
-		maxPage = (len(filtered) + pageSize - 1) / pageSize
+	if len(matched) > 0 {
+		maxPage = (len(matched) + pageSize - 1) / pageSize
+	}
+	pageItems := make([]map[string]any, 0, end-start)
+	for _, inst := range matched[start:end] {
+		pageItems = append(pageItems, inst.Detail())
 	}
 	writeOK(w, map[string]any{
 		"maxPage":  maxPage,
 		"pageSize": pageSize,
 		"page":     page,
-		"total":    len(filtered),
-		"data":     filtered[start:end],
+		"total":    len(matched),
+		"data":     pageItems,
 	})
 }
 
@@ -273,7 +298,7 @@ func (d *Daemon) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.stopInstance(uuid, false); err != nil {
+	if err := d.stopInstance(uuid); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -288,7 +313,7 @@ func (d *Daemon) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.stopInstance(uuid, true); err != nil {
+	if err := d.stopInstance(uuid); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -309,8 +334,19 @@ func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
 	}
 	inst := d.Find(uuid)
 	inst.SetStatus(StatusStopping)
-	if inst.Proc != nil && inst.Proc.IsRunning() {
-		if err := inst.Proc.Kill(); err != nil {
+	// 先解除进程引用再终止：防止退出监听 goroutine 误判为意外退出而触发 AutoRestart
+	inst.mu.Lock()
+	proc := inst.Proc
+	inst.Proc = nil
+	inst.mu.Unlock()
+	if proc != nil && proc.IsRunning() {
+		if err := proc.Kill(); err != nil {
+			// Kill 失败：恢复引用，保留现场
+			inst.mu.Lock()
+			if inst.Proc == nil {
+				inst.Proc = proc
+			}
+			inst.mu.Unlock()
 			inst.SetStatus(StatusStopped)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -411,20 +447,47 @@ func (d *Daemon) startInstance(uuid string) error {
 	inst.SetStatus(StatusRunning)
 	_ = d.Save()
 
-	// 监听进程退出
+	// 监听进程退出：意外退出且启用 AutoRestart 时自动重启（带防抖）
 	go func() {
 		<-proc.done
 		inst.mu.Lock()
-		if inst.Proc == proc {
+		wasProc := inst.Proc == proc
+		if wasProc {
 			inst.Status = StatusStopped
 		}
+		autoRestart := inst.Config.EventTask.AutoRestart
 		inst.mu.Unlock()
+		if wasProc && autoRestart {
+			d.autoRestart(inst)
+		}
 	}()
 	return nil
 }
 
-// stopInstance 停止实例；restarting 标记来自重启流程。
-func (d *Daemon) stopInstance(uuid string, restarting bool) error {
+// autoRestart 自动重启实例（防崩溃循环：10 秒窗口内最多 3 次）。
+func (d *Daemon) autoRestart(inst *Instance) {
+	inst.mu.Lock()
+	now := time.Now()
+	if now.Sub(inst.arWindowStart) > 10*time.Second {
+		inst.arWindowStart = now
+		inst.arAttempts = 0
+	}
+	inst.arAttempts++
+	if inst.arAttempts > 3 {
+		inst.arWindowStart = time.Time{}
+		inst.arAttempts = 0
+		log.Printf("实例 %s 10 秒内自动重启超过 3 次，已停止自动重启（可能陷入崩溃循环）", inst.InstanceUuid)
+		inst.mu.Unlock()
+		return
+	}
+	inst.mu.Unlock()
+	if err := d.startInstance(inst.InstanceUuid); err != nil {
+		log.Printf("自动重启实例 %s 失败: %v", inst.InstanceUuid, err)
+	}
+}
+
+// stopInstance 停止实例。
+func (d *Daemon) stopInstance(uuid string) error {
 	inst := d.Find(uuid)
 	if inst == nil {
 		return fmt.Errorf("实例不存在")
@@ -441,6 +504,7 @@ func (d *Daemon) stopInstance(uuid string, restarting bool) error {
 	inst.Busy = true
 	inst.Status = StatusStopping
 	proc := inst.Proc
+	inst.Proc = nil // 先解除引用再等待退出，防止误触发 AutoRestart
 	stopCmd := inst.Config.StopCommand
 	inst.mu.Unlock()
 	defer func() {
@@ -451,11 +515,6 @@ func (d *Daemon) stopInstance(uuid string, restarting bool) error {
 
 	err := proc.Stop(stopCmd, 30*time.Second)
 	inst.SetStatus(StatusStopped)
-	inst.mu.Lock()
-	if !restarting && inst.Proc == proc {
-		inst.Proc = nil
-	}
-	inst.mu.Unlock()
 	_ = d.Save()
 	return err
 }

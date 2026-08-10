@@ -51,6 +51,16 @@ func main() {
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
+	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）
+	for _, inst := range d.Instances {
+		if inst.Config.EventTask.AutoStart {
+			go func(uuid string) {
+				if err := d.startInstance(uuid); err != nil {
+					log.Printf("自动启动实例 %s 失败: %v", uuid, err)
+				}
+			}(inst.InstanceUuid)
+		}
+	}
 	if *apiKey == "" {
 		code, isNew, err := d.LoadPairing()
 		if err != nil {

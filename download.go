@@ -36,10 +36,25 @@ func NewTicketStore() *ticketStore {
 	return ts
 }
 
-// Create 创建票据，返回密码。
+// maxTickets 票据上限，防止恶意刷票据耗尽内存。
+const maxTickets = 10000
+
+// Create 创建票据，返回密码；票据已满时返回空字符串。
 func (ts *ticketStore) Create(uuid, cwd, dir string) string {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	if len(ts.tickets) >= maxTickets {
+		// 先尝试回收过期票据
+		now := time.Now()
+		for k, v := range ts.tickets {
+			if now.After(v.expires) {
+				delete(ts.tickets, k)
+			}
+		}
+		if len(ts.tickets) >= maxTickets {
+			return ""
+		}
+	}
 	password := newUUID()
 	ts.tickets[password] = &transferTicket{
 		uuid:    uuid,
@@ -104,6 +119,10 @@ func (d *Daemon) handleFileDownloadTicket(w http.ResponseWriter, r *http.Request
 		return
 	}
 	password := tickets.Create(uuid, cwd, "")
+	if password == "" {
+		writeError(w, http.StatusServiceUnavailable, "下载票据已满，请稍后重试")
+		return
+	}
 	writeOK(w, map[string]any{
 		"password": password,
 		"addr":     d.publicAddr(),
@@ -134,6 +153,10 @@ func (d *Daemon) handleFileUploadTicket(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	password := tickets.Create(uuid, cwd, dir)
+	if password == "" {
+		writeError(w, http.StatusServiceUnavailable, "上传票据已满，请稍后重试")
+		return
+	}
 	writeOK(w, map[string]any{
 		"password": password,
 		"addr":     d.publicAddr(),
