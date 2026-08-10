@@ -546,9 +546,15 @@ func TestAutoRestartKillNoRestart(t *testing.T) {
 }
 
 // TestPathSecurity 路径越界防护（安全可靠性）。
+// 注意：反斜杠与盘符路径仅在被视为目录分隔符的平台上构成越界，
+// 故 `..\x`、`C:/Windows` 只在 Windows 上断言被拒绝。
 func TestPathSecurity(t *testing.T) {
 	base := t.TempDir()
-	for _, target := range []string{"../x", "..\\x", "/..\\x", "a/../../b", "C:/Windows"} {
+	evil := []string{"../x", "a/../../b", "/../x"}
+	if runtime.GOOS == "windows" {
+		evil = append(evil, `..\x`, `/..\x`, "C:/Windows")
+	}
+	for _, target := range evil {
 		if _, err := NormalizePath(base, target); err == nil {
 			t.Errorf("路径 %q 应被拒绝", target)
 		}
