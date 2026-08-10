@@ -21,10 +21,20 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: Vet
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Test (race)
+        run: go test -race -count=1 ./...
       - name: Build
         run: go build -o irix-node .
 

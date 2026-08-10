@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -483,6 +484,42 @@ func (d *Daemon) autoRestart(inst *Instance) {
 	inst.mu.Unlock()
 	if err := d.startInstance(inst.InstanceUuid); err != nil {
 		log.Printf("自动重启实例 %s 失败: %v", inst.InstanceUuid, err)
+	}
+}
+
+// StopAll 关停所有运行中的实例（用于守护进程优雅退出）。
+// 并行执行：先按各自的停止命令优雅停止，超过 timeout 后强制终止，
+// 避免守护进程退出后留下无人管理的孤儿进程。
+func (d *Daemon) StopAll(timeout time.Duration) {
+	d.mu.Lock()
+	insts := make([]*Instance, len(d.Instances))
+	copy(insts, d.Instances)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, inst := range insts {
+		inst.mu.Lock()
+		proc := inst.Proc
+		// 提前解除引用：关停属于主动行为，不触发 AutoRestart
+		inst.Proc = nil
+		stopCmd := inst.Config.StopCommand
+		inst.mu.Unlock()
+		if proc == nil || !proc.IsRunning() {
+			continue
+		}
+		wg.Add(1)
+		go func(inst *Instance, proc *Process, stopCmd string) {
+			defer wg.Done()
+			log.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, inst.Config.Nickname)
+			if err := proc.Stop(stopCmd, timeout); err != nil {
+				log.Printf("停止实例 %s 失败: %v", inst.InstanceUuid, err)
+			}
+			inst.SetStatus(StatusStopped)
+		}(inst, proc, stopCmd)
+	}
+	wg.Wait()
+	if err := d.Save(); err != nil {
+		log.Printf("关停时保存实例状态失败: %v", err)
 	}
 }
 

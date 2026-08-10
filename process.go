@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -15,11 +14,14 @@ import (
 	"time"
 )
 
-// LogBuffer 线程安全的环形日志缓冲。
-// 最多保留 maxBytes 字节，超出后丢弃最旧的内容。
+// LogBuffer 线程安全的定容环形日志缓冲。
+// 最多保留 maxBytes 字节，超出后覆盖最旧的内容。
+// 底层为固定容量切片：容量不会超过 maxBytes（bytes.Buffer 的倍增扩容会
+// 达到上限的约两倍），Tail 只拷贝请求的字节数。
 type LogBuffer struct {
 	mu       sync.Mutex
-	buf      bytes.Buffer
+	buf      []byte // 环形数据区，len 为已用字节数，cap 不超过 maxBytes
+	start    int    // 最旧字节的下标（仅在缓冲写满后可能非 0）
 	maxBytes int
 }
 
@@ -31,34 +33,98 @@ func NewLogBuffer(maxBytes int) *LogBuffer {
 	return &LogBuffer{maxBytes: maxBytes}
 }
 
-// Write 实现 io.Writer。
+// Write 实现 io.Writer；写入量超过容量时只保留最后 maxBytes 字节。
 func (b *LogBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.buf.Len()+len(p) > b.maxBytes {
-		overflow := b.buf.Len() + len(p) - b.maxBytes
-		if overflow >= b.buf.Len() {
-			b.buf.Reset()
-		} else {
-			b.buf.Next(overflow)
+	total := len(p)
+
+	// 单次写入即超过容量：只保留尾部 maxBytes，缓冲整体重置
+	if len(p) >= b.maxBytes {
+		if cap(b.buf) < b.maxBytes {
+			b.buf = make([]byte, b.maxBytes)
+		}
+		b.buf = b.buf[:b.maxBytes]
+		copy(b.buf, p[len(p)-b.maxBytes:])
+		b.start = 0
+		return total, nil
+	}
+
+	// 未写满：按需扩容并追加
+	if len(b.buf) < b.maxBytes {
+		room := b.maxBytes - len(b.buf)
+		n := len(p)
+		if n > room {
+			n = room
+		}
+		b.growTo(len(b.buf) + n)
+		b.buf = append(b.buf, p[:n]...)
+		p = p[n:]
+		if len(p) == 0 {
+			return total, nil
 		}
 	}
-	n, err := b.buf.Write(p)
-	return n, err
+
+	// 已写满：从 start 处环形覆盖最旧内容
+	for len(p) > 0 {
+		n := copy(b.buf[b.start:], p)
+		p = p[n:]
+		b.start = (b.start + n) % len(b.buf)
+	}
+	return total, nil
+}
+
+// growTo 将容量扩到至少 need（倍增但不超过 maxBytes）。
+func (b *LogBuffer) growTo(need int) {
+	if cap(b.buf) >= need {
+		return
+	}
+	newCap := cap(b.buf)
+	if newCap == 0 {
+		newCap = 32 * 1024
+	}
+	for newCap < need {
+		newCap *= 2
+	}
+	if newCap > b.maxBytes {
+		newCap = b.maxBytes
+	}
+	grown := make([]byte, len(b.buf), newCap)
+	copy(grown, b.buf)
+	b.buf = grown
 }
 
 // Tail 返回日志尾部。sizeKB > 0 时截取最后 sizeKB KB 的内容。
 func (b *LogBuffer) Tail(sizeKB int) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	s := b.buf.String()
-	if sizeKB > 0 {
-		max := sizeKB * 1024
-		if len(s) > max {
-			s = s[len(s)-max:]
-		}
+	want := len(b.buf)
+	if sizeKB > 0 && sizeKB*1024 < want {
+		want = sizeKB * 1024
 	}
-	return s
+	if want == 0 {
+		return ""
+	}
+	// strings.Builder 直接产出字符串，避免「字节切片 + string 转换」的双份拷贝
+	var sb strings.Builder
+	sb.Grow(want)
+	// 逻辑顺序为 buf[start:] + buf[:start]，取其最后 want 字节
+	if want <= b.start {
+		// 全部落在 buf[:start] 的尾部
+		sb.Write(b.buf[b.start-want : b.start])
+		return sb.String()
+	}
+	fromFirst := want - b.start
+	sb.Write(b.buf[len(b.buf)-fromFirst:])
+	sb.Write(b.buf[:b.start])
+	return sb.String()
+}
+
+// Len 返回当前缓冲中的字节数。
+func (b *LogBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.buf)
 }
 
 // stdinPipe 进程标准输入写入器。

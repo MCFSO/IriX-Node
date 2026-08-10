@@ -8,14 +8,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -86,15 +91,59 @@ func main() {
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: logMiddleware(limitAPIBody(mux)),
+		// 只限制读取请求头与空闲连接：防 slowloris 占用连接。
+		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
 	log.Printf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
 	log.Printf("数据目录: %s", *dataDir)
 	log.Printf("监听地址: http://%s/api/overview", addr)
 	if *apiKey == "" {
 		log.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
-	if err := http.ListenAndServe(addr, logMiddleware(mux)); err != nil {
+
+	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程
+	stopped := make(chan struct{})
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		log.Printf("收到信号 %v，开始优雅关停…", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("HTTP 关停未在超时内完成: %v", err)
+		}
+		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
+		d.StopAll(30 * time.Second)
+		close(stopped)
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}
+	<-stopped
+	log.Printf("已退出")
+}
+
+// maxAPIBodyBytes API 请求体上限（不含 /upload/ 直连通道）。
+// 文件写入接口把整个正文读进内存并做 JSON 解码，无上限时单请求可放大数倍内存。
+const maxAPIBodyBytes = 16 << 20 // 16 MiB
+
+// limitAPIBody 为 /api/ 路由的请求体设置大小上限。
+// /upload/ 直连通道不限制：它通过 multipart 落盘，内存占用恒定。
+func limitAPIBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && strings.HasPrefix(r.URL.Path, "/api/") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // logMiddleware 记录所有 API 请求。

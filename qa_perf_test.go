@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -221,6 +222,40 @@ func BenchmarkJSONEncodeResponse(b *testing.B) {
 // 低层基准：工具函数
 // ---------------------------------------------------------------------------
 
+// BenchmarkFileWriteHandler 只测服务端写文件 handler 的分配（排除客户端构造开销）。
+// 用于验证流式解码相对 ReadAll+map 的内存收益。
+func BenchmarkFileWriteHandler(b *testing.B) {
+	for _, sizeKB := range []int{64, 1024, 8192} {
+		b.Run(fmt.Sprintf("payload=%dKB", sizeKB), func(b *testing.B) {
+			dir := b.TempDir()
+			d := NewDaemon(dir, "test-key")
+			inst := NewInstance("bench-uuid", InstanceConfig{Nickname: "bench", Cwd: dir})
+			d.Instances = append(d.Instances, inst)
+
+			payload, err := json.Marshal(map[string]any{
+				"target": "bench.bin",
+				"text":   strings.Repeat("A", sizeKB*1024),
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			url := "/api/files/?apikey=test-key&uuid=" + inst.InstanceUuid
+
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				req := httptest.NewRequest(http.MethodPut, url, bytes.NewReader(payload))
+				rec := httptest.NewRecorder()
+				d.handleFileReadWrite(rec, req)
+				if rec.Code != http.StatusOK {
+					b.Fatalf("HTTP %d", rec.Code)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkSplitCommand 命令行解析。
 func BenchmarkSplitCommand(b *testing.B) {
 	cmd := `java -Xmx2G -jar "server.jar" --nogui --named 'arg with space'`
@@ -328,8 +363,8 @@ func TestLargeLogTail(t *testing.T) {
 	for i := 0; i < 50000; i++ {
 		_, _ = buf.Write(line)
 	}
-	if buf.buf.Len() > 2*1024*1024 {
-		t.Fatalf("缓冲超限: %d", buf.buf.Len())
+	if buf.Len() > 2*1024*1024 {
+		t.Fatalf("缓冲超限: %d", buf.Len())
 	}
 	s := buf.Tail(2048)
 	if len(s) > 2048*1024 {

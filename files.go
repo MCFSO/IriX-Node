@@ -113,34 +113,36 @@ func (d *Daemon) handleFileReadWrite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 一次性读入后解码到类型化结构：比 map[string]any 少一层装箱，
+	// 也比 json.Decoder 少一轮内部缓冲倍增拷贝（实测大载荷分配更低）。
+	// text 用指针区分「未提供」（读取）与「提供空串」（写入空文件）。
+	defer r.Body.Close()
 	raw, err := io.ReadAll(r.Body)
-	_ = r.Body.Close()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "读取请求体失败: "+err.Error())
 		return
 	}
-	var body map[string]any
+	var body struct {
+		Target string  `json:"target"`
+		Text   *string `json:"text"`
+	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	target, _ := body["target"].(string)
-	path, err := NormalizePath(cwd, target)
+	raw = nil // 尽早允许回收请求体副本
+	path, err := NormalizePath(cwd, body.Target)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if text, hasText := body["text"]; hasText {
-		content := ""
-		if text != nil {
-			content, _ = text.(string)
-		}
+	if body.Text != nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(*body.Text), 0o644); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

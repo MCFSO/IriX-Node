@@ -41,6 +41,11 @@ func newTestServer(d *Daemon) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// newTestServerWithHandler 用指定 handler 启动 httptest 服务器（用于测试中间件）。
+func newTestServerWithHandler(h http.Handler) *httptest.Server {
+	return httptest.NewServer(h)
+}
+
 // doReq 发起带 apikey 的请求并读取响应。
 func doReq(t *testing.T, url string) (int, []byte) {
 	t.Helper()
@@ -187,6 +192,66 @@ func TestConcurrentReads(t *testing.T) {
 	wg.Wait()
 }
 
+// TestLogBufferSemantics 环形缓冲的顺序、截断与 Tail 边界语义。
+func TestLogBufferSemantics(t *testing.T) {
+	// 未写满：Tail 返回全部且保持顺序
+	b := NewLogBuffer(100)
+	b.Write([]byte("abc"))
+	b.Write([]byte("def"))
+	if got := b.Tail(0); got != "abcdef" {
+		t.Fatalf("未写满时 Tail 应为 abcdef，实际 %q", got)
+	}
+	if b.Len() != 6 {
+		t.Fatalf("Len 应为 6，实际 %d", b.Len())
+	}
+
+	// 写满并覆盖：只保留最后 maxBytes 字节，顺序正确
+	b2 := NewLogBuffer(10)
+	for i := 0; i < 6; i++ {
+		b2.Write([]byte("ab")) // 共 12 字节
+	}
+	if b2.Len() != 10 {
+		t.Fatalf("写满后 Len 应为 10，实际 %d", b2.Len())
+	}
+	if got := b2.Tail(0); got != "ababababab" {
+		t.Fatalf("覆盖后内容应为 ababababab，实际 %q", got)
+	}
+
+	// 覆盖后顺序仍为写入顺序
+	b3 := NewLogBuffer(5)
+	b3.Write([]byte("12345"))
+	b3.Write([]byte("67"))
+	if got := b3.Tail(0); got != "34567" {
+		t.Fatalf("覆盖后应保留最后 5 字节 34567，实际 %q", got)
+	}
+
+	// 单次写入超过容量：只保留尾部
+	b4 := NewLogBuffer(4)
+	b4.Write([]byte("abcdefgh"))
+	if got := b4.Tail(0); got != "efgh" {
+		t.Fatalf("超长写入应保留尾部 efgh，实际 %q", got)
+	}
+
+	// Tail 截断：只返回请求的字节数
+	b5 := NewLogBuffer(4096)
+	b5.Write([]byte(strings.Repeat("z", 3000)))
+	if got := b5.Tail(1); len(got) != 1024 {
+		t.Fatalf("Tail(1) 应返回 1024 字节，实际 %d", len(got))
+	}
+
+	// 覆盖状态下的 Tail 截断（跨环形边界）
+	b6 := NewLogBuffer(8)
+	b6.Write([]byte("12345678"))
+	b6.Write([]byte("9A")) // 逻辑内容 3456789A
+	if got := b6.Tail(0); got != "3456789A" {
+		t.Fatalf("跨边界内容应为 3456789A，实际 %q", got)
+	}
+	// 容量绝不超过 maxBytes
+	if cap(b6.buf) > 8 {
+		t.Fatalf("容量应不超过 maxBytes，实际 cap=%d", cap(b6.buf))
+	}
+}
+
 // TestConcurrentLogBuffer 并发写读日志环形缓冲。
 func TestConcurrentLogBuffer(t *testing.T) {
 	buf := NewLogBuffer(64 * 1024)
@@ -209,8 +274,8 @@ func TestConcurrentLogBuffer(t *testing.T) {
 		}
 	}()
 	wg.Wait()
-	if buf.buf.Len() > 64*1024 {
-		t.Errorf("缓冲超过上限: %d", buf.buf.Len())
+	if buf.Len() > 64*1024 {
+		t.Errorf("缓冲超过上限: %d", buf.Len())
 	}
 }
 
