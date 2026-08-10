@@ -319,13 +319,21 @@ func TestUploadFilenameTraversal(t *testing.T) {
 				os.Remove(probe)
 			}
 		}
-		// 落点必须在上传目录内（Go 的 multipart 对 filename 取 basename，
-		// 这里显式断言该保证，避免日后依赖被打破而无人察觉）
-		landed := filepath.Join(e.cwd, "uploads", "escaped.txt")
-		if _, err := os.Stat(landed); err != nil {
-			t.Errorf("文件名 %q 上传后未落在上传目录内（预期 %s）: %v", name, landed, err)
-		} else {
-			os.Remove(landed)
+		// 落点必须在上传目录内。注意：文件名被 sanitize 成什么随 Go 版本而异
+		// （go1.24 只剥 '/'，go1.26 起也剥 '\'），因此不断言具体文件名，
+		// 只断言「内容落进了 uploads 目录、且绝未逃出 cwd」。
+		uploadDir := filepath.Join(e.cwd, "uploads")
+		entries, _ := os.ReadDir(uploadDir)
+		found := false
+		for _, ent := range entries {
+			if ent.IsDir() {
+				continue
+			}
+			found = true
+			os.Remove(filepath.Join(uploadDir, ent.Name()))
+		}
+		if !found {
+			t.Errorf("文件名 %q 上传后未落在上传目录内（%s）", name, uploadDir)
 		}
 	}
 }

@@ -636,6 +636,15 @@ func TestPathSecurity(t *testing.T) {
 	if p, err := NormalizePath(base, base); err != nil || p != base {
 		t.Errorf("cwd 本身应被接受: %v %v", p, err)
 	}
+	// cwd 内子目录的绝对路径应原样接受
+	subAbs := filepath.Join(base, "sub")
+	if p, err := NormalizePath(base, subAbs); err != nil || filepath.Clean(p) != subAbs {
+		t.Errorf("cwd 内子目录绝对路径应被接受: %v %v", p, err)
+	}
+	// 单独的 "/" 表示 cwd 根
+	if p, err := NormalizePath(base, "/"); err != nil || filepath.Clean(p) != filepath.Clean(base) {
+		t.Errorf("/ 应解析为 cwd: %v %v", p, err)
+	}
 	if runtime.GOOS == "windows" {
 		if _, err := NormalizePath(base, `C:\x`); err == nil {
 			t.Errorf("盘符路径越界应被拒绝")
