@@ -161,15 +161,21 @@ const Version = "1.0.0"
 
 // NormalizePath 将 API 传入的路径规范化为相对目录的绝对路径。
 //
-// 路径以 '/' 开头表示实例工作目录（cwd）的根；Windows 盘符路径（如 C:\x）
-// 直接使用。任何试图逃逸 cwd 的路径（.. 越界）都会被拒绝。
+// 路径以 '/' 开头表示实例工作目录（cwd）的根（跨平台一致）；
+// 仅 Windows 盘符绝对路径（如 C:\x）按原样使用。
+// 任何试图逃逸 cwd 的路径（.. 越界）都会被拒绝。
 func NormalizePath(cwd, target string) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return cwd, nil
 	}
 	var full string
-	if filepath.IsAbs(target) {
+	// Windows 盘符绝对路径（C:\x 或 C:/x）按原样使用；
+	// 其余路径一律与 cwd 拼接。特别地，Unix 上以 / 开头的路径
+	// （如 /uploads）因此被解释为 cwd 根下的相对路径，
+	// 而不是文件系统绝对路径——与 Windows 行为一致。
+	if runtime.GOOS == "windows" && len(target) >= 3 && target[1] == ':' &&
+		(target[2] == '/' || target[2] == '\\') {
 		full = filepath.Clean(target)
 	} else {
 		full = filepath.Clean(filepath.Join(cwd, target))

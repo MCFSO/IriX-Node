@@ -627,6 +627,20 @@ func TestPathSecurity(t *testing.T) {
 	if p, err := NormalizePath(base, "sub/file.txt"); err != nil || !strings.HasPrefix(p, base) {
 		t.Errorf("合法路径被误拒绝: %v %v", p, err)
 	}
+	// 以 / 开头表示 cwd 根（跨平台一致）：/uploads 应解析到 cwd/uploads
+	p, err := NormalizePath(base, "/uploads")
+	if err != nil || filepath.Clean(p) != filepath.Join(base, "uploads") {
+		t.Errorf("/ 前缀应解析为 cwd 根下路径: %v %v", p, err)
+	}
+	// cwd 本身及其绝对路径（Windows 盘符路径）也应被接受
+	if p, err := NormalizePath(base, base); err != nil || p != base {
+		t.Errorf("cwd 本身应被接受: %v %v", p, err)
+	}
+	if runtime.GOOS == "windows" {
+		if _, err := NormalizePath(base, `C:\x`); err == nil {
+			t.Errorf("盘符路径越界应被拒绝")
+		}
+	}
 }
 
 // TestHTTPRoutes 全路由冒烟：每个端点至少返回 200 且 JSON 合法（高可靠性巡检）。
