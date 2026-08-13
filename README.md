@@ -20,6 +20,8 @@ go build -o irix-node .
 | `-port` | HTTP 监听端口 | `12346` |
 | `-data` | 数据目录（实例配置 instances.json 与配对码 auth.hash 存放于此） | 当前目录 |
 | `-apikey` | 固定 API 密钥；留空则启用配对码机制 | 空 |
+| `-audit-log` | 将用户操作审计日志落盘到 `{data}/logs/audit.log` | 开启 |
+| `-audit-log-max` | 审计日志单文件轮转上限（MB，超过后轮转为 `.1`） | `64` |
 
 不指定 `-apikey` 时启用**配对码机制**：
 
@@ -37,6 +39,9 @@ go build -o irix-node .
   命令下发（标准输入），输出日志（环形缓冲）。
 - **文件管理**：列表 / 读写 / 删除 / 移动 / 复制 / 压缩 / 解压 / 新建目录 /
   新建文件，以及带票据的下载 / 上传直连通道。
+- **审计日志**：每次 API 请求（时间、来源 IP、方法、路径与参数、状态码、耗时、
+  请求体）落盘到 `{data}/logs/audit.log`，`apikey` 自动打码；下载/上传直连通道
+  同样在审计范围内。
 - 实例配置与状态持久化在 `{data}/instances.json`。
 
 ## 数据目录结构
@@ -45,6 +50,8 @@ go build -o irix-node .
 {data}/
   instances.json   # 实例配置列表
   auth.hash        # 配对码 SHA-256 哈希（首次启动生成）
+  logs/            # 实例日志 {uuid}.log（-instance-log 开启时）
+                   # 审计日志 audit.log（-audit-log 开启时）
 ```
 
 ## 安全说明

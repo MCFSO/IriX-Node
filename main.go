@@ -30,6 +30,8 @@ func main() {
 		apiKey        = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 		instanceLog   = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
 		instanceLogMB = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
+		auditLog      = flag.Bool("audit-log", true, "将用户操作审计日志异步落盘到 {data}/logs/audit.log（记录每次 API 请求的完整细节）")
+		auditLogMB    = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -40,6 +42,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
 	}
 	flag.Parse()
 
@@ -56,9 +59,13 @@ func main() {
 
 	d := NewDaemon(*dataDir, *apiKey)
 	d.Port = *port
+	logDir := filepath.Join(*dataDir, "logs")
 	if *instanceLog {
-		d.LogDir = filepath.Join(*dataDir, "logs")
+		d.LogDir = logDir
 		d.LogMaxBytes = int64(*instanceLogMB) << 20
+	}
+	if *auditLog {
+		d.AuditLog = newFileLogger(logDir, "audit.log", int64(*auditLogMB)<<20)
 	}
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
@@ -103,18 +110,21 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: logMiddleware(limitAPIBody(mux)),
+		Handler: d.auditMiddleware(limitAPIBody(mux)),
 		// 只限制读取请求头与空闲连接：防 slowloris 占用连接。
 		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	alog.Printf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
-	alog.Printf("数据目录: %s", *dataDir)
-	alog.Printf("监听地址: http://%s/api/overview", addr)
+	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
+	d.auditLogf("数据目录: %s", *dataDir)
+	d.auditLogf("监听地址: http://%s/api/overview", addr)
 	if d.LogDir != "" {
 		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, *instanceLogMB)
+	}
+	if d.AuditLog != nil {
+		alog.Printf("审计日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", filepath.Join(logDir, "audit.log"), *auditLogMB)
 	}
 	if *apiKey == "" {
 		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
@@ -141,8 +151,11 @@ func main() {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}
 	<-stopped
-	alog.Printf("已退出")
-	// 排空异步日志后退出（等待全部日志写出）
+	d.auditLogf("已退出")
+	// 先排空审计落盘，再排空 stderr 异步日志，等待全部日志写出后退出
+	if d.AuditLog != nil {
+		d.AuditLog.Close()
+	}
 	alog.Close()
 }
 
@@ -157,16 +170,6 @@ func limitAPIBody(next http.Handler) http.Handler {
 		if r.Body != nil && strings.HasPrefix(r.URL.Path, "/api/") {
 			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
 		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// logMiddleware 记录所有 API 请求（异步写入，不阻塞请求路径）。
-func logMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			alog.Printf("%s %s", r.Method, r.URL.Path)
-		}()
 		next.ServeHTTP(w, r)
 	})
 }

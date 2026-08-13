@@ -188,8 +188,9 @@ type Daemon struct {
 	Instances   []*Instance
 	StartedAt   time.Time
 
-	LogDir      string // 实例日志落盘目录（空 = 不落盘）
-	LogMaxBytes int64  // 单实例日志文件轮转上限（字节）
+	LogDir      string      // 实例日志落盘目录（空 = 不落盘）
+	LogMaxBytes int64       // 单实例日志文件轮转上限（字节）
+	AuditLog    *fileLogger // 审计日志落盘器（nil = 未启用 -audit-log=false）
 }
 
 // NewDaemon 创建守护进程实例。
