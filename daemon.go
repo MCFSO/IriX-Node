@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -184,21 +183,34 @@ type Daemon struct {
 	APIKey      string
 	PairingHash string
 	Port        int
+	BindHost    string // 实际监听主机（空 = 127.0.0.1），决定下载/上传直连地址
 	UUID        string
 	Instances   []*Instance
 	StartedAt   time.Time
+
+	LogDir      string // 实例日志落盘目录（空 = 不落盘）
+	LogMaxBytes int64  // 单实例日志文件轮转上限（字节）
 }
 
 // NewDaemon 创建守护进程实例。
 func NewDaemon(dataDir, apiKey string) *Daemon {
 	return &Daemon{
-		DataDir:   dataDir,
-		APIKey:    apiKey,
-		Port:      12346,
-		UUID:      newUUID(),
-		Instances: []*Instance{},
-		StartedAt: time.Now(),
+		DataDir:     dataDir,
+		APIKey:      apiKey,
+		Port:        12346,
+		UUID:        newUUID(),
+		Instances:   []*Instance{},
+		StartedAt:   time.Now(),
+		LogMaxBytes: 64 << 20, // 默认 64MB
 	}
+}
+
+// logConfig 返回实例日志落盘配置；LogDir 为空时返回 nil（不落盘）。
+func (d *Daemon) logConfig() *logConfig {
+	if d.LogDir == "" {
+		return nil
+	}
+	return &logConfig{dir: d.LogDir, maxSize: d.LogMaxBytes}
 }
 
 // instanceFile 实例配置持久化文件路径。
@@ -223,7 +235,7 @@ func (d *Daemon) Load() error {
 		if rerr := os.Rename(d.instanceFile(), backup); rerr != nil {
 			return fmt.Errorf("解析 instances.json 失败: %w（备份损坏文件也失败: %v）", err, rerr)
 		}
-		log.Printf("警告: instances.json 损坏（%v），已备份到 %s，按空列表继续启动", err, backup)
+		alog.Printf("警告: instances.json 损坏（%v），已备份到 %s，按空列表继续启动", err, backup)
 		return nil
 	}
 	d.mu.Lock()
@@ -237,7 +249,7 @@ func (d *Daemon) Load() error {
 }
 
 // Save 将实例配置持久化到磁盘。
-// 原子写：先写临时文件再 rename，避免崩溃产生半截 JSON；
+// 原子写：先写临时文件、fsync 落盘，再 rename，避免崩溃产生半截 JSON；
 // saveMu 串行化保证并发 Save 不会互相覆盖。
 func (d *Daemon) Save() error {
 	d.saveMu.Lock()
@@ -261,7 +273,24 @@ func (d *Daemon) Save() error {
 		return err
 	}
 	tmp := d.instanceFile() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 不用 os.WriteFile：必须 fsync 后再 rename，
+	// 否则崩溃/掉电时可能只有 rename 生效而数据仍在页缓存中丢失。
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, d.instanceFile())
@@ -287,22 +316,20 @@ func (d *Daemon) Add(inst *Instance) error {
 	return d.Save()
 }
 
-// Update 更新实例配置并持久化。
-func (d *Daemon) Update(uuid string, cfg InstanceConfig) (*Instance, error) {
-	inst := d.Find(uuid)
+// UpdateInstance 更新实例配置并持久化。
+// 传入已解析的实例指针，避免「查找—使用」之间实例被并发删除。
+func (d *Daemon) UpdateInstance(inst *Instance, cfg InstanceConfig) error {
 	if inst == nil {
-		return nil, fmt.Errorf("实例不存在: %s", uuid)
+		return fmt.Errorf("实例不存在")
 	}
 	cfg.FillDefaults()
+	inst.mu.Lock()
+	// CreateDatetime 必须在锁内读取：与并发 Update/Save 竞争
 	cfg.CreateDatetime = inst.Config.CreateDatetime
 	cfg.LastDatetime = time.Now().UnixMilli()
-	inst.mu.Lock()
 	inst.Config = cfg
 	inst.mu.Unlock()
-	if err := d.Save(); err != nil {
-		return nil, err
-	}
-	return inst, nil
+	return d.Save()
 }
 
 // Remove 删除实例；deleteFiles 为 true 时同时删除工作目录。
@@ -311,8 +338,12 @@ func (d *Daemon) Remove(uuid string, deleteFiles bool) error {
 	if inst == nil {
 		return fmt.Errorf("实例不存在: %s", uuid)
 	}
-	if inst.Proc != nil && inst.Status != StatusStopped {
-		if err := inst.Proc.Kill(); err != nil {
+	// Proc/Status/Cwd 均须在锁内读取（AGENTS.md 约定）
+	inst.mu.Lock()
+	proc, status, cwd := inst.Proc, inst.Status, inst.Config.Cwd
+	inst.mu.Unlock()
+	if proc != nil && status != StatusStopped {
+		if err := proc.Kill(); err != nil {
 			return fmt.Errorf("终止进程失败: %w", err)
 		}
 	}
@@ -325,8 +356,8 @@ func (d *Daemon) Remove(uuid string, deleteFiles bool) error {
 	}
 	d.mu.Unlock()
 
-	if deleteFiles && inst.Config.Cwd != "" {
-		_ = os.RemoveAll(inst.Config.Cwd)
+	if deleteFiles && cwd != "" {
+		_ = os.RemoveAll(cwd)
 	}
 	return d.Save()
 }
@@ -338,12 +369,22 @@ func (d *Daemon) List() []map[string]any {
 	copy(insts, d.Instances)
 	d.mu.Unlock()
 
-	sort.Slice(insts, func(a, b int) bool {
-		return insts[a].Config.CreateDatetime < insts[b].Config.CreateDatetime
-	})
-	out := make([]map[string]any, 0, len(insts))
+	// 排序键在锁内取出：排序回调里直接读 Config 与并发 Update 竞争
+	type pair struct {
+		inst *Instance
+		ct   int64
+	}
+	pairs := make([]pair, 0, len(insts))
 	for _, inst := range insts {
-		out = append(out, inst.Detail())
+		inst.mu.Lock()
+		pairs = append(pairs, pair{inst, inst.Config.CreateDatetime})
+		inst.mu.Unlock()
+	}
+	sort.Slice(pairs, func(a, b int) bool { return pairs[a].ct < pairs[b].ct })
+
+	out := make([]map[string]any, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, p.inst.Detail())
 	}
 	return out
 }
@@ -369,10 +410,13 @@ func (d *Daemon) CwdOf(uuid string) (string, error) {
 	if inst == nil {
 		return "", fmt.Errorf("实例不存在: %s", uuid)
 	}
-	if inst.Config.Cwd == "" {
+	inst.mu.Lock()
+	cwd := inst.Config.Cwd
+	inst.mu.Unlock()
+	if cwd == "" {
 		return "", fmt.Errorf("实例工作目录为空")
 	}
-	return inst.Config.Cwd, nil
+	return cwd, nil
 }
 
 // newUUID 生成随机 UUID v4（crypto/rand，跨平台安全随机；

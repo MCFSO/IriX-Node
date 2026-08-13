@@ -7,9 +7,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -195,7 +197,18 @@ func (d *Daemon) handleDirectUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "上传票据无效或已过期", http.StatusForbidden)
 		return
 	}
-	r.ParseMultipartForm(32 << 20)
+	// ParseMultipartForm 的错误必须处理：吞掉后只会报「缺少 file 字段」，
+	// 掩盖真实原因（非 multipart、边界损坏、超限等）。
+	// 32MB 为内存阈值，超出部分由标准库落临时文件，内存占用恒定。
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "解析上传表单失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll() // 清理标准库落盘的临时文件
+		}
+	}()
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "缺少 file 字段: "+err.Error(), http.StatusBadRequest)
@@ -203,7 +216,13 @@ func (d *Daemon) handleDirectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	dest, err := NormalizePath(t.dir, header.Filename)
+	// 只取文件名，丢弃客户端可能携带的路径部分，再做越界校验
+	name := filepath.Base(filepath.FromSlash(header.Filename))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		http.Error(w, "文件名无效", http.StatusBadRequest)
+		return
+	}
+	dest, err := NormalizePath(t.dir, name)
 	if err != nil {
 		http.Error(w, "路径越界", http.StatusForbidden)
 		return
@@ -223,6 +242,34 @@ func (d *Daemon) handleDirectUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 // publicAddr 返回票据中使用的地址（客户端据此拼接下载/上传 URL）。
+// 绑定 0.0.0.0 时不能写死 127.0.0.1，否则远端客户端拿到的直连地址不可用；
+// 此时返回本机对外 IP，取不到则退回主机名占位。
 func (d *Daemon) publicAddr() string {
-	return fmt.Sprintf("127.0.0.1:%d", d.Port)
+	host := d.BindHost
+	if host == "" || host == "127.0.0.1" || host == "localhost" {
+		return fmt.Sprintf("127.0.0.1:%d", d.Port)
+	}
+	if host == "0.0.0.0" || host == "::" || host == "[::]" {
+		if ip := outboundIP(); ip != "" {
+			return net.JoinHostPort(ip, strconv.Itoa(d.Port))
+		}
+		if name, err := os.Hostname(); err == nil && name != "" {
+			return net.JoinHostPort(name, strconv.Itoa(d.Port))
+		}
+		return fmt.Sprintf("127.0.0.1:%d", d.Port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(d.Port))
+}
+
+// outboundIP 探测本机对外 IPv4 地址（不产生实际流量，UDP 仅做路由选择）。
+func outboundIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP != nil {
+		return addr.IP.String()
+	}
+	return ""
 }

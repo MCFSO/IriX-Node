@@ -102,6 +102,11 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxTextReadBytes 文本读取接口的单文件上限。
+// 文件内容会整体进内存并转成 string 后再 JSON 编码，必须设上限防止 OOM；
+// 超限文件应走 /api/files/download 票据通道（流式，内存恒定）。
+const maxTextReadBytes = 8 << 20 // 8 MiB
+
 // handleFileReadWrite 读取或写入文件内容。
 // PUT /api/files/?daemonId&uuid  body: {target, text?}
 //   - 仅含 target：读取文件内容，返回字符串
@@ -150,6 +155,23 @@ func (d *Daemon) handleFileReadWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 读取前先查大小：整个文件会被读进内存并转成 string（约两倍占用），
+	// 无上限时单个大文件即可打爆守护进程内存。
+	info, err := os.Stat(path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "读取文件失败: "+err.Error())
+		return
+	}
+	if info.IsDir() {
+		writeError(w, http.StatusBadRequest, "目标为目录，无法按文本读取")
+		return
+	}
+	if info.Size() > maxTextReadBytes {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"文件过大（%s），文本读取上限为 %s，请改用下载接口",
+			FormatSize(info.Size()), FormatSize(maxTextReadBytes)))
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "读取文件失败: "+err.Error())

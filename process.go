@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,13 +160,23 @@ type Process struct {
 	cmd      *exec.Cmd
 	Log      *LogBuffer
 	Stdin    *stdinPipe
+	log      *fileLogger // 异步落盘（可能为 nil）
 	started  time.Time
 	exitCode int
 	done     chan struct{}
 }
 
+// logConfig 实例日志落盘配置；Dir 为空时表示不落盘。
+type logConfig struct {
+	dir     string // 日志目录（如 {data}/logs）
+	name    string // 日志文件名（如 {uuid}.log，用 uuid 避免不同实例 cwd 同名冲突）
+	maxSize int64  // 单文件轮转上限（字节），<=0 取默认
+}
+
 // startProcess 启动进程，cwd 必须存在。
-func startProcess(startCommand, cwd string) (*Process, error) {
+// logConf 为 nil 时不落盘实例日志；否则 stdout/stderr 在写入内存
+// 环形缓冲的同时异步镜像到 {dir}/{uuid}.log（尽力而为，不阻塞进程）。
+func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error) {
 	args := SplitCommand(startCommand)
 	if len(args) == 0 {
 		return nil, fmt.Errorf("启动命令为空")
@@ -195,19 +206,44 @@ func startProcess(startCommand, cwd string) (*Process, error) {
 	}
 
 	logBuf := NewLogBuffer(0)
+	var fl *fileLogger
+	if logConf != nil && logConf.dir != "" {
+		if err := os.MkdirAll(logConf.dir, 0o755); err != nil {
+			// 日志目录创建失败：降级为纯内存缓冲，不阻断启动
+			log.Printf("警告: 创建日志目录 %s 失败（%v），本次运行不落盘", logConf.dir, err)
+		} else {
+			name := logConf.name
+			if name == "" {
+				name = filepath.Base(cwd) + ".log"
+			}
+			fl = newFileLogger(logConf.dir, name, logConf.maxSize)
+		}
+	}
 	proc := &Process{
 		cmd:     cmd,
 		Log:     logBuf,
 		Stdin:   &stdinPipe{pipe: stdin},
+		log:     fl,
 		started: time.Now(),
 		done:    make(chan struct{}),
 	}
 
-	go func() { _, _ = io.Copy(logBuf, stdout) }()
-	go func() { _, _ = io.Copy(logBuf, stderr) }()
+	// 双 io.Copy：输出同时进内存环形缓冲与异步落盘（fl 为 nil 时仅内存）。
+	// copyDone 计数两个复制 goroutine 的结束，供退出时等待日志完整落盘。
+	copyDone := make(chan struct{}, 2)
+	if fl != nil {
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl), stdout); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl), stderr); copyDone <- struct{}{} }()
+	} else {
+		go func() { _, _ = io.Copy(logBuf, stdout); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(logBuf, stderr); copyDone <- struct{}{} }()
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
+		if fl != nil {
+			fl.Close()
+		}
 		return nil, err
 	}
 
@@ -222,6 +258,23 @@ func startProcess(startCommand, cwd string) (*Process, error) {
 			}
 		}
 		proc.Stdin.Close()
+		// 等输出复制结束（含超时兜底：孙进程继承 fd 时管道可能不关闭，
+		// 不能让 done 永久不关闭导致 IsRunning 永远为 true）
+		timer := time.NewTimer(3 * time.Second)
+		for i := 0; i < 2; i++ {
+			select {
+			case <-copyDone:
+				// 已结束一个复制，继续等另一个（可能落在超时之后）
+			case <-timer.C:
+				// 超时：放弃等待，日志尾部可能缺失（尽力而为，不阻塞退出）
+				goto copiesDone
+			}
+		}
+	copiesDone:
+		timer.Stop()
+		if fl != nil {
+			fl.Close() // 排空并落盘剩余日志
+		}
 		close(proc.done)
 	}()
 

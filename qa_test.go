@@ -23,6 +23,19 @@ import (
 	"time"
 )
 
+// testClient 压测与冒烟共用的 HTTP 客户端：大连接池复用，避免 Windows 下
+// 高并发短连接把 TIME_WAIT 端口池打满（报 "Only one usage of each socket
+// address"）；http.DefaultClient 默认 MaxIdleConnsPerHost=2 不满足压测场景。
+var testClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: func() *http.Transport {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxIdleConns = 256
+		tr.MaxIdleConnsPerHost = 64
+		return tr
+	}(),
+}
+
 // newTestDaemon 创建临时数据目录的守护进程（配对码已就绪，认证关闭路径不测）。
 func newTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
@@ -53,7 +66,7 @@ func doReq(t *testing.T, url string) (int, []byte) {
 	if err != nil {
 		t.Fatalf("构造请求失败: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := testClient.Do(req)
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}
@@ -532,7 +545,7 @@ func TestAutoRestartCrashLoop(t *testing.T) {
 		EventTask:    EventTask{AutoRestart: true},
 	})
 	d.Instances = append(d.Instances, inst)
-	if err := d.startInstance(inst.InstanceUuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
 	}
 	// 等待防抖停止
@@ -569,7 +582,7 @@ func TestAutoRestartKillNoRestart(t *testing.T) {
 		EventTask:    EventTask{AutoRestart: true},
 	})
 	d.Instances = append(d.Instances, inst)
-	if err := d.startInstance(inst.InstanceUuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
 	}
 	// 等待进入运行态
@@ -710,7 +723,7 @@ type loadResult struct {
 
 func runLoad(t *testing.T, url string, concurrency, requests int) loadResult {
 	t.Helper()
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := testClient
 	var wg sync.WaitGroup
 	start := time.Now()
 	res := loadResult{}
@@ -746,6 +759,10 @@ func runLoad(t *testing.T, url string, concurrency, requests int) loadResult {
 					} else if resp.StatusCode >= 500 {
 						res.status5x++
 					}
+					// 必须读完响应体再关闭，连接才能归还连接池复用；
+					// 直接 Close 未读完的 body 会让每个请求都新建连接，
+					// Windows 下 TIME_WAIT 端口池会被打满
+					_, _ = io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 				}
 				mu.Unlock()
@@ -888,7 +905,7 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 				if err != nil {
 					continue
 				}
-				resp, err := http.DefaultClient.Do(req)
+				resp, err := testClient.Do(req)
 				if err != nil {
 					atomic.AddInt32(&errCount, 1)
 					continue
@@ -953,7 +970,7 @@ func TestLongRunStability(t *testing.T) {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			client := &http.Client{Timeout: 10 * time.Second}
+			client := testClient
 			for time.Now().Before(end) {
 				var url string
 				switch w % 4 {

@@ -25,9 +25,11 @@ import (
 
 func main() {
 	var (
-		port    = flag.Int("port", 12346, "监听端口")
-		dataDir = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
-		apiKey  = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
+		port          = flag.Int("port", 12346, "监听端口")
+		dataDir       = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
+		apiKey        = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
+		instanceLog   = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
+		instanceLogMB = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -37,6 +39,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
 	}
 	flag.Parse()
 
@@ -53,17 +56,21 @@ func main() {
 
 	d := NewDaemon(*dataDir, *apiKey)
 	d.Port = *port
+	if *instanceLog {
+		d.LogDir = filepath.Join(*dataDir, "logs")
+		d.LogMaxBytes = int64(*instanceLogMB) << 20
+	}
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
 	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）
 	for _, inst := range d.Instances {
 		if inst.Config.EventTask.AutoStart {
-			go func(uuid string) {
-				if err := d.startInstance(uuid); err != nil {
-					log.Printf("自动启动实例 %s 失败: %v", uuid, err)
+			go func(inst *Instance) {
+				if err := d.startInstance(inst); err != nil {
+					alog.Printf("自动启动实例 %s 失败: %v", inst.InstanceUuid, err)
 				}
-			}(inst.InstanceUuid)
+			}(inst)
 		}
 	}
 	if *apiKey == "" {
@@ -72,21 +79,24 @@ func main() {
 			log.Fatalf("初始化配对码失败: %v", err)
 		}
 		if isNew {
-			log.Printf("======================================================")
-			log.Printf("首次启动：已生成配对码（仅此一次显示，请立即记录）")
-			log.Printf("")
-			log.Printf("  配对码: %s", code)
-			log.Printf("")
-			log.Printf("后续所有 API 请求必须携带配对码：")
-			log.Printf("  ?apikey=%s 或请求头 X-Api-Key: %s", code, code)
-			log.Printf("======================================================")
+			alog.Printf("======================================================")
+			alog.Printf("首次启动：已生成配对码（仅此一次显示，请立即记录）")
+			alog.Printf("")
+			alog.Printf("  配对码: %s", code)
+			alog.Printf("")
+			alog.Printf("后续所有 API 请求必须携带配对码：")
+			alog.Printf("  ?apikey=%s 或请求头 X-Api-Key: %s", code, code)
+			alog.Printf("======================================================")
 		}
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", *port)
+	bindHost := "127.0.0.1"
 	if strings.EqualFold(os.Getenv("IRIX_NODE_BIND_ALL"), "1") {
-		addr = fmt.Sprintf("0.0.0.0:%d", *port)
+		bindHost = "0.0.0.0"
 	}
+	// 记录实际监听主机：下载/上传票据据此生成客户端可达的直连地址
+	d.BindHost = bindHost
+	addr := fmt.Sprintf("%s:%d", bindHost, *port)
 
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
@@ -100,11 +110,14 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
-	log.Printf("数据目录: %s", *dataDir)
-	log.Printf("监听地址: http://%s/api/overview", addr)
+	alog.Printf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
+	alog.Printf("数据目录: %s", *dataDir)
+	alog.Printf("监听地址: http://%s/api/overview", addr)
+	if d.LogDir != "" {
+		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, *instanceLogMB)
+	}
 	if *apiKey == "" {
-		log.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
+		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 
 	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程
@@ -113,11 +126,11 @@ func main() {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-signals
-		log.Printf("收到信号 %v，开始优雅关停…", sig)
+		alog.Printf("收到信号 %v，开始优雅关停…", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("HTTP 关停未在超时内完成: %v", err)
+			alog.Printf("HTTP 关停未在超时内完成: %v", err)
 		}
 		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
 		d.StopAll(30 * time.Second)
@@ -128,7 +141,9 @@ func main() {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}
 	<-stopped
-	log.Printf("已退出")
+	alog.Printf("已退出")
+	// 排空异步日志后退出（等待全部日志写出）
+	alog.Close()
 }
 
 // maxAPIBodyBytes API 请求体上限（不含 /upload/ 直连通道）。
@@ -146,11 +161,11 @@ func limitAPIBody(next http.Handler) http.Handler {
 	})
 }
 
-// logMiddleware 记录所有 API 请求。
+// logMiddleware 记录所有 API 请求（异步写入，不阻塞请求路径）。
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			log.Printf("%s %s", r.Method, r.URL.Path)
+			alog.Printf("%s %s", r.Method, r.URL.Path)
 		}()
 		next.ServeHTTP(w, r)
 	})

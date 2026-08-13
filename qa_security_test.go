@@ -524,7 +524,7 @@ func TestInstanceCommandAndLog(t *testing.T) {
 	srv := newTestServer(d)
 	defer srv.Close()
 
-	if err := d.startInstance(inst.InstanceUuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
 	}
 	defer func() {
@@ -604,7 +604,7 @@ func TestConcurrentStartStopStateMachine(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := d.startInstance(inst.InstanceUuid)
+			err := d.startInstance(inst)
 			mu.Lock()
 			if err == nil {
 				startOK++
@@ -645,7 +645,7 @@ func TestOrphanProcessAfterRestart(t *testing.T) {
 		Cwd:          dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	if err := d.startInstance(inst.InstanceUuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
 	}
 	inst.mu.Lock()
@@ -777,7 +777,7 @@ func TestStopAllTerminatesChildren(t *testing.T) {
 			Cwd:          dir,
 		})
 		d.Instances = append(d.Instances, inst)
-		if err := d.startInstance(inst.InstanceUuid); err != nil {
+		if err := d.startInstance(inst); err != nil {
 			t.Fatalf("启动失败: %v", err)
 		}
 		inst.mu.Lock()

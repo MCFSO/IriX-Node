@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -111,16 +110,21 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// requireUuid 读取并校验 uuid 参数。
-func (d *Daemon) requireUuid(r *http.Request) (string, error) {
+// requireInstance 读取 uuid 参数并解析出实例对象。
+//
+// 必须一次性拿到实例指针：若先校验存在、后再 d.Find 二次查找，
+// 两次查找之间实例可能被并发删除（DELETE /api/instance），
+// 第二次返回 nil 会导致处理器 nil 解引用崩溃。
+func (d *Daemon) requireInstance(r *http.Request) (*Instance, error) {
 	uuid := queryParam(r, "uuid")
 	if uuid == "" {
-		return "", errors.New("缺少 uuid 参数")
+		return nil, errors.New("缺少 uuid 参数")
 	}
-	if d.Find(uuid) == nil {
-		return "", errors.New("实例不存在")
+	inst := d.Find(uuid)
+	if inst == nil {
+		return nil, errors.New("实例不存在")
 	}
-	return uuid, nil
+	return inst, nil
 }
 
 // handleInstanceList 获取实例列表。
@@ -200,12 +204,12 @@ func (d *Daemon) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 // handleInstanceDetail 获取实例详情。
 // GET /api/instance?uuid&daemonId
 func (d *Daemon) handleInstanceDetail(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeOK(w, d.Find(uuid).Detail())
+	writeOK(w, inst.Detail())
 }
 
 // handleInstanceCreate 创建实例。
@@ -238,7 +242,7 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 // handleInstanceUpdate 更新实例配置。
 // PUT /api/instance?uuid&daemonId  body: InstanceConfig
 func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -248,11 +252,11 @@ func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if _, err := d.Update(uuid, cfg); err != nil {
+	if err := d.UpdateInstance(inst, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceDelete 删除实例。
@@ -279,61 +283,62 @@ func (d *Daemon) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 // handleInstanceStart 启动实例。
 // GET /api/protected_instance/open?uuid&daemonId
 func (d *Daemon) handleInstanceStart(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.startInstance(uuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceStop 停止实例。
 // GET /api/protected_instance/stop?uuid&daemonId
 func (d *Daemon) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.stopInstance(uuid); err != nil {
+	if err := d.stopInstance(inst); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceRestart 重启实例。
 // GET /api/protected_instance/restart?uuid&daemonId
+// 重启语义：实例已停止时直接启动（与 MCSM 面板行为一致），
+// 不因「实例未在运行」返回 500。
 func (d *Daemon) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.stopInstance(uuid); err != nil {
+	if err := d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := d.startInstance(uuid); err != nil {
+	if err := d.startInstance(inst); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceKill 强制终止实例。
 // GET /api/protected_instance/kill?uuid&daemonId
 func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inst := d.Find(uuid)
 	inst.SetStatus(StatusStopping)
 	// 先解除进程引用再终止：防止退出监听 goroutine 误判为意外退出而触发 AutoRestart
 	inst.mu.Lock()
@@ -354,13 +359,13 @@ func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	inst.SetStatus(StatusStopped)
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceCommand 发送命令。
 // GET /api/protected_instance/command?uuid&daemonId&command
 func (d *Daemon) handleInstanceCommand(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -370,7 +375,6 @@ func (d *Daemon) handleInstanceCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 command 参数")
 		return
 	}
-	inst := d.Find(uuid)
 	inst.mu.Lock()
 	proc := inst.Proc
 	inst.mu.Unlock()
@@ -382,13 +386,13 @@ func (d *Daemon) handleInstanceCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": uuid})
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
 }
 
 // handleInstanceOutputLog 获取实例输出日志。
 // GET /api/protected_instance/outputlog?uuid&daemonId&size(1KB~2048KB)
 func (d *Daemon) handleInstanceOutputLog(w http.ResponseWriter, r *http.Request) {
-	uuid, err := d.requireUuid(r)
+	inst, err := d.requireInstance(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -400,7 +404,6 @@ func (d *Daemon) handleInstanceOutputLog(w http.ResponseWriter, r *http.Request)
 	if size > 2048 {
 		size = 2048
 	}
-	inst := d.Find(uuid)
 	inst.mu.Lock()
 	proc := inst.Proc
 	inst.mu.Unlock()
@@ -412,8 +415,7 @@ func (d *Daemon) handleInstanceOutputLog(w http.ResponseWriter, r *http.Request)
 }
 
 // startInstance 启动实例（带状态流转与忙碌互斥）。
-func (d *Daemon) startInstance(uuid string) error {
-	inst := d.Find(uuid)
+func (d *Daemon) startInstance(inst *Instance) error {
 	if inst == nil {
 		return fmt.Errorf("实例不存在")
 	}
@@ -428,6 +430,8 @@ func (d *Daemon) startInstance(uuid string) error {
 	}
 	inst.Busy = true
 	inst.Status = StatusStarting
+	// 在锁内取出启动所需配置：并发 PUT /api/instance 会整体替换 Config
+	startCommand, cwd := inst.Config.StartCommand, inst.Config.Cwd
 	inst.mu.Unlock()
 	defer func() {
 		inst.mu.Lock()
@@ -435,7 +439,11 @@ func (d *Daemon) startInstance(uuid string) error {
 		inst.mu.Unlock()
 	}()
 
-	proc, err := startProcess(inst.Config.StartCommand, inst.Config.Cwd)
+	lc := d.logConfig()
+	if lc != nil {
+		lc.name = inst.InstanceUuid + ".log"
+	}
+	proc, err := startProcess(startCommand, cwd, lc)
 	if err != nil {
 		inst.SetStatus(StatusStopped)
 		return fmt.Errorf("启动失败: %w", err)
@@ -443,8 +451,8 @@ func (d *Daemon) startInstance(uuid string) error {
 
 	inst.mu.Lock()
 	inst.Proc = proc
+	inst.Started++ // 与 Save 读取 Started 竞争，必须在锁内自增
 	inst.mu.Unlock()
-	inst.Started++
 	inst.SetStatus(StatusRunning)
 	_ = d.Save()
 
@@ -477,13 +485,13 @@ func (d *Daemon) autoRestart(inst *Instance) {
 	if inst.arAttempts > 3 {
 		inst.arWindowStart = time.Time{}
 		inst.arAttempts = 0
-		log.Printf("实例 %s 10 秒内自动重启超过 3 次，已停止自动重启（可能陷入崩溃循环）", inst.InstanceUuid)
+		alog.Printf("实例 %s 10 秒内自动重启超过 3 次，已停止自动重启（可能陷入崩溃循环）", inst.InstanceUuid)
 		inst.mu.Unlock()
 		return
 	}
 	inst.mu.Unlock()
-	if err := d.startInstance(inst.InstanceUuid); err != nil {
-		log.Printf("自动重启实例 %s 失败: %v", inst.InstanceUuid, err)
+	if err := d.startInstance(inst); err != nil {
+		alog.Printf("自动重启实例 %s 失败: %v", inst.InstanceUuid, err)
 	}
 }
 
@@ -502,30 +510,33 @@ func (d *Daemon) StopAll(timeout time.Duration) {
 		proc := inst.Proc
 		// 提前解除引用：关停属于主动行为，不触发 AutoRestart
 		inst.Proc = nil
-		stopCmd := inst.Config.StopCommand
+		// 昵称必须在锁内取出：goroutine 里读 inst.Config 与并发 Update 竞争
+		stopCmd, nickname := inst.Config.StopCommand, inst.Config.Nickname
 		inst.mu.Unlock()
 		if proc == nil || !proc.IsRunning() {
 			continue
 		}
 		wg.Add(1)
-		go func(inst *Instance, proc *Process, stopCmd string) {
+		go func(inst *Instance, proc *Process, stopCmd, nickname string) {
 			defer wg.Done()
-			log.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, inst.Config.Nickname)
+			alog.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, nickname)
 			if err := proc.Stop(stopCmd, timeout); err != nil {
-				log.Printf("停止实例 %s 失败: %v", inst.InstanceUuid, err)
+				alog.Printf("停止实例 %s 失败: %v", inst.InstanceUuid, err)
 			}
 			inst.SetStatus(StatusStopped)
-		}(inst, proc, stopCmd)
+		}(inst, proc, stopCmd, nickname)
 	}
 	wg.Wait()
 	if err := d.Save(); err != nil {
-		log.Printf("关停时保存实例状态失败: %v", err)
+		alog.Printf("关停时保存实例状态失败: %v", err)
 	}
 }
 
+// errNotRunning 实例未在运行的哨兵错误；restart 据此区分「本就没运行」与真实故障。
+var errNotRunning = errors.New("实例未在运行")
+
 // stopInstance 停止实例。
-func (d *Daemon) stopInstance(uuid string) error {
-	inst := d.Find(uuid)
+func (d *Daemon) stopInstance(inst *Instance) error {
 	if inst == nil {
 		return fmt.Errorf("实例不存在")
 	}
@@ -536,7 +547,7 @@ func (d *Daemon) stopInstance(uuid string) error {
 	}
 	if inst.Proc == nil || !inst.Proc.IsRunning() {
 		inst.mu.Unlock()
-		return fmt.Errorf("实例未在运行")
+		return errNotRunning
 	}
 	inst.Busy = true
 	inst.Status = StatusStopping
