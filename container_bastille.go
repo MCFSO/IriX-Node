@@ -163,8 +163,24 @@ func bastilleJails() ([]map[string]any, error) {
 	return items, nil
 }
 
-// bastilleJailRelease 推断 jail 的发行版：thin jail 的 root 是指向 releases 的符号链接。
+// bastilleJailRelease 推断 jail 的发行版：
+// 优先解析 jail.conf 的 osrelease 行（bastille 1.4+ 均有）；
+// 回退旧版 thin jail 的 root 符号链接（指向 releases）。
 func bastilleJailRelease(name string) string {
+	if data, err := os.ReadFile(filepath.Join(bastilleRoot, "jails", name, "jail.conf")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "osrelease") {
+				continue
+			}
+			if idx := strings.IndexByte(line, '"'); idx >= 0 {
+				rest := line[idx+1:]
+				if end := strings.IndexByte(rest, '"'); end > 0 {
+					return rest[:end]
+				}
+			}
+		}
+	}
 	link, err := os.Readlink(filepath.Join(bastilleRoot, "jails", name, "root"))
 	if err == nil {
 		// 形如 ../../releases/14.1-RELEASE/root
@@ -209,6 +225,12 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	volumes []bastilleVolume, workdir string, memoryLimitMb, cpus, diskLimitMb int) (map[string]any, error) {
 	if jtype == "" {
 		jtype = "thin"
+	}
+	// 客户端可能把显示标签 "name:version" 当作 release 传入，剥离冒号后缀
+	release = normalizeRelease(release)
+	// bastille 拒绝纯数字 jail 名（客户端校验允许纯数字，服务端拦截并给中文提示）
+	if isAllDigits(name) {
+		return nil, fmt.Errorf("jail 名不能只包含数字（bastille 限制），请至少包含一个字母（如 mc%s）", name)
 	}
 	if vnetMode == "" {
 		vnetMode = "none"

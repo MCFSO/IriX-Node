@@ -632,6 +632,22 @@ func TestContainerJobStore(t *testing.T) {
 	}
 }
 
+// TestNormalizeRelease 客户端可能传 "name:version" 标签，服务端剥离冒号后缀。
+func TestNormalizeRelease(t *testing.T) {
+	cases := map[string]string{
+		"15.0-RELEASE:15.0-RELEASE": "15.0-RELEASE",
+		"14.2-RELEASE:14.2":         "14.2-RELEASE",
+		"14.2-RELEASE":              "14.2-RELEASE",
+		"":                          "",
+		":weird":                    ":weird", // 前缀冒号无意义，原样保留由后续校验处理
+	}
+	for in, want := range cases {
+		if got := normalizeRelease(in); got != want {
+			t.Fatalf("normalizeRelease(%q) = %q, 期望 %q", in, got, want)
+		}
+	}
+}
+
 // TestParseDockerSize 容量字符串解析。
 func TestParseDockerSize(t *testing.T) {
 	cases := map[string]uint64{

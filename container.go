@@ -24,6 +24,28 @@ import (
 // errContainerUnsupported 当前平台不支持容器能力的哨兵错误。
 var errContainerUnsupported = errors.New("当前平台不支持容器环境")
 
+// normalizeRelease 兼容客户端把显示标签 "name:version" 当作 release 传入的情况
+// （如 "15.0-RELEASE:15.0-RELEASE"），剥离冒号后缀取发行版名；纯名称原样返回。
+func normalizeRelease(release string) string {
+	if idx := strings.Index(release, ":"); idx > 0 {
+		return release[:idx]
+	}
+	return release
+}
+
+// isAllDigits 判断字符串是否非空且全为数字。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // bastilleVolume 挂载对（宿主机路径 → jail 内路径），Bastille create 的 volumes 条目。
 type bastilleVolume struct {
 	Source string `json:"source"`
@@ -602,6 +624,11 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" {
 		writeError(w, http.StatusBadRequest, "缺少 name 参数")
+		return
+	}
+	// bastille 拒绝纯数字 jail 名（客户端校验允许纯数字），提前以 400 拦截并给中文提示
+	if isAllDigits(body.Name) {
+		writeError(w, http.StatusBadRequest, "jail 名不能只包含数字（bastille 限制），请至少包含一个字母（如 mc"+body.Name+"）")
 		return
 	}
 	if body.Type == "" {
