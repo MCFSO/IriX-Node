@@ -1,0 +1,15 @@
+遥测升级为 OpenTelemetry 生态兼容（零第三方依赖，业务仍零侵入）
+
+- OTLP/JSON 指标导出：GET /api/metrics/otlp 输出 ExportMetricsServiceRequest
+  （proto JSON 编码：int64 字符串、枚举字符串、bytes base64），
+  可直接喂给 OTel Collector 的 otlp receiver 等消费方；含 http.server.duration
+  直方图、http.server.requests 计数器、实例/运行时间 gauge 与全量 go_* 运行时指标
+- OTLP/JSON trace：GET /api/metrics/traces 输出 ExportTraceServiceRequest
+  （最近 1024 条请求的 server span 环形缓冲，含 traceId/spanId/属性/状态）
+- W3C TraceContext 传播：解析入站 traceparent 头、无则生成新 trace，
+  响应头回传 traceparent 供上下游关联（crypto/rand，零依赖）
+- Prometheus 端点补 OTel 语义约定命名 http_server_request_duration_seconds
+  （直方图），与既有 irix_node_* 命名并存
+- 修复：部分平台 CPU 类 runtime 指标为 NaN 导致 JSON/Prometheus 编码失败，
+  统一 sanitizeFloat 归一为 0
+- 测试补 OTLP 结构断言、traceparent 传播、trace span 输出
