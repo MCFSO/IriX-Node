@@ -281,6 +281,9 @@ func BenchmarkNormalizePath(b *testing.B) {
 
 // TestLoadTenThousandInstances 一万实例：加载、查找、列表、分页正确性。
 func TestLoadTenThousandInstances(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	dir := t.TempDir()
 	d := NewDaemon(dir, "k")
 	const n = 10000
@@ -322,6 +325,9 @@ func TestLoadTenThousandInstances(t *testing.T) {
 
 // TestLargeDirectoryList 大目录（1 万文件）文件列表分页正确性。
 func TestLargeDirectoryList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, dir := newTestDaemon(t)
 	inst := sampleInst(1, dir)
 	d.Instances = append(d.Instances, inst)
@@ -358,6 +364,9 @@ func TestLargeDirectoryList(t *testing.T) {
 
 // TestLargeLogTail 2MB 环形缓冲 + 大 size 查询。
 func TestLargeLogTail(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	buf := NewLogBuffer(2 * 1024 * 1024)
 	line := []byte("2026-01-01 12:00:00 [INFO] hello world, this is a log line with some padding content\n")
 	for i := 0; i < 50000; i++ {

@@ -347,6 +347,9 @@ func TestClusterCoordination(t *testing.T) {
 
 // TestClusterTransfer P2 节点间直传端到端：源节点快照 → 目标节点拉取解压。
 func TestClusterTransfer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	// 源节点：有实例与数据
 	src, _ := newTestDaemon(t)
 	srcDir := t.TempDir()

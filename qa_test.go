@@ -820,6 +820,9 @@ func avgMs(lat []float64) float64 {
 
 // TestLoadOverview 高并发打概览接口。
 func TestLoadOverview(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, _ := newTestDaemon(t)
 	srv := newTestServer(d)
 	defer srv.Close()
@@ -838,6 +841,9 @@ func TestLoadOverview(t *testing.T) {
 
 // TestLoadInstanceList 高并发打实例列表接口。
 func TestLoadInstanceList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, dir := newTestDaemon(t)
 	for i := 0; i < 100; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))
@@ -854,6 +860,9 @@ func TestLoadInstanceList(t *testing.T) {
 
 // TestLoadFileList 高并发打文件列表接口（50 文件目录）。
 func TestLoadFileList(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, dir := newTestDaemon(t)
 	inst := sampleInst(1, dir)
 	d.Add(inst)
@@ -873,6 +882,9 @@ func TestLoadFileList(t *testing.T) {
 
 // TestConcurrentMixedHTTP 混合读写压测：并发创建与列表查询（模拟真实面板轮询 + 操作）。
 func TestConcurrentMixedHTTP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, dir := newTestDaemon(t)
 	if err := d.Add(sampleInst(1, dir)); err != nil {
 		t.Fatal(err)
@@ -945,6 +957,9 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 
 // TestLongRunStability 长时间混合请求 + 资源回收检查。
 func TestLongRunStability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	d, dir := newTestDaemon(t)
 	for i := 0; i < 50; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))

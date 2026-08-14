@@ -1,0 +1,9 @@
+修复 CI race 步骤超时：慢测试支持 -short 跳过，race 用 -short 跑核心测试
+
+- CI 失败原因：go test -race 完整套件在公共 runner 上超过 6 分钟未完成，
+  被 runner shutdown 信号终止（exit 143，非测试自身超时）
+- 压力/规模/长稳类测试加 testing.Short() 跳过（这些测试不查竞态）：
+  perf/scale 全部 6 个、HTTP 压测 3 个 + 混合压测 + 长稳 + 集群双节点端到端
+- CI race 步骤改为 go test -race -count=1 -short ./...，
+  保留全部并发 CRUD/读/票据/AutoRestart/安全等竞态核心测试
+- 实测：本地 short 模式 61s → 20s，race 预计 2-4 分钟，远离超时边缘

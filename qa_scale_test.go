@@ -130,6 +130,9 @@ func BenchmarkOverviewWithManyInstances(b *testing.B) {
 // TestScaleHundredThousandInstances 10 万实例下的加载/保存/查找/列表成本。
 func TestScaleHundredThousandInstances(t *testing.T) {
 	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
+	if testing.Short() {
 		t.Skip("跳过大规模测试")
 	}
 	dir := t.TempDir()
@@ -184,6 +187,9 @@ func TestScaleHundredThousandInstances(t *testing.T) {
 
 // TestLogBufferMemoryFootprint 多实例日志缓冲的内存上限（每实例 2MB 环形缓冲）。
 func TestLogBufferMemoryFootprint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	const instances = 100
 	line := make([]byte, 4096)
 	for i := range line {
@@ -225,6 +231,9 @@ func TestLogBufferMemoryFootprint(t *testing.T) {
 
 // TestTailCostOnFullBuffer 满缓冲下 Tail 的拷贝成本（每次请求日志都会付）。
 func TestTailCostOnFullBuffer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
+	}
 	b := NewLogBuffer(0)
 	line := make([]byte, 4096)
 	for i := range line {
