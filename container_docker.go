@@ -276,7 +276,7 @@ func dockerBuildStart(d *Daemon, dockerfile, name, tag string) (string, error) {
 	return jobID, nil
 }
 
-// dockerVolumeList 卷列表。
+// dockerVolumeList 卷列表（客户端契约条目：{name, driver, mountpoint}）。
 func dockerVolumeList() ([]map[string]any, error) {
 	out, err := cliRun(cliTimeout, "docker", "volume", "ls", "--format", "{{json .}}")
 	if err != nil {
@@ -285,8 +285,9 @@ func dockerVolumeList() ([]map[string]any, error) {
 	items := make([]map[string]any, 0, 8)
 	for _, m := range dockerJSONLines(out) {
 		items = append(items, map[string]any{
-			"name":   jstr(m, "Name"),
-			"driver": jstr(m, "Driver"),
+			"name":       jstr(m, "Name"),
+			"driver":     jstr(m, "Driver"),
+			"mountpoint": jstr(m, "Mountpoint"),
 		})
 	}
 	return items, nil
@@ -298,7 +299,7 @@ func dockerVolumeRemove(name string) error {
 	return err
 }
 
-// dockerNetworkList 网络列表。
+// dockerNetworkList 网络列表（subnet 经 docker network inspect 逐网填充）。
 func dockerNetworkList() ([]map[string]any, error) {
 	out, err := cliRun(cliTimeout, "docker", "network", "ls", "--format", "{{json .}}")
 	if err != nil {
@@ -306,10 +307,19 @@ func dockerNetworkList() ([]map[string]any, error) {
 	}
 	items := make([]map[string]any, 0, 8)
 	for _, m := range dockerJSONLines(out) {
+		name := jstr(m, "Name")
+		subnet := ""
+		if name != "" {
+			// inspect 失败（权限/网络已删）时 subnet 留空，不中断列表
+			if o, err := cliRun(cliTimeout, "docker", "network", "inspect",
+				"--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}", name); err == nil {
+				subnet = strings.TrimSpace(o)
+			}
+		}
 		items = append(items, map[string]any{
-			"name":   jstr(m, "Name"),
+			"name":   name,
 			"driver": jstr(m, "Driver"),
-			"subnet": "", // docker network ls 不提供子网信息
+			"subnet": subnet,
 		})
 	}
 	return items, nil

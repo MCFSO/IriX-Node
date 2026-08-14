@@ -1,0 +1,16 @@
+按客户端对接契约修正字段级差异（volumes 类型 / status 判断 / rdr jail 字段等）
+
+问题 #1（发行版大小）与 #2（无法创建 Jail）相关：
+- create 的 volumes 契约改为 string[]（"宿主机路径:jail内路径"），服务端拆分后
+  逐条 bastille mount；此前为对象数组，客户端发非空 volumes 会直接 400 创建失败
+- jail 列表 status 改为 "Up"/"Down"（客户端以「含 up」判断运行态，此前的
+  running/stopped 会被误判为停止）；ports 填充 rdr 规则摘要（"tcp 25565 -> 25565"）
+- releases 的 version 保持完整发行版名（客户端拼 name:version 标签）
+
+其余契约对齐：
+- GET /api/bastille/rdr 条目补 jail 字段；不传 jail 时合并全部 jail 的规则
+- rdr add 失败时附加 PF 初始化提示（客户端创建后自动调 rdr，PF 未配置会误报创建失败）
+- templates 改为 [{namespace, name}] 对象数组（此前为字符串数组）
+- import 响应改为 {name}（从 bastille import 输出解析）
+- /api/container/info 不可用时补 error 字段
+- Docker 卷条目补 mountpoint；网络条目 subnet 经 inspect 逐网填充

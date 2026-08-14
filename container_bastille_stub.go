@@ -39,8 +39,8 @@ func bastilleExport(d *Daemon, name string) (map[string]any, error) {
 	return nil, errContainerUnsupported
 }
 
-func bastilleImport(d *Daemon, file, release string, force bool) error {
-	return errContainerUnsupported
+func bastilleImport(d *Daemon, file, release string, force bool) (string, error) {
+	return "", errContainerUnsupported
 }
 
 func bastilleSetupMode(mode, extIf, tunIf, addr string) (map[string]any, error) {
@@ -57,7 +57,7 @@ func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
 	return errContainerUnsupported
 }
 
-func bastilleTemplates() ([]string, error) { return nil, errContainerUnsupported }
+func bastilleTemplates() ([]map[string]any, error) { return nil, errContainerUnsupported }
 
 func bastilleApply(jail, template string, args map[string]string) (string, error) {
 	return "", errContainerUnsupported

@@ -104,7 +104,7 @@ func bastilleReleases() ([]map[string]any, error) {
 		}
 		items = append(items, map[string]any{
 			"name":      name,
-			"version":   strings.TrimSuffix(name, "-RELEASE"),
+			"version":   name, // 客户端拼标签 name:version，保持完整发行版名
 			"sizeBytes": bastilleReleaseSize(name),
 			"createdAt": createdAt,
 		})
@@ -125,28 +125,38 @@ func bastilleBootstrap(release string) (string, error) {
 // bastilleJails jail 列表。
 // 名称与 release 从 /usr/local/bastille/jails 目录读取（thin jail 的 root
 // 为指向 releases 的符号链接，可据此推断发行版）；运行状态由 jls 判定。
+// status 用 "Up"/"Down"（客户端以「含 up」判断运行态）；ports 填充 rdr 规则摘要。
 func bastilleJails() ([]map[string]any, error) {
 	entries, err := os.ReadDir(filepath.Join(bastilleRoot, "jails"))
 	if err != nil {
 		return nil, fmt.Errorf("读取 jail 列表失败: %w", err)
 	}
 	running := bastilleRunningSet()
+	rdrRules, _ := bastilleRdrRulesByJail()
+	rdrByJail := map[string][]rdrRule{}
+	for _, r := range rdrRules {
+		rdrByJail[r.Jail] = append(rdrByJail[r.Jail], r)
+	}
 	items := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		name := e.Name()
-		status := "stopped"
+		status, state := "Down", "stopped"
 		if running[name] {
-			status = "running"
+			status, state = "Up", "running"
+		}
+		ports := make([]string, 0, 2)
+		for _, r := range rdrByJail[name] {
+			ports = append(ports, fmt.Sprintf("%s %d -> %d", r.Proto, r.HostPort, r.JailPort))
 		}
 		items = append(items, map[string]any{
 			"name":      name,
 			"release":   bastilleJailRelease(name),
 			"status":    status,
-			"state":     status,
-			"ports":     []string{}, // 端口转发列表见 GET /api/bastille/rdr
+			"state":     state,
+			"ports":     ports,
 			"createdAt": "",
 		})
 	}
@@ -453,11 +463,11 @@ func (d *Daemon) resolveImportFile(file string) (string, error) {
 }
 
 // bastilleImport 从归档导入 jail（bastille import [-f] FILE [RELEASE]）。
-// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和。
-func bastilleImport(d *Daemon, file, release string, force bool) error {
+// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和；返回导入后的 jail 名。
+func bastilleImport(d *Daemon, file, release string, force bool) (string, error) {
 	filePath, err := d.resolveImportFile(file)
 	if err != nil {
-		return err
+		return "", err
 	}
 	args := []string{"import"}
 	if force {
@@ -467,8 +477,26 @@ func bastilleImport(d *Daemon, file, release string, force bool) error {
 	if release != "" {
 		args = append(args, release)
 	}
-	_, err = cliRun(cliLongTimeout, bastilleBin, args...)
-	return err
+	out, err := cliRun(cliLongTimeout, bastilleBin, args...)
+	if err != nil {
+		return "", err
+	}
+	return importJailName(out), nil
+}
+
+// importJailName 从 bastille import 的输出中提取 jail 名；解析失败返回空串。
+func importJailName(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		for i, f := range fields {
+			if strings.EqualFold(f, "jail") && i+1 < len(fields) {
+				if name := strings.Trim(fields[i+1], ".: "); name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // bastilleSetupMode 初始化设置（docs/container-support.md §3.3）。
@@ -513,17 +541,45 @@ func bastilleSetupMode(mode, extIf, tunIf, addr string) (map[string]any, error) 
 }
 
 // bastilleRdrList 端口转发规则列表（bastille rdr [JAIL] list 输出解析）。
-// 解析失败的行静默跳过。
+// jail 为空时合并全部 jail 的规则（每条带 Jail 标识）；解析失败的行静默跳过。
 func bastilleRdrList(jail string) ([]rdrRule, error) {
-	args := []string{"rdr"}
 	if jail != "" {
-		args = append(args, jail)
+		return bastilleRdrListOne(jail)
 	}
-	args = append(args, "list")
-	out, err := cliRun(cliTimeout, bastilleBin, args...)
+	return bastilleRdrRulesByJail()
+}
+
+// bastilleRdrListOne 读取单个 jail 的转发规则。
+func bastilleRdrListOne(jail string) ([]rdrRule, error) {
+	out, err := cliRun(cliTimeout, bastilleBin, "rdr", jail, "list")
 	if err != nil {
 		return nil, err
 	}
+	return parseRdrOutput(jail, out), nil
+}
+
+// bastilleRdrRulesByJail 返回全部 jail 的转发规则（按 jail 分组）。
+func bastilleRdrRulesByJail() ([]rdrRule, error) {
+	entries, err := os.ReadDir(filepath.Join(bastilleRoot, "jails"))
+	if err != nil {
+		return nil, fmt.Errorf("读取 jail 列表失败: %w", err)
+	}
+	var all []rdrRule
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		out, err := cliRun(cliTimeout, bastilleBin, "rdr", e.Name(), "list")
+		if err != nil {
+			continue // 单个 jail 无规则时 list 可能报错，跳过
+		}
+		all = append(all, parseRdrOutput(e.Name(), out)...)
+	}
+	return all, nil
+}
+
+// parseRdrOutput 解析 bastille rdr list 输出行。
+func parseRdrOutput(jail, out string) []rdrRule {
 	rules := make([]rdrRule, 0, 8)
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -543,16 +599,20 @@ func bastilleRdrList(jail string) ([]rdrRule, error) {
 				}
 			}
 		}
-		rules = append(rules, rdrRule{Proto: proto, HostPort: hostPort, JailPort: jailPort})
+		rules = append(rules, rdrRule{Jail: jail, Proto: proto, HostPort: hostPort, JailPort: jailPort})
 	}
-	return rules, nil
+	return rules
 }
 
 // bastilleRdrAdd 添加端口转发（bastille rdr JAIL tcp|udp HOST_PORT JAIL_PORT）。
+// 失败时附加 PF 初始化提示：PF 未配置是 rdr 失败的最常见原因。
 func bastilleRdrAdd(jail, proto string, hostPort, jailPort int) error {
 	_, err := cliRun(cliTimeout, bastilleBin, "rdr", jail, proto,
 		strconv.Itoa(hostPort), strconv.Itoa(jailPort))
-	return err
+	if err != nil {
+		return fmt.Errorf("%w（若 PF 防火墙未初始化，请先调用 POST /api/bastille/setup {\"mode\":\"firewall\"}）", err)
+	}
+	return nil
 }
 
 // bastilleRdrDelete 删除端口转发：CLI 无单条删除命令，
@@ -576,14 +636,14 @@ func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
 	return nil
 }
 
-// bastilleTemplates 模板列表（project/template 格式）。
-func bastilleTemplates() ([]string, error) {
+// bastilleTemplates 模板列表（客户端契约：[{namespace, name}]，namespace 为 project 目录名）。
+func bastilleTemplates() ([]map[string]any, error) {
 	root := filepath.Join(bastilleRoot, "templates")
 	projects, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("读取模板目录失败: %w", err)
 	}
-	items := make([]string, 0, 8)
+	items := make([]map[string]any, 0, 8)
 	for _, p := range projects {
 		if !p.IsDir() {
 			continue
@@ -594,7 +654,10 @@ func bastilleTemplates() ([]string, error) {
 		}
 		for _, t := range tmpls {
 			if t.IsDir() {
-				items = append(items, p.Name()+"/"+t.Name())
+				items = append(items, map[string]any{
+					"namespace": p.Name(),
+					"name":      t.Name(),
+				})
 			}
 		}
 	}
