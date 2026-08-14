@@ -142,15 +142,45 @@ func bastilleRunningSet() map[string]bool {
 	return set
 }
 
-// bastilleCreate 创建 jail（含类型/VNET/桥接/IP 与创建后配置）。
-// type: thin(-T) / clone(-C) / empty(-E) / linux(-L)；vnet(-V) / bridge(-B)。
-// 创建成功后依次应用：volumes（bastille mount 写 fstab）、workdir（exec.start
-// 前置 cd）、limits（rctl / ZFS 配额）；配置步骤失败记入 warnings 不影响创建结果。
-func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac string,
+// bastilleCreate 创建 jail（docs/container-support.md §3.3 契约）。
+// type 映射：thin=默认(无标志) / thick(-T) / clone(-C) / empty(-E, 仅 NAME) / linux(-L)。
+// vnetMode：none=共享宿主网络(默认) / vnet(-V INTERFACE，物理网卡) / bridge(-B INTERFACE，桥接网卡)。
+// 校验：linux 与任何 VNET 模式互斥；VNET 时 IP 必须含子网掩码、interface 必须非空。
+// 创建成功后依次应用：volumes（bastille mount 写 fstab, nullfs）、workdir（exec.start
+// 前置 cd）、limits（bastille limits / ZFS 配额）；配置步骤失败记入 warnings 不影响创建结果。
+func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	volumes []bastilleVolume, workdir string, memoryLimitMb, cpus, diskLimitMb int) (map[string]any, error) {
+	if jtype == "" {
+		jtype = "thin"
+	}
+	if vnetMode == "" {
+		vnetMode = "none"
+	}
+	switch jtype {
+	case "thin", "thick", "clone", "empty", "linux":
+	default:
+		return nil, fmt.Errorf("type 仅支持 thin/thick/clone/empty/linux")
+	}
+	switch vnetMode {
+	case "none", "vnet", "bridge":
+	default:
+		return nil, fmt.Errorf("vnet 仅支持 none/vnet/bridge")
+	}
+	if jtype == "linux" && vnetMode != "none" {
+		return nil, fmt.Errorf("linux 类型与 VNET 模式互斥")
+	}
+	if vnetMode != "none" {
+		if iface == "" {
+			return nil, fmt.Errorf("VNET 模式必须提供 interface 参数")
+		}
+		if !strings.Contains(ip, "/") {
+			return nil, fmt.Errorf("VNET 模式 IP 必须含子网掩码（如 10.0.0.2/24）")
+		}
+	}
+
 	args := []string{"create"}
 	switch jtype {
-	case "thin":
+	case "thick":
 		args = append(args, "-T")
 	case "clone":
 		args = append(args, "-C")
@@ -159,19 +189,19 @@ func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac stri
 	case "linux":
 		args = append(args, "-L")
 	}
-	if vnet || bridge {
-		args = append(args, "-V")
+	switch vnetMode {
+	case "vnet":
+		args = append(args, "-V", iface)
+	case "bridge":
+		args = append(args, "-B", iface)
 	}
-	if bridge {
-		args = append(args, "-B")
+	args = append(args, name)
+	if jtype != "empty" {
+		if ip == "" {
+			ip = "0.0.0.0"
+		}
+		args = append(args, release, ip)
 	}
-	if mac != "" {
-		args = append(args, "-M", mac)
-	}
-	if ip == "" {
-		ip = "0.0.0.0"
-	}
-	args = append(args, name, release, ip)
 	if _, err := cliRun(cliLongTimeout, "bastille", args...); err != nil {
 		return nil, err
 	}
@@ -191,11 +221,7 @@ func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac stri
 			warnings = append(warnings, fmt.Sprintf("设置工作目录失败: %v", err))
 		}
 	}
-	if memoryLimitMb > 0 {
-		if err := bastilleApplyLimits(name, memoryLimitMb, cpus, diskLimitMb); err != nil {
-			warnings = append(warnings, fmt.Sprintf("设置资源限制失败: %v", err))
-		}
-	} else if cpus > 0 || diskLimitMb > 0 {
+	if memoryLimitMb > 0 || cpus > 0 || diskLimitMb > 0 {
 		if err := bastilleApplyLimits(name, memoryLimitMb, cpus, diskLimitMb); err != nil {
 			warnings = append(warnings, fmt.Sprintf("设置资源限制失败: %v", err))
 		}
@@ -204,11 +230,14 @@ func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac stri
 }
 
 // bastilleAction jail 操作（start/stop/restart/destroy）。
-// force 为 true 时 destroy 附加 -a（bastille 摧毁运行中的 jail 必须带 -a）。
+// destroy 时：-y 跳过交互确认（必须）；force 附加 -a（摧毁运行中的 jail）。
 func bastilleAction(name, action string, force bool) error {
 	args := []string{action}
-	if action == "destroy" && force {
-		args = append(args, "-a")
+	if action == "destroy" {
+		args = append(args, "-y")
+		if force {
+			args = append(args, "-a")
+		}
 	}
 	args = append(args, name)
 	_, err := cliRun(cliTimeout, "bastille", args...)
@@ -258,9 +287,10 @@ func bastilleMounts(name string) ([]string, error) {
 	return mounts, nil
 }
 
-// bastilleMount 挂载宿主机目录到 jail（bastille mount 写入 fstab，运行中则即时挂载）。
+// bastilleMount 挂载宿主机目录到 jail（nullfs；写入 fstab，运行中则即时挂载）。
+// 语法：bastille mount JAIL HOST JAILPATH nullfs
 func bastilleMount(name, source, dest string) error {
-	_, err := cliRun(cliTimeout, "bastille", "mount", name, source, dest)
+	_, err := cliRun(cliTimeout, "bastille", "mount", name, source, dest, "nullfs")
 	return err
 }
 
@@ -300,14 +330,14 @@ func bastilleSetWorkdir(name, workdir string) error {
 	return os.WriteFile(confPath, []byte(content), 0o644)
 }
 
-// bastilleApplyLimits 应用资源限制：
-// - memoryLimitMb → rctl memoryuse（FreeBSD 系统命令，规则直传）
-// - cpus → rctl cpuset（分配 0..cpus-1 号核）
-// - diskLimitMb → ZFS 配额（jail 数据集按挂载点路径定位）
+// bastilleApplyLimits 应用资源限制（docs/container-support.md §3.3）：
+// - memoryLimitMb → bastille limits JAIL add memoryuse <N>M
+// - cpus → bastille limits JAIL cpu 0..N-1（cpuset，核数换算）
+// - diskLimitMb → zfs set quota=<N>M（jail 数据集，按挂载点路径定位）
 func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) error {
 	if memoryLimitMb > 0 {
-		rule := fmt.Sprintf("memoryuse=%dM", memoryLimitMb)
-		if _, err := cliRun(cliTimeout, "rctl", "-a", "jail:"+name, rule); err != nil {
+		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "add",
+			"memoryuse", fmt.Sprintf("%dM", memoryLimitMb)); err != nil {
 			return err
 		}
 	}
@@ -316,8 +346,7 @@ func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) erro
 		if cpus > 1 {
 			set = fmt.Sprintf("0-%d", cpus-1)
 		}
-		rule := "cpuset=" + set
-		if _, err := cliRun(cliTimeout, "rctl", "-a", "jail:"+name, rule); err != nil {
+		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "cpu", set); err != nil {
 			return err
 		}
 	}
@@ -331,7 +360,7 @@ func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) erro
 	return nil
 }
 
-// bastilleClone 克隆 jail 为新的名字与可选新 IP（bastille clone NAME NEW_NAME [NEW_IP]）。
+// bastilleClone 克隆 jail 为新的名字与可选新 IP（bastille clone TARGET NEW_NAME [IP]）。
 func bastilleClone(name, newName, newIP string) error {
 	args := []string{"clone", name, newName}
 	if newIP != "" {
@@ -341,87 +370,96 @@ func bastilleClone(name, newName, newIP string) error {
 	return err
 }
 
-// bastilleExport 导出 jail 为归档到同步区 .exports/。
-// 返回 {path}：归档相对同步区根的路径，可直接用作 import 的 file 参数。
+// bastilleExport 导出 jail 为 txz 归档到 bastille/backups/（默认输出目录）。
+// 语法：bastille export --txz TARGET PATH；返回 {path}（绝对路径，可直接作 import 的 file）。
 func bastilleExport(d *Daemon, name string) (map[string]any, error) {
-	expDir := filepath.Join(d.clusterRoot(), ".exports")
-	if err := os.MkdirAll(expDir, 0o755); err != nil {
+	backupDir := filepath.Join(bastilleRoot, "backups")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return nil, err
 	}
-	relName := ".exports/" + name + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".tar.gz"
-	filePath := filepath.Join(d.clusterRoot(), filepath.FromSlash(relName))
-	f, err := os.Create(filePath)
-	if err != nil {
+	outPath := filepath.Join(backupDir, name+"-"+strconv.FormatInt(time.Now().UnixMilli(), 10)+".txz")
+	if _, err := cliRun(cliLongTimeout, "bastille", "export", "--txz", name, outPath); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("bastille", "export", name)
-	cmd.Stdout = f
-	cmd.Stderr = f // 警告信息一并落盘，失败时便于排查
-	if err := cmd.Run(); err != nil {
-		f.Close()
-		_ = os.Remove(filePath)
-		return nil, fmt.Errorf("bastille export 失败: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
-	return map[string]any{"path": "/" + relName}, nil
+	return map[string]any{"path": outPath}, nil
 }
 
-// bastilleImport 从同步区归档导入 jail（bastille import FILE [NEW_NAME]）。
-// replace 为 true 时先销毁同名 jail（-a，可摧毁运行中的）。
-func bastilleImport(d *Daemon, file, newName string, replace bool) error {
-	filePath, err := d.clusterPath(file)
+// resolveImportFile 解析 import 的 file 参数：
+// 绝对路径仅允许位于 bastille/backups/ 或同步区内；相对路径按同步区根解析。
+func (d *Daemon) resolveImportFile(file string) (string, error) {
+	if filepath.IsAbs(file) {
+		if pathWithin(filepath.Join(bastilleRoot, "backups"), file) ||
+			pathWithin(d.clusterRoot(), file) {
+			return file, nil
+		}
+		return "", fmt.Errorf("导入文件路径越界: %s", file)
+	}
+	return d.clusterPath(file)
+}
+
+// bastilleImport 从归档导入 jail（bastille import [-f] FILE [RELEASE]）。
+// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和。
+func bastilleImport(d *Daemon, file, release string, force bool) error {
+	filePath, err := d.resolveImportFile(file)
 	if err != nil {
 		return err
 	}
-	if replace && newName != "" {
-		// 已存在才销毁；不存在时 destroy 会报错，忽略之
-		if _, statErr := os.Stat(filepath.Join(bastilleRoot, "jails", newName)); statErr == nil {
-			_, _ = cliRun(cliTimeout, "bastille", "destroy", "-a", newName)
-		}
+	args := []string{"import"}
+	if force {
+		args = append(args, "-f")
 	}
-	args := []string{"import", filePath}
-	if newName != "" {
-		args = append(args, newName)
+	args = append(args, filePath)
+	if release != "" {
+		args = append(args, release)
 	}
 	_, err = cliRun(cliLongTimeout, "bastille", args...)
 	return err
 }
 
-// bastilleSetupMode 初始化设置（docs/container-support.md §3.3）：
-//   - pf:    bastille setup pf <extIf>（防火墙规则）
-//   - vnet:  bastille setup vnet <extIf> <tunIf> <addr>（VNET 网关）
-//   - linux: bastille setup linux（Linuxulator 初始化）
-//   - check: bastille setup --check（环境检查）
+// bastilleSetupMode 初始化设置（docs/container-support.md §3.3）。
+// 服务端统一附加 -y 避免交互阻塞；响应 {ok, detail?}。
+//   - default:  bastille setup（自动 loopback+firewall+storage）
+//   - firewall: bastille setup firewall [extIf]
+//   - vnet:     bastille setup vnet [extIf tunIf addr]（部分版本交互式）
+//   - bridge:   bastille setup bridge
+//   - shared:   bastille setup shared [extIf]
+//   - linux:    bastille setup linux（Linuxulator + debootstrap）
 func bastilleSetupMode(mode, extIf, tunIf, addr string) (map[string]any, error) {
-	var args []string
+	args := []string{"setup", "-y"}
 	switch mode {
-	case "pf":
-		args = []string{"setup", "pf", extIf}
+	case "default":
+	case "firewall":
+		args = append(args, "firewall")
+		if extIf != "" {
+			args = append(args, extIf)
+		}
 	case "vnet":
-		args = []string{"setup", "vnet", extIf, tunIf, addr}
+		args = append(args, "vnet")
+		if extIf != "" {
+			args = append(args, extIf, tunIf, addr)
+		}
+	case "bridge":
+		args = append(args, "bridge")
+	case "shared":
+		args = append(args, "shared")
+		if extIf != "" {
+			args = append(args, extIf)
+		}
 	case "linux":
-		args = []string{"setup", "linux"}
-	case "check":
-		args = []string{"setup", "--check"}
+		args = append(args, "linux")
 	default:
-		return nil, fmt.Errorf("mode 仅支持 pf/vnet/linux/check")
+		return nil, fmt.Errorf("mode 仅支持 default/firewall/vnet/bridge/shared/linux")
 	}
 	out, err := cliRun(cliLongTimeout, "bastille", args...)
 	if err != nil {
 		return nil, err
 	}
-	result := map[string]any{"ok": true, "detail": strings.TrimSpace(out)}
-	if mode == "check" {
-		result["checked"] = strings.TrimSpace(out)
-	}
-	return result, nil
+	return map[string]any{"ok": true, "detail": strings.TrimSpace(out)}, nil
 }
 
-// bastilleRdrList 端口转发规则列表（bastille rdr <jail> list 输出解析）。
-// 返回 [{proto, hostPort, jailPort}]；解析失败的行静默跳过。
-func bastilleRdrList(jail string) ([]map[string]any, error) {
+// bastilleRdrList 端口转发规则列表（bastille rdr [JAIL] list 输出解析）。
+// 解析失败的行静默跳过。
+func bastilleRdrList(jail string) ([]rdrRule, error) {
 	args := []string{"rdr"}
 	if jail != "" {
 		args = append(args, jail)
@@ -431,7 +469,7 @@ func bastilleRdrList(jail string) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	items := make([]map[string]any, 0, 8)
+	rules := make([]rdrRule, 0, 8)
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -450,13 +488,37 @@ func bastilleRdrList(jail string) ([]map[string]any, error) {
 				}
 			}
 		}
-		items = append(items, map[string]any{
-			"proto":    proto,
-			"hostPort": hostPort,
-			"jailPort": jailPort,
-		})
+		rules = append(rules, rdrRule{Proto: proto, HostPort: hostPort, JailPort: jailPort})
 	}
-	return items, nil
+	return rules, nil
+}
+
+// bastilleRdrAdd 添加端口转发（bastille rdr JAIL tcp|udp HOST_PORT JAIL_PORT）。
+func bastilleRdrAdd(jail, proto string, hostPort, jailPort int) error {
+	_, err := cliRun(cliTimeout, "bastille", "rdr", jail, proto,
+		strconv.Itoa(hostPort), strconv.Itoa(jailPort))
+	return err
+}
+
+// bastilleRdrDelete 删除端口转发：CLI 无单条删除命令，
+// 服务端读取 rdr list → clear → 重放其余规则。
+func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
+	rules, err := bastilleRdrList(jail)
+	if err != nil {
+		return err
+	}
+	if _, err := cliRun(cliTimeout, "bastille", "rdr", jail, "clear"); err != nil {
+		return err
+	}
+	for _, r := range rules {
+		if r.Proto == proto && r.HostPort == hostPort && r.JailPort == jailPort {
+			continue
+		}
+		if err := bastilleRdrAdd(jail, r.Proto, r.HostPort, r.JailPort); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parseRdrLine 解析单条 pf rdr 规则行的 hostPort/jailPort。
@@ -485,18 +547,6 @@ func lastPortIn(s string) int {
 		}
 	}
 	return last
-}
-
-// bastilleRdr 端口转发：add=true 添加，false 删除。
-// 语法：bastille rdr <jail> add|delete <proto> <hostPort> <jailPort>
-func bastilleRdr(jail, proto string, hostPort, jailPort int, add bool) error {
-	action := "add"
-	if !add {
-		action = "delete"
-	}
-	_, err := cliRun(cliTimeout, "bastille", "rdr", jail, action, proto,
-		strconv.Itoa(hostPort), strconv.Itoa(jailPort))
-	return err
 }
 
 // bastilleTemplates 模板列表（project/template 格式）。

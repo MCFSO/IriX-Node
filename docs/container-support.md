@@ -140,42 +140,67 @@ GET    /api/network/list
 
 ### 3.3 Bastille 端点(irix-node,FreeBSD)
 
+> 命令语法以官方文档 latest 为准（bastille.readthedocs.io / docs.bastillebsd.org）。
+> 客户端仅定义 HTTP 契约，以下每条端点附服务端应执行的 bastille 命令。
+
 ```
 GET    /api/bastille/releases                        → bootstrap 的发行版列表
-POST   /api/bastille/bootstrap          body: {release}   → 后台任务,进度经日志流返回
+POST   /api/bastille/bootstrap          body: {release}   → bastille bootstrap RELEASE [update]（后台任务）
 GET    /api/bastille/jails                           → jail 列表(含状态/IP/模板 tags)
-POST   /api/bastille/jails/create       body: {name, release, ip, type: thin|thick|clone|empty|linux, vnet?, bridge?, volumes?, workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
+POST   /api/bastille/jails/create       body: {name, release, ip, type: thin|thick|clone|empty|linux,
+                                                vnet: none|vnet|bridge, interface?, volumes?, workdir?,
+                                                memoryLimitMb?, cpus?, diskLimitMb?}
+                                                 → bastille create [-T|-C|-E|-L] [-V|-B INTERFACE] NAME RELEASE IP
+                                                   （empty 类型仅 NAME：bastille create -E NAME）
+GET    /api/bastille/jails/{name}/mounts             → MOUNT 挂载列表
 POST   /api/bastille/jails/{name}/start
 POST   /api/bastille/jails/{name}/stop
 POST   /api/bastille/jails/{name}/restart
-POST   /api/bastille/jails/{name}/destroy?force=1    → force=1 时附加 -a(可摧毁运行中的 jail)
-POST   /api/bastille/jails/{name}/clone  body: {newName, ip?}   → bastille clone(thin 克隆,可选改 IP)
-POST   /api/bastille/jails/{name}/export             → bastille export,返回 {path: 归档路径}
-POST   /api/bastille/jails/import        body: {file, newName?, replace?} → bastille import
+POST   /api/bastille/jails/{name}/destroy?force=1    → bastille destroy -y [-a] JAIL
+                                                        -y 跳过交互确认（必须）;-a 用于摧毁运行中的 jail
+POST   /api/bastille/jails/{name}/clone  body: {newName, ip?} → bastille clone TARGET NEW_NAME [IP]
+POST   /api/bastille/jails/{name}/export             → bastille export --txz TARGET PATH
+                                                        返回 {path}；默认输出到 bastille/backups/
+POST   /api/bastille/jails/import        body: {file, release?, force?}
+                                                 → bastille import [-f] FILE [RELEASE]
+                                                        RELEASE 为「导入到指定发行版」；-f 跳过校验和
 POST   /api/bastille/jails/{name}/limits body: {memoryMb?, cpus?, diskMb?}
-                                                 → memoryMb: rctl memoryuse;cpus: cpuset;diskMb: ZFS 配额
+                                                 → memoryMb: bastille limits JAIL add memoryuse <N>M
+                                                   cpus:     bastille limits JAIL cpu 0..N-1（cpuset，核数换算）
+                                                   diskMb:   zfs set quota=<N>M（jail 数据集）
 GET    /api/bastille/jails/{name}/console?tail=N     → 日志尾部
 POST   /api/bastille/jails/{name}/cmd    body: {command}
 GET    /api/bastille/jails/{name}/config             → jail.conf 属性
 GET    /api/bastille/templates                       → 已 bootstrap 的模板列表(project/template)
 POST   /api/bastille/templates/apply     body: {jail, template, args: {KEY=VALUE}}
 POST   /api/bastille/rdr                 body: {jail, proto, hostPort, jailPort}
-DELETE /api/bastille/rdr                 body: 同上(删除转发)
-GET    /api/bastille/rdr?jail=                        → 转发规则列表(可过滤 jail)
-POST   /api/bastille/setup               body: {mode: pf|vnet|linux|check, extIf?, tunIf?, addr?, check?}
-                                                 → {ok, detail?, checked?}
-                                                 pf:    bastille setup pf <extIf>
-                                                 vnet:  bastille setup vnet <extIf> <tunIf> <addr>
-                                                 linux: bastille setup linux(Linuxulator 初始化)
-                                                 check: bastille setup --check
-GET    /api/bastille/jails/{name}/mounts             → MOUNT 挂载列表
+                                                 → bastille rdr JAIL tcp|udp HOST_PORT JAIL_PORT
+DELETE /api/bastille/rdr                 body: 同上
+                                                 → CLI 无单条删除：服务端读取 rdr list → clear → 重放其余规则
+GET    /api/bastille/rdr?jail=                        → 转发规则列表（bastille rdr [JAIL] list 解析）
+POST   /api/bastille/setup               body: {mode: default|firewall|vnet|bridge|shared|linux,
+                                                extIf?, tunIf?, addr?}
+                                                 → {ok, detail?}
+                                                 （服务端统一附加 -y 避免交互阻塞）
+                                                 default:  bastille setup（自动 loopback+firewall+storage）
+                                                 firewall: bastille setup firewall [extIf]
+                                                 vnet:     bastille setup vnet [extIf tunIf addr]（部分版本交互式）
+                                                 bridge:   bastille setup bridge
+                                                 shared:   bastille setup shared [extIf]
+                                                 linux:    bastille setup linux（Linuxulator + debootstrap）
 ```
 
-> 实现提示:Bastille 无面板 API,irix-node 在 FreeBSD 上通过 `Process.run('bastille', ...)` 包装上述命令;构建 / bootstrap / 模板应用等长任务以 jobId + 日志流模式暴露。
+> 实现提示:Bastille 无面板 API,irix-node 在 FreeBSD 上通过 `Process.run('bastille', ...)` 包装上述命令;bootstrap / 模板应用等长任务以 jobId + 日志流模式暴露。
 >
-> create 的 `volumes`(宿主机路径:jail 内路径)由服务端在 jail 创建后以 nullfs 挂载(`bastille mount` / mount.fstab);`workdir` 设置 `exec.start` 的工作目录(数据目录挂载后强制 cwd)。
+> create 的 `type` 映射:thin(无标志,默认) / thick(-T) / clone(-C) / empty(-E) / linux(-L);
+> `vnet=none` 为共享宿主网络(默认),`vnet=vnet` 为 `-V`(INTERFACE 须为物理网卡),
+> `vnet=bridge` 为 `-B`(INTERFACE 须为已存在的桥接网卡);VNET 时 IP 必须含子网掩码;
+> Linux jail(-L) 与任何 VNET 模式互斥。
+> `volumes`(宿主机路径:jail 内路径)在创建后以 nullfs 挂载(`bastille mount JAIL HOST JAILPATH nullfs`);
+> `workdir` 设置 `exec.start` 的工作目录(数据目录挂载后强制 cwd)。
 >
-> Docker 端点同步新增:POST /api/container/{id}/clone body: {name};POST /api/container/{id}/limits body: {memoryMb?, cpus?};create body 增加 workdir / diskLimitMb。
+> Docker 端点同步新增:POST /api/container/{id}/clone body: {name};
+> POST /api/container/{id}/limits body: {memoryMb?, cpus?};create body 增加 workdir / diskLimitMb。
 
 ### 3.4 响应约定
 

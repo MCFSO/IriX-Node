@@ -460,7 +460,7 @@ func TestContainerUnavailable(t *testing.T) {
 			path string
 			body map[string]any
 		}{
-			{"/api/bastille/setup", map[string]any{"mode": "check"}},
+			{"/api/bastille/setup", map[string]any{"mode": "default"}},
 			{"/api/bastille/jails/x/clone", map[string]any{"newName": "y"}},
 			{"/api/bastille/jails/x/export", nil},
 			{"/api/bastille/jails/import", map[string]any{"file": "/a.tar.gz"}},

@@ -10,7 +10,7 @@ func bastilleBootstrap(release string) (string, error) { return "", errContainer
 
 func bastilleJails() ([]map[string]any, error) { return nil, errContainerUnsupported }
 
-func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac string,
+func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	volumes []bastilleVolume, workdir string, memoryLimitMb, cpus, diskLimitMb int) (map[string]any, error) {
 	return nil, errContainerUnsupported
 }
@@ -39,7 +39,7 @@ func bastilleExport(d *Daemon, name string) (map[string]any, error) {
 	return nil, errContainerUnsupported
 }
 
-func bastilleImport(d *Daemon, file, newName string, replace bool) error {
+func bastilleImport(d *Daemon, file, release string, force bool) error {
 	return errContainerUnsupported
 }
 
@@ -47,9 +47,13 @@ func bastilleSetupMode(mode, extIf, tunIf, addr string) (map[string]any, error) 
 	return nil, errContainerUnsupported
 }
 
-func bastilleRdrList(jail string) ([]map[string]any, error) { return nil, errContainerUnsupported }
+func bastilleRdrList(jail string) ([]rdrRule, error) { return nil, errContainerUnsupported }
 
-func bastilleRdr(jail, proto string, hostPort, jailPort int, add bool) error {
+func bastilleRdrAdd(jail, proto string, hostPort, jailPort int) error {
+	return errContainerUnsupported
+}
+
+func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
 	return errContainerUnsupported
 }
 

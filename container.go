@@ -30,6 +30,13 @@ type bastilleVolume struct {
 	Dest   string `json:"dest"`
 }
 
+// rdrRule 单条端口转发规则。
+type rdrRule struct {
+	Proto    string
+	HostPort int
+	JailPort int
+}
+
 // jobLogMaxLines 长任务日志保留行数上限，防止构建日志无限膨胀。
 const jobLogMaxLines = 500
 
@@ -524,20 +531,22 @@ func (d *Daemon) handleBastilleJails(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleCreate 创建 jail（含类型/VNET/桥接/IP 与创建后配置）。
 // POST /api/bastille/jails/create
-// body: {name, release, ip?, type: thin|thick|clone|empty|linux, vnet?, bridge?, mac?,
+// body: {name, release, ip, type: thin|thick|clone|empty|linux,
 //
-//	volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
+//	vnet: none|vnet|bridge, interface?, volumes?: [{source, dest}],
+//	workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
 //
-// 响应: {name, warnings: [配置步骤失败告警]}（创建成功但后置配置失败不视为失败）
+// type 映射：thin=默认(无标志) / thick(-T) / clone(-C) / empty(-E, 仅 NAME) / linux(-L)；
+// vnet=none 共享宿主网络(默认)，vnet/bridge 需 interface 且 IP 须含子网掩码；
+// linux 与任何 VNET 模式互斥。响应: {name, warnings}。
 func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name          string           `json:"name"`
 		Release       string           `json:"release"`
 		IP            string           `json:"ip"`
 		Type          string           `json:"type"`
-		Vnet          bool             `json:"vnet"`
-		Bridge        bool             `json:"bridge"`
-		Mac           string           `json:"mac"`
+		Vnet          string           `json:"vnet"`
+		Interface     string           `json:"interface"`
 		Volumes       []bastilleVolume `json:"volumes"`
 		Workdir       string           `json:"workdir"`
 		MemoryLimitMb int              `json:"memoryLimitMb"`
@@ -548,12 +557,18 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if body.Name == "" || body.Release == "" {
-		writeError(w, http.StatusBadRequest, "缺少 name/release 参数")
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "缺少 name 参数")
 		return
 	}
-	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, body.Vnet, body.Bridge,
-		body.Mac, body.Volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
+	if body.Type == "" {
+		body.Type = "thin"
+	}
+	if body.Vnet == "" {
+		body.Vnet = "none"
+	}
+	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, body.Vnet,
+		body.Interface, body.Volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
 	if err != nil {
 		containerErr(w, err)
 		return
@@ -694,12 +709,13 @@ func (d *Daemon) handleBastilleApply(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleRdrAdd 添加端口转发。
 // POST /api/bastille/rdr body: {jail, proto, hostPort, jailPort}
+// 语法：bastille rdr JAIL tcp|udp HOST_PORT JAIL_PORT
 func (d *Daemon) handleBastilleRdrAdd(w http.ResponseWriter, r *http.Request) {
 	jail, proto, hostPort, jailPort, ok := parseRdrBody(w, r)
 	if !ok {
 		return
 	}
-	if err := bastilleRdr(jail, proto, hostPort, jailPort, true); err != nil {
+	if err := bastilleRdrAdd(jail, proto, hostPort, jailPort); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -708,12 +724,13 @@ func (d *Daemon) handleBastilleRdrAdd(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleRdrDelete 删除端口转发。
 // DELETE /api/bastille/rdr body: 同上
+// CLI 无单条删除：服务端读取 rdr list → clear → 重放其余规则。
 func (d *Daemon) handleBastilleRdrDelete(w http.ResponseWriter, r *http.Request) {
 	jail, proto, hostPort, jailPort, ok := parseRdrBody(w, r)
 	if !ok {
 		return
 	}
-	if err := bastilleRdr(jail, proto, hostPort, jailPort, false); err != nil {
+	if err := bastilleRdrDelete(jail, proto, hostPort, jailPort); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -834,14 +851,8 @@ func (d *Daemon) handleImageImport(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBastilleSetup 容器软件初始化设置（docs/container-support.md §3.3）。
-// POST /api/bastille/setup body: {mode: pf|vnet|linux|check, extIf?, tunIf?, addr?}
-//
-//	pf:    bastille setup pf <extIf>（防火墙规则）
-//	vnet:  bastille setup vnet <extIf> <tunIf> <addr>（VNET 网关）
-//	linux: bastille setup linux（Linuxulator 初始化）
-//	check: bastille setup --check（环境检查）
-//
-// 响应: {ok, detail?, checked?}（check 模式含 checked）
+// POST /api/bastille/setup body: {mode: default|firewall|vnet|bridge|shared|linux, extIf?, tunIf?, addr?}
+// 服务端统一附加 -y 避免交互阻塞。响应: {ok, detail?}。
 func (d *Daemon) handleBastilleSetup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Mode  string `json:"mode"`
@@ -854,7 +865,7 @@ func (d *Daemon) handleBastilleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Mode == "" {
-		writeError(w, http.StatusBadRequest, "缺少 mode 参数（pf/vnet/linux/check）")
+		writeError(w, http.StatusBadRequest, "缺少 mode 参数（default/firewall/vnet/bridge/shared/linux）")
 		return
 	}
 	result, err := bastilleSetupMode(body.Mode, body.ExtIf, body.TunIf, body.Addr)
@@ -898,13 +909,14 @@ func (d *Daemon) handleBastilleExport(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, info)
 }
 
-// handleBastilleImport 从同步区归档导入 jail（bastille import FILE [NEW_NAME]）。
-// POST /api/bastille/jails/import body: {file, newName?, replace?}
+// handleBastilleImport 从归档导入 jail（bastille import [-f] FILE [RELEASE]）。
+// POST /api/bastille/jails/import body: {file, release?, force?}
+// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和。
 func (d *Daemon) handleBastilleImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		File    string `json:"file"`
-		NewName string `json:"newName"`
-		Replace bool   `json:"replace"`
+		Release string `json:"release"`
+		Force   bool   `json:"force"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
@@ -914,7 +926,7 @@ func (d *Daemon) handleBastilleImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 file 参数")
 		return
 	}
-	if err := bastilleImport(d, body.File, body.NewName, body.Replace); err != nil {
+	if err := bastilleImport(d, body.File, body.Release, body.Force); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -987,10 +999,18 @@ func (d *Daemon) handleBastilleLimits(w http.ResponseWriter, r *http.Request) {
 // handleBastilleRdrList 端口转发规则列表（可按 jail 过滤）。
 // GET /api/bastille/rdr?jail= → [{proto, hostPort, jailPort}]
 func (d *Daemon) handleBastilleRdrList(w http.ResponseWriter, r *http.Request) {
-	items, err := bastilleRdrList(queryParam(r, "jail"))
+	rules, err := bastilleRdrList(queryParam(r, "jail"))
 	if err != nil {
 		containerErr(w, err)
 		return
+	}
+	items := make([]map[string]any, 0, len(rules))
+	for _, r := range rules {
+		items = append(items, map[string]any{
+			"proto":    r.Proto,
+			"hostPort": r.HostPort,
+			"jailPort": r.JailPort,
+		})
 	}
 	writeOK(w, items)
 }

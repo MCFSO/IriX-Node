@@ -175,24 +175,24 @@ GET /api/container/info
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
 | `GET` | `/api/bastille/releases` | | bootstrap 的发行版列表，条目：`{name, version, sizeBytes?, createdAt?}` |
-| `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}` |
-| `POST` | `/api/bastille/setup` | body: `{mode: pf\|vnet\|linux\|check, extIf?, tunIf?, addr?}` | 容器软件初始化（网络 / Linux Jail 功能）→ `{ok, detail?, checked?}` |
+| `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}`（后台任务） |
+| `POST` | `/api/bastille/setup` | body: `{mode: default\|firewall\|vnet\|bridge\|shared\|linux, extIf?, tunIf?, addr?}` | 容器软件初始化（网络 / Linux Jail 功能等，服务端统一附加 -y 避免交互阻塞）→ `{ok, detail?}` |
 | `GET` | `/api/bastille/jails` | | jail 列表，条目：`{name, release, status, state?, ports: [..], createdAt?}` |
-| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip?, type: thin\|thick\|clone\|empty\|linux, vnet?, bridge?, mac?, volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建 jail（volumes 以 nullfs 挂载；workdir 设置 exec.start 工作目录；limits 为 rctl / ZFS 配额）→ `{name, warnings}` |
+| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip, type: thin\|thick\|clone\|empty\|linux, vnet: none\|vnet\|bridge, interface?, volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建 jail。type：thin=默认 / thick=-T / clone=-C / empty=-E(仅 NAME) / linux=-L；vnet/bridge 需 interface 且 IP 须含子网掩码；linux 与 VNET 互斥。volumes 以 nullfs 挂载；workdir 设置 exec.start 工作目录；limits 为 bastille limits / ZFS 配额 → `{name, warnings}` |
 | `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` | | jail 操作 |
-| `POST` | `/api/bastille/jails/{name}/destroy` | `force=1` | 销毁 jail（force=1 附加 -a，可摧毁运行中的） |
-| `POST` | `/api/bastille/jails/{name}/clone` | body: `{newName, ip?}` | 克隆 jail（可选改 IP） |
-| `POST` | `/api/bastille/jails/{name}/export` | | 导出 jail 为归档 → `{path: 归档路径}` |
-| `POST` | `/api/bastille/jails/import` | body: `{file, newName?, replace?}` | 从同步区归档导入 jail |
+| `POST` | `/api/bastille/jails/{name}/destroy` | `force=1` | 销毁 jail（`-y` 跳过确认；force=1 附加 `-a` 可摧毁运行中的） |
+| `POST` | `/api/bastille/jails/{name}/clone` | body: `{newName, ip?}` | 克隆 jail（`bastille clone TARGET NEW_NAME [IP]`） |
+| `POST` | `/api/bastille/jails/{name}/export` | | 导出 jail 为 txz 归档到 `bastille/backups/` → `{path}` |
+| `POST` | `/api/bastille/jails/import` | body: `{file, release?, force?}` | 从归档导入 jail（`bastille import [-f] FILE [RELEASE]`；RELEASE 为导入到指定发行版；-f 跳过校验和） |
 | `GET` | `/api/bastille/jails/{name}/console` | `tail=N` | 日志尾部 |
 | `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令 |
 | `GET` | `/api/bastille/jails/{name}/config` | | jail.conf 内容 |
 | `GET` | `/api/bastille/jails/{name}/mounts` | | fstab 挂载列表 |
-| `POST` / `DELETE` | `/api/bastille/jails/{name}/mounts` | body: `{source, dest}` / `{dest}` | 挂载 / 卸载 |
-| `POST` | `/api/bastille/jails/{name}/limits` | body: `{memoryMb?, cpus?, diskMb?}` | 硬件资源限制（rctl memoryuse/cpuset、ZFS 配额） |
+| `POST` / `DELETE` | `/api/bastille/jails/{name}/mounts` | body: `{source, dest}` / `{dest}` | 挂载（nullfs）/ 卸载 |
+| `POST` | `/api/bastille/jails/{name}/limits` | body: `{memoryMb?, cpus?, diskMb?}` | 硬件资源限制（`bastille limits add memoryuse` / `bastille limits cpu 0..N-1` / ZFS 配额） |
 | `GET` | `/api/bastille/templates` | | 模板列表（project/template 格式） |
 | `POST` | `/api/bastille/templates/apply` | body: `{jail, template, args: {KEY=VALUE}}` | 应用模板 |
-| `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发 / 删除转发 |
+| `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发（`bastille rdr JAIL tcp\|udp HP JP`）；删除 = list → clear → 重放其余规则 |
 | `GET` | `/api/bastille/rdr` | `jail?` | 转发规则列表（可按 jail 过滤）→ `[{proto, hostPort, jailPort}]` |
 
 **回退**：MCSM 面板无 `/api/container/info`，客户端自动回退到 §6 受限模式
