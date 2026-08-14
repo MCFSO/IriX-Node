@@ -35,6 +35,7 @@ func main() {
 		instanceLogMB = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		auditLog      = flag.Bool("audit-log", true, "将用户操作审计日志异步落盘到 {data}/logs/audit.log（记录每次 API 请求的完整细节）")
 		auditLogMB    = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
+		loadTune      = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -67,6 +68,9 @@ func main() {
 
 	d := NewDaemon(*dataDir, *apiKey)
 	d.Port = *port
+	if *loadTune {
+		go tuner.loop() // 负载自适应调谐（后台 goroutine 周期采样）
+	}
 	logDir := filepath.Join(*dataDir, "logs")
 	if *instanceLog {
 		d.LogDir = logDir

@@ -1,0 +1,14 @@
+新增负载自适应调谐器：根据节点自身负载动态调整 GOMAXPROCS 与 GOGC
+
+- 后台 goroutine 每 5 秒采样节点自身负载（进程 CPU 占比经 runtime/metrics 的
+  /cpu/classes/total:cpu-seconds 差值换算、goroutine 数、堆内存）
+- 三态状态机 idle/normal/busy，连续 3 次采样确认才切换（防抖）：
+  busy（CPU≥60% 或 goroutine≥2000）：GOMAXPROCS 恢复全核、GOGC 400（吞吐优先）
+  normal：GOMAXPROCS 全核、GOGC 100
+  idle（CPU≤5% 且 goroutine≤20）：GOMAXPROCS 降到 1、GOGC 50（内存回收积极）
+- 状态切换经 alog 记录中文日志；GET /api/load 暴露当前状态与调谐参数
+- -load-tune=false 可关闭（默认开启）
+- 修复：Go 1.24+ metrics.Read 对单元素数组返回 KindBad，改用与 metrics.All()
+  对齐的完整样本数组（本地实测 Go 1.26 确认）
+- 实测：空载 21 秒后自动切入 idle（GOMAXPROCS 18→1、GOGC 100→50）
+- 测试：状态判定纯函数、防抖状态机（applyFn 注入避免触碰全局参数）、/api/load 端点

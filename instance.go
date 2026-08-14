@@ -66,6 +66,7 @@ func (d *Daemon) authOK(r *http.Request) bool {
 func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 概览
 	mux.HandleFunc("GET /api/overview", d.auth(d.handleOverview))
+	mux.HandleFunc("GET /api/load", d.auth(d.handleLoad))
 
 	// 实例列表 / 详情 / 增删改
 	mux.HandleFunc("GET /api/service/remote_service_instances", d.auth(d.handleInstanceList))

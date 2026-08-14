@@ -1,9 +1,0 @@
-修复 Docker 列表条目的字段级契约问题（ports 数组 / ISO-8601 时间 / restartPolicy）
-
-- 容器条目 ports 由字符串改为数组（docker ps 的 Ports 按逗号拆分，
-  此前为字符串会被客户端 List.from 按字符拆散）
-- createdAt 由 docker 原生格式（"2026-08-14 12:34:56 +0000 UTC"）转为
-  ISO-8601（"2026-08-14T12:34:56Z"），解析失败原样返回容错；镜像条目同步修复
-- restartPolicy 由恒空改为一次 docker inspect 批量取回
-  （{{.HostConfig.RestartPolicy.Name}}，避免逐容器调用）
-- splitPorts/dockerTime 移到公共文件并新增单测
