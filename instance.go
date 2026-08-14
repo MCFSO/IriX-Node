@@ -103,9 +103,6 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 
 	// 集群节点 API（P0-P2，docs/cluster-node-api.md）
 	d.registerClusterRoutes(mux)
-
-	// 零侵入遥测（/api/metrics + /debug/pprof）
-	d.registerTelemetryRoutes(mux)
 }
 
 // auth 包装器：校验 API 密钥。
