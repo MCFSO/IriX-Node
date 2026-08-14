@@ -648,6 +648,41 @@ func TestNormalizeRelease(t *testing.T) {
 	}
 }
 
+// TestSplitPorts docker ps 的 Ports 字符串拆分（客户端契约要求数组）。
+func TestSplitPorts(t *testing.T) {
+	cases := map[string][]string{
+		"0.0.0.0:25565->25565/tcp, :::25565->25565/tcp": {"0.0.0.0:25565->25565/tcp", ":::25565->25565/tcp"},
+		"":                {},
+		"25565/tcp":       {"25565/tcp"},
+		"80/tcp, 443/tcp": {"80/tcp", "443/tcp"},
+	}
+	for in, want := range cases {
+		got := splitPorts(in)
+		if len(got) != len(want) {
+			t.Fatalf("splitPorts(%q) = %v, 期望 %v", in, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("splitPorts(%q) = %v, 期望 %v", in, got, want)
+			}
+		}
+	}
+}
+
+// TestDockerTime docker 时间格式转 ISO-8601。
+func TestDockerTime(t *testing.T) {
+	cases := map[string]string{
+		"2026-08-14 12:34:56 +0000 UTC": "2026-08-14T12:34:56Z",
+		"2026-01-01 00:00:00 +0000 UTC": "2026-01-01T00:00:00Z",
+		"garbage":                       "garbage", // 解析失败原样返回
+	}
+	for in, want := range cases {
+		if got := dockerTime(in); got != want {
+			t.Fatalf("dockerTime(%q) = %q, 期望 %q", in, got, want)
+		}
+	}
+}
+
 // TestParseDockerSize 容量字符串解析。
 func TestParseDockerSize(t *testing.T) {
 	cases := map[string]uint64{

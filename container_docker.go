@@ -73,17 +73,36 @@ func dockerPS(all bool) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	items := make([]map[string]any, 0, 8)
-	for _, m := range dockerJSONLines(out) {
+	lines := dockerJSONLines(out)
+	// restartPolicy 不在 ps 输出中：一次 docker inspect 批量取回（每容器一行）
+	restartByName := map[string]string{}
+	ids := make([]string, 0, len(lines))
+	for _, m := range lines {
+		if id := jstr(m, "ID"); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > 0 {
+		iargs := append([]string{"inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}"}, ids...)
+		if iout, err := cliRun(cliTimeout, "docker", iargs...); err == nil {
+			for i, line := range strings.Split(strings.TrimRight(iout, "\n"), "\n") {
+				if i < len(ids) {
+					restartByName[ids[i]] = strings.TrimSpace(line)
+				}
+			}
+		}
+	}
+	items := make([]map[string]any, 0, len(lines))
+	for _, m := range lines {
 		items = append(items, map[string]any{
 			"id":            jstr(m, "ID"),
 			"name":          jstr(m, "Names"),
 			"image":         jstr(m, "Image"),
 			"status":        jstr(m, "Status"),
 			"state":         jstr(m, "State"),
-			"ports":         jstr(m, "Ports"),
-			"createdAt":     jstr(m, "CreatedAt"),
-			"restartPolicy": "", // docker ps 不提供该字段，需 inspect 才可获取
+			"ports":         splitPorts(jstr(m, "Ports")),
+			"createdAt":     dockerTime(jstr(m, "CreatedAt")),
+			"restartPolicy": restartByName[jstr(m, "ID")],
 		})
 	}
 	return items, nil
@@ -235,7 +254,7 @@ func dockerImages() ([]map[string]any, error) {
 			"id":        e.id,
 			"tags":      e.tags,
 			"sizeBytes": parseDockerSize(e.size),
-			"createdAt": e.createdAt,
+			"createdAt": dockerTime(e.createdAt),
 		})
 	}
 	return items, nil

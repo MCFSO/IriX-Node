@@ -46,6 +46,32 @@ func isAllDigits(s string) bool {
 	return true
 }
 
+// splitPorts docker ps 的 Ports 形如 "0.0.0.0:25565->25565/tcp, :::25565->25565/tcp"，
+// 拆为客户端契约要求的字符串数组。
+func splitPorts(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{}
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// dockerTime 把 docker 输出的时间（"2026-08-14 12:34:56 +0000 UTC"）转为 ISO-8601；
+// 解析失败原样返回（容错，不因时间格式变化中断列表）。
+func dockerTime(s string) string {
+	if t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", strings.TrimSpace(s)); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return s
+}
+
 // bastilleVolume 挂载对（宿主机路径 → jail 内路径），Bastille create 的 volumes 条目。
 type bastilleVolume struct {
 	Source string `json:"source"`
