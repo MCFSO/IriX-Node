@@ -111,7 +111,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: d.auditMiddleware(limitAPIBody(mux)),
+		Handler: d.auditMiddleware(telemetryMiddleware(limitAPIBody(mux))),
 		// 只限制读取请求头与空闲连接：防 slowloris 占用连接。
 		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
 		ReadHeaderTimeout: 10 * time.Second,
