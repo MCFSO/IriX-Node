@@ -192,6 +192,20 @@ POST   /api/bastille/setup               body: {mode: default|firewall|vnet|brid
 
 > 实现提示:Bastille 无面板 API,irix-node 在 FreeBSD 上通过 `Process.run('bastille', ...)` 包装上述命令;bootstrap / 模板应用等长任务以 jobId + 日志流模式暴露。
 >
+> ⚠️ **PF 初始化注意事项（实测踩坑）**：`bastille setup firewall` 生成的 `/etc/pf.conf`
+> 把 `block in all` 放在 `pass in proto tcp port ssh` **之前**，而 PF 是 last-match 语义——
+> 启动 `service pf start` 会立刻切断 SSH 等一切入站连接。启用 PF 前必须把管理流量放行
+> （SSH、ICMP）移到 `block in all` 之前并加 `quick`：
+>
+> ```
+> pass in quick proto tcp from any to any port ssh flags S/SA keep state
+> pass in quick inet proto icmp from any to any icmp-type echoreq keep state
+> block in all
+> ```
+>
+> 未初始化 PF 时 rdr 会失败（pfctl: /dev/pf: No such file or directory），
+> 服务端已在 rdr 错误中提示先执行 `POST /api/bastille/setup {"mode":"firewall"}`。
+>
 > create 的 `type` 映射:thin(无标志,默认) / thick(-T) / clone(-C) / empty(-E) / linux(-L);
 > `vnet=none` 为共享宿主网络(默认),`vnet=vnet` 为 `-V`(INTERFACE 须为物理网卡),
 > `vnet=bridge` 为 `-B`(INTERFACE 须为已存在的桥接网卡);VNET 时 IP 必须含子网掩码;
