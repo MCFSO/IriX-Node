@@ -246,6 +246,18 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	case "linux":
 		args = append(args, "-L")
 	}
+	// 创建前诊断：给出可读的中文原因，而不是透出 bastille 的原始 stderr
+	if os.Geteuid() != 0 {
+		return nil, fmt.Errorf("创建 Jail 需要 root 权限（bastille 要求），请以 root 身份运行 irix-node")
+	}
+	if jtype != "empty" {
+		if st, err := os.Stat(filepath.Join(bastilleRoot, "releases", release)); err != nil || !st.IsDir() {
+			return nil, fmt.Errorf("发行版 %s 尚未 bootstrap 完成（未找到其目录），请先调用 POST /api/bastille/bootstrap 并等待任务完成", release)
+		}
+		if st, err := os.Stat(filepath.Join(bastilleRoot, "jails", name)); err == nil && st.IsDir() {
+			return nil, fmt.Errorf("jail %s 已存在，请换一个名称或先销毁", name)
+		}
+	}
 	// INTERFACE 是位置参数（NAME RELEASE IP [INTERFACE]），不是 -V/-B 的选项参数
 	switch vnetMode {
 	case "vnet":

@@ -1,0 +1,6 @@
+create 前增加诊断性检查：root 权限 / 发行版就绪 / 同名冲突
+
+- root 权限：bastille 创建 jail 必须 root，非 root 时给出明确提示而非 bastille 原始 stderr
+- release 未 bootstrap 完成（目录不存在，常见于 bootstrap 异步任务未完成就创建）：
+  提示先调用 bootstrap 并等待任务完成
+- 同名 jail 已存在：提示换名或先销毁
