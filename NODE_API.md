@@ -152,17 +152,21 @@ GET /api/container/info
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
 | `GET` | `/api/container/ps` | `all=1` | 容器列表，条目：`{id, name, image, status, state, ports: [..], createdAt, restartPolicy}` |
-| `POST` | `/api/container/create` | body: `{name, image, command?, ports: [..], volumes: [..], env: {}, restartPolicy?, memoryLimitMb?, cpus?}` | 创建容器（不启动） |
+| `POST` | `/api/container/create` | body: `{name, image, command?, workdir?, ports: [..], volumes: [..], env: {}, restartPolicy?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建容器（不启动） |
 | `POST` | `/api/container/{id}/start` `stop` `restart` `kill` | | 容器操作 |
 | `DELETE` | `/api/container/{id}` | `force=1` | 删除容器 |
 | `GET` | `/api/container/{id}/logs` | `tail=N` | 日志尾部 |
 | `POST` | `/api/container/{id}/exec` | body: `{command}` | 容器内执行命令 |
 | `GET` | `/api/container/{id}/stats` | | `{cpuPercent, memoryBytes, memoryLimitBytes, netRxBytes, netTxBytes}` |
+| `POST` | `/api/container/{id}/clone` | body: `{name}` | 克隆容器（commit+create 等效）→ `{id, name, image}` |
+| `POST` | `/api/container/{id}/limits` | body: `{memoryMb?, cpus?}` | 动态调整资源限制（docker update） |
+| `POST` | `/api/container/{id}/export` | | 导出容器文件系统为 tar → `{password, addr, fileName}` |
 | `GET` | `/api/image/list` | | 镜像列表，条目：`{id, tags: [..], sizeBytes, createdAt}` |
 | `POST` | `/api/image/pull` | body: `{name}` | 拉取镜像 |
 | `POST` | `/api/image/build` | body: `{dockerfile, name, tag}` | 构建镜像 → `{jobId}` |
 | `GET` | `/api/image/build-progress` | `jobId` | `{status: building\|done\|failed, log: [..], image: "name:tag"}` |
 | `DELETE` | `/api/image/{name}` | | 删除镜像 |
+| `POST` | `/api/image/import` | body: `{fileName, name}` | 从同步区 tar 导入为镜像 |
 | `GET` | `/api/volume/list` / `DELETE /api/volume/{name}` | | 卷列表 / 删除 |
 | `GET` | `/api/network/list` | | 网络列表，条目：`{name, driver, subnet?}` |
 
@@ -172,14 +176,24 @@ GET /api/container/info
 |------|------|------|------|
 | `GET` | `/api/bastille/releases` | | bootstrap 的发行版列表，条目：`{name, version, sizeBytes?, createdAt?}` |
 | `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}` |
+| `POST` | `/api/bastille/setup` | body: `{mode: pf\|vnet\|linux\|check, extIf?, tunIf?, addr?}` | 容器软件初始化（网络 / Linux Jail 功能）→ `{ok, detail?, checked?}` |
 | `GET` | `/api/bastille/jails` | | jail 列表，条目：`{name, release, status, state?, ports: [..], createdAt?}` |
-| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip?, type: thin\|thick\|clone\|empty\|linux, vnet?, bridge?, mac?}` | 创建 jail |
-| `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` `destroy` | | jail 操作 |
+| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip?, type: thin\|thick\|clone\|empty\|linux, vnet?, bridge?, mac?, volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建 jail（volumes 以 nullfs 挂载；workdir 设置 exec.start 工作目录；limits 为 rctl / ZFS 配额）→ `{name, warnings}` |
+| `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` | | jail 操作 |
+| `POST` | `/api/bastille/jails/{name}/destroy` | `force=1` | 销毁 jail（force=1 附加 -a，可摧毁运行中的） |
+| `POST` | `/api/bastille/jails/{name}/clone` | body: `{newName, ip?}` | 克隆 jail（可选改 IP） |
+| `POST` | `/api/bastille/jails/{name}/export` | | 导出 jail 为归档 → `{path: 归档路径}` |
+| `POST` | `/api/bastille/jails/import` | body: `{file, newName?, replace?}` | 从同步区归档导入 jail |
 | `GET` | `/api/bastille/jails/{name}/console` | `tail=N` | 日志尾部 |
 | `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令 |
+| `GET` | `/api/bastille/jails/{name}/config` | | jail.conf 内容 |
+| `GET` | `/api/bastille/jails/{name}/mounts` | | fstab 挂载列表 |
+| `POST` / `DELETE` | `/api/bastille/jails/{name}/mounts` | body: `{source, dest}` / `{dest}` | 挂载 / 卸载 |
+| `POST` | `/api/bastille/jails/{name}/limits` | body: `{memoryMb?, cpus?, diskMb?}` | 硬件资源限制（rctl memoryuse/cpuset、ZFS 配额） |
 | `GET` | `/api/bastille/templates` | | 模板列表（project/template 格式） |
 | `POST` | `/api/bastille/templates/apply` | body: `{jail, template, args: {KEY=VALUE}}` | 应用模板 |
 | `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发 / 删除转发 |
+| `GET` | `/api/bastille/rdr` | `jail?` | 转发规则列表（可按 jail 过滤）→ `[{proto, hostPort, jailPort}]` |
 
 **回退**：MCSM 面板无 `/api/container/info`，客户端自动回退到 §6 受限模式
 （镜像构建 + 容器/网络只读列表），UI 标注「MCSM 受限模式」。

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -409,7 +410,10 @@ func TestClusterTransfer(t *testing.T) {
 	}
 }
 
-// TestContainerUnavailable 非 Linux/FreeBSD 平台：能力探测不可用、操作返回 501。
+// TestContainerUnavailable 容器能力探测与平台行为一致性：
+// - 本机运行时不可用 → available=false，Docker 操作端点 501
+// - 本机运行时可用（如 CI 的 Linux runner 自带 Docker）→ available=true
+// - Bastille 端点在非 FreeBSD 平台恒定 501
 func TestContainerUnavailable(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newTestServer(d)
@@ -420,60 +424,109 @@ func TestContainerUnavailable(t *testing.T) {
 		t.Fatalf("container/info 失败: %d %s", code, body)
 	}
 	info := decodeData(t, body)
-	if info["available"] != false {
-		t.Fatalf("本平台应不可用: %v", info)
-	}
-	// 操作端点应返回业务状态 501（HTTP 恒为 200，状态在 body.status，MCSM 风格）
-	for _, p := range []string{
-		"/api/container/ps?apikey=test-key",
-		"/api/image/list?apikey=test-key",
-		"/api/volume/list?apikey=test-key",
-		"/api/network/list?apikey=test-key",
-		"/api/bastille/releases?apikey=test-key",
-		"/api/bastille/jails?apikey=test-key",
-		"/api/bastille/templates?apikey=test-key",
-	} {
-		code, body := doReq(t, srv.URL+p)
-		if code != http.StatusOK {
-			t.Fatalf("%s HTTP 应 200, 实际 %d %s", p, code, body)
+	_, _, _, runtimeOK := containerRuntimeInfo()
+	if runtimeOK {
+		if info["available"] != true {
+			t.Fatalf("运行时可用但探测不可用: %v", info)
 		}
-		var resp struct {
-			Status int `json:"status"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("解析失败: %v（%s）", err, body)
-		}
-		if resp.Status != http.StatusNotImplemented {
-			t.Fatalf("%s 业务状态应 501, 实际 %d %s", p, resp.Status, body)
+	} else {
+		if info["available"] != false {
+			t.Fatalf("运行时不可用但探测可用: %v", info)
 		}
 	}
-	// POST 型端点同样应 501
-	for _, p := range []struct {
-		path string
-		body map[string]any
-	}{
-		{"/api/container/x/clone", map[string]any{"name": "y"}},
-		{"/api/container/x/export", nil},
-		{"/api/image/import", map[string]any{"fileName": "/a.tar", "name": "img"}},
-		{"/api/bastille/setup", map[string]any{"options": []string{"vnet_default_interface=vtnet0"}}},
-		{"/api/bastille/jails/x/clone", map[string]any{"newName": "y"}},
-		{"/api/bastille/jails/x/export", nil},
-		{"/api/bastille/import", map[string]any{"fileName": "/a.tar.gz"}},
-		{"/api/bastille/jails/x/mounts", map[string]any{"source": "/s", "dest": "/d"}},
-		{"/api/bastille/jails/x/limits", map[string]any{"args": []string{"cpulimit:50"}}},
-	} {
-		code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
-		if code != http.StatusOK {
-			t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+	// Bastille 端点在非 FreeBSD 平台恒 501
+	if runtime.GOOS != "freebsd" {
+		for _, p := range []string{
+			"/api/bastille/releases?apikey=test-key",
+			"/api/bastille/jails?apikey=test-key",
+			"/api/bastille/templates?apikey=test-key",
+		} {
+			code, body := doReq(t, srv.URL+p)
+			if code != http.StatusOK {
+				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p, code, body)
+			}
+			var resp struct {
+				Status int `json:"status"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("解析失败: %v（%s）", err, body)
+			}
+			if resp.Status != http.StatusNotImplemented {
+				t.Fatalf("%s 业务状态应 501, 实际 %d %s", p, resp.Status, body)
+			}
 		}
-		var resp struct {
-			Status int `json:"status"`
+		// POST 型 Bastille 端点同样应 501
+		for _, p := range []struct {
+			path string
+			body map[string]any
+		}{
+			{"/api/bastille/setup", map[string]any{"mode": "check"}},
+			{"/api/bastille/jails/x/clone", map[string]any{"newName": "y"}},
+			{"/api/bastille/jails/x/export", nil},
+			{"/api/bastille/jails/import", map[string]any{"file": "/a.tar.gz"}},
+			{"/api/bastille/jails/x/limits", map[string]any{"memoryMb": 512}},
+			{"/api/bastille/jails/x/mounts", map[string]any{"source": "/s", "dest": "/d"}},
+			{"/api/bastille/jails/create", map[string]any{"name": "y", "release": "14.1-RELEASE"}},
+		} {
+			code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
+			if code != http.StatusOK {
+				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+			}
+			var resp struct {
+				Status int `json:"status"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("解析失败: %v（%s）", err, body)
+			}
+			if resp.Status != http.StatusNotImplemented {
+				t.Fatalf("%s 业务状态应 501, 实际 %d %s", p.path, resp.Status, body)
+			}
 		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			t.Fatalf("解析失败: %v（%s）", err, body)
+	}
+	// Docker 端点：本机运行时不可用（或非 Linux）时 501
+	if !runtimeOK || runtime.GOOS != "linux" {
+		for _, p := range []string{
+			"/api/container/ps?apikey=test-key",
+			"/api/image/list?apikey=test-key",
+			"/api/volume/list?apikey=test-key",
+			"/api/network/list?apikey=test-key",
+		} {
+			code, body := doReq(t, srv.URL+p)
+			if code != http.StatusOK {
+				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p, code, body)
+			}
+			var resp struct {
+				Status int `json:"status"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("解析失败: %v（%s）", err, body)
+			}
+			if resp.Status != http.StatusNotImplemented {
+				t.Fatalf("%s 业务状态应 501, 实际 %d %s", p, resp.Status, body)
+			}
 		}
-		if resp.Status != http.StatusNotImplemented {
-			t.Fatalf("%s 业务状态应 501, 实际 %d %s", p.path, resp.Status, body)
+		for _, p := range []struct {
+			path string
+			body map[string]any
+		}{
+			{"/api/container/x/clone", map[string]any{"name": "y"}},
+			{"/api/container/x/export", nil},
+			{"/api/container/x/limits", map[string]any{"memoryMb": 512}},
+			{"/api/image/import", map[string]any{"fileName": "/a.tar", "name": "img"}},
+		} {
+			code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
+			if code != http.StatusOK {
+				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+			}
+			var resp struct {
+				Status int `json:"status"`
+			}
+			if err := json.Unmarshal(body, &resp); err != nil {
+				t.Fatalf("解析失败: %v（%s）", err, body)
+			}
+			if resp.Status != http.StatusNotImplemented {
+				t.Fatalf("%s 业务状态应 501, 实际 %d %s", p.path, resp.Status, body)
+			}
 		}
 	}
 }

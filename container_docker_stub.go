@@ -6,18 +6,8 @@ package main
 
 func dockerPS(all bool) ([]map[string]any, error) { return nil, errContainerUnsupported }
 
-func dockerCreate(name, image, command, workDir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitGb int) (map[string]any, error) {
+func dockerCreate(name, image, command, workdir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitMb int) (map[string]any, error) {
 	return nil, errContainerUnsupported
-}
-
-func dockerClone(id, name string) (map[string]any, error) { return nil, errContainerUnsupported }
-
-func dockerExport(d *Daemon, id string) (map[string]any, error) {
-	return nil, errContainerUnsupported
-}
-
-func dockerImageImport(d *Daemon, fileName, name string) error {
-	return errContainerUnsupported
 }
 
 func dockerAction(id, action string) error { return errContainerUnsupported }
@@ -45,3 +35,17 @@ func dockerVolumeList() ([]map[string]any, error) { return nil, errContainerUnsu
 func dockerVolumeRemove(name string) error { return errContainerUnsupported }
 
 func dockerNetworkList() ([]map[string]any, error) { return nil, errContainerUnsupported }
+
+func dockerClone(id, name string) (map[string]any, error) { return nil, errContainerUnsupported }
+
+func dockerExport(d *Daemon, id string) (map[string]any, error) {
+	return nil, errContainerUnsupported
+}
+
+func dockerImageImport(d *Daemon, fileName, name string) error {
+	return errContainerUnsupported
+}
+
+func dockerLimits(id string, memoryMb int, cpus float64) error {
+	return errContainerUnsupported
+}

@@ -119,7 +119,7 @@ GET /api/container/info
 
 ```
 GET    /api/container/ps?all=1                        → 容器列表
-POST   /api/container/create                         → 创建(参数同 §2 表格,另加 workDir?/diskLimitGb?)
+POST   /api/container/create                         → 创建(参数同 §2 表格)
 POST   /api/container/{id}/start
 POST   /api/container/{id}/stop
 POST   /api/container/{id}/restart
@@ -128,14 +128,11 @@ DELETE /api/container/{id}
 GET    /api/container/{id}/logs?tail=N
 POST   /api/container/{id}/exec          body: {command}
 GET    /api/container/{id}/stats
-POST   /api/container/{id}/clone         body: {name}   → {id, name, image}（commit+create 等效克隆）
-POST   /api/container/{id}/export        → {password, addr, fileName}（容器文件系统导出为 tar 到同步区）
 GET    /api/image/list
 POST   /api/image/pull                    body: {name}
 POST   /api/image/build                   body: {dockerfile, name, tag} → {jobId}
 GET    /api/image/build-progress?jobId=   → {status: building|done|failed, log: [...], image: "name:tag"}
 DELETE /api/image/{name}
-POST   /api/image/import                  body: {fileName, name}（从同步区 tar 导入为镜像）
 GET    /api/volume/list
 DELETE /api/volume/{name}
 GET    /api/network/list
@@ -146,34 +143,39 @@ GET    /api/network/list
 ```
 GET    /api/bastille/releases                        → bootstrap 的发行版列表
 POST   /api/bastille/bootstrap          body: {release}   → 后台任务,进度经日志流返回
-POST   /api/bastille/setup              body: {options: ["key=value", ...]} → {jobId}
-                                          （容器软件初始化:网络/VNET 网关、防火墙、Linux Jail 功能等,
-                                            参数直传 bastille setup,不带参数会进入交互模式故必须显式给出）
 GET    /api/bastille/jails                           → jail 列表(含状态/IP/模板 tags)
-POST   /api/bastille/jails/create       body: {name, release, ip, type: thin|thick|clone|empty|linux, vnet?, bridge?, mac?}
-                                          （类型互斥:thin -T 通过符号链接样板创建;thick 直接解压样板环境;
-                                            clone -C 复制已有 jail;empty -E 空 jail;linux -L Linuxulator jail）
+POST   /api/bastille/jails/create       body: {name, release, ip, type: thin|thick|clone|empty|linux, vnet?, bridge?, volumes?, workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
 POST   /api/bastille/jails/{name}/start
 POST   /api/bastille/jails/{name}/stop
 POST   /api/bastille/jails/{name}/restart
-POST   /api/bastille/jails/{name}/destroy           （运行中的 jail 需 -a,服务端已自动附加）
-POST   /api/bastille/jails/{name}/clone  body: {newName, newIp?}
-POST   /api/bastille/jails/{name}/export → {password, addr, fileName}（导出归档到同步区）
-POST   /api/bastille/import              body: {fileName, name?}（从同步区归档导入 jail）
+POST   /api/bastille/jails/{name}/destroy?force=1    → force=1 时附加 -a(可摧毁运行中的 jail)
+POST   /api/bastille/jails/{name}/clone  body: {newName, ip?}   → bastille clone(thin 克隆,可选改 IP)
+POST   /api/bastille/jails/{name}/export             → bastille export,返回 {path: 归档路径}
+POST   /api/bastille/jails/import        body: {file, newName?, replace?} → bastille import
+POST   /api/bastille/jails/{name}/limits body: {memoryMb?, cpus?, diskMb?}
+                                                 → memoryMb: rctl memoryuse;cpus: cpuset;diskMb: ZFS 配额
 GET    /api/bastille/jails/{name}/console?tail=N     → 日志尾部
 POST   /api/bastille/jails/{name}/cmd    body: {command}
 GET    /api/bastille/jails/{name}/config             → jail.conf 属性
-GET    /api/bastille/jails/{name}/mounts             → fstab 挂载列表
-POST   /api/bastille/jails/{name}/mounts body: {source, dest}   → bastille mount
-DELETE /api/bastille/jails/{name}/mounts body: {dest}           → bastille umount
-POST   /api/bastille/jails/{name}/limits body: {args: ["rctl 规则", ...]} → 硬件资源限制
 GET    /api/bastille/templates                       → 已 bootstrap 的模板列表(project/template)
 POST   /api/bastille/templates/apply     body: {jail, template, args: {KEY=VALUE}}
 POST   /api/bastille/rdr                 body: {jail, proto, hostPort, jailPort}
 DELETE /api/bastille/rdr                 body: 同上(删除转发)
+GET    /api/bastille/rdr?jail=                        → 转发规则列表(可过滤 jail)
+POST   /api/bastille/setup               body: {mode: pf|vnet|linux|check, extIf?, tunIf?, addr?, check?}
+                                                 → {ok, detail?, checked?}
+                                                 pf:    bastille setup pf <extIf>
+                                                 vnet:  bastille setup vnet <extIf> <tunIf> <addr>
+                                                 linux: bastille setup linux(Linuxulator 初始化)
+                                                 check: bastille setup --check
+GET    /api/bastille/jails/{name}/mounts             → MOUNT 挂载列表
 ```
 
-> 实现提示:Bastille 无面板 API,irix-node 在 FreeBSD 上通过 `Process.run('bastille', ...)` 包装上述命令;构建 / bootstrap / setup / 模板应用等长任务以 jobId + 日志流模式暴露。
+> 实现提示:Bastille 无面板 API,irix-node 在 FreeBSD 上通过 `Process.run('bastille', ...)` 包装上述命令;构建 / bootstrap / 模板应用等长任务以 jobId + 日志流模式暴露。
+>
+> create 的 `volumes`(宿主机路径:jail 内路径)由服务端在 jail 创建后以 nullfs 挂载(`bastille mount` / mount.fstab);`workdir` 设置 `exec.start` 的工作目录(数据目录挂载后强制 cwd)。
+>
+> Docker 端点同步新增:POST /api/container/{id}/clone body: {name};POST /api/container/{id}/limits body: {memoryMb?, cpus?};create body 增加 workdir / diskLimitMb。
 
 ### 3.4 响应约定
 
@@ -246,9 +248,10 @@ String? containerId;    // 容器名 / jail 名,与 remoteUuid 的对应关系
 |------|------|--------|------|
 | **P0** | 容器后端抽象 + 本地 `DockerCliBackend`(docker CLI 解析、生命周期、镜像/卷/网络) | `lib/services/container/` + 单测(解析测试) | ✅ 已完成 |
 | **P0** | `ServerInstance` 模型扩展(`RunMode`/`ContainerConfig`)+ 数据库 v6 迁移 + 本地实例详情页容器化(运行方式表单 + 容器 tab + `ContainerEnvironmentPanel`) | 本地可容器化运行 MC | ✅ 已完成 |
-| **P1** | `NodeApiClient` 容器/Bastille 端点 + `NodeDockerBackend`/`NodeBastilleBackend`(含 MCSM 受限回退) | `NODE_API.md` §6.1 已发布,服务端按契约实现 | ✅ 已完成（客户端与服务端均就绪） |
+| **P1** | `NodeApiClient` 容器/Bastille 端点 + `NodeDockerBackend`/`NodeBastilleBackend`(含 MCSM 受限回退) | `NODE_API.md` §6.1 已发布,服务端按契约实现 | ✅ 客户端已完成,服务端待对接 |
 | **P1** | 多机实例详情页「容器」tab + 节点详情页「容器」tab(按节点平台选 Docker/Bastille 后端,替换旧 `_DockerEnvScreen`) | 复用 `ContainerEnvironmentPanel` | ✅ 已完成(服务端就绪后即生效) |
-| **P2** | 多机 Bastille 专属能力(Bastillefile 模板、rdr 编辑、bootstrap 任务进度 UI) | 面板按后端能力裁切 | 待做 |
+| **P2** | 多机 Bastille 专属能力(Bastillefile 模板、rdr 编辑、bootstrap 任务进度 UI) | 面板按后端能力裁切 | ✅ 已完成:rdr 增删查、bootstrap、运行时感知 Tab |
+| **P2** | Bastille 全功能扩展:bastille setup 初始化(pf/vnet/linux)、创建 jail(类型/VNET/桥接/IP)、clone、destroy -a、import/export、资源限制(内存/CPU/磁盘)、数据目录挂载 + 强制工作目录 | 后端接口 + `ContainerEnvironmentPanel` 设置/转发 Tab + 各对话框 | ✅ 已完成(客户端契约,服务端待按 §3.3 对接) |
 | **P2** | 集群实例容器化运行 + 迁移时的容器重建 | 容器实例可迁移 | 待做 |
 
 ## 7. 边界与回退

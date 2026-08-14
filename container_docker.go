@@ -90,9 +90,9 @@ func dockerPS(all bool) ([]map[string]any, error) {
 }
 
 // dockerCreate 创建容器（不启动），返回 {id, name}。
-// workDir 经 -w 设置容器内工作目录；diskLimitGb 经 --storage-opt size= 限制
+// workdir 经 -w 设置容器内工作目录；diskLimitMb 经 --storage-opt size= 限制
 // 容器可写层大小（需 overlay2 且启用 quota，否则该参数无效）。
-func dockerCreate(name, image, command, workDir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitGb int) (map[string]any, error) {
+func dockerCreate(name, image, command, workdir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitMb int) (map[string]any, error) {
 	args := []string{"create"}
 	if name != "" {
 		args = append(args, "--name", name)
@@ -119,11 +119,11 @@ func dockerCreate(name, image, command, workDir string, ports, volumes []string,
 	if cpus > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(cpus, 'f', -1, 64))
 	}
-	if diskLimitGb > 0 {
-		args = append(args, "--storage-opt", fmt.Sprintf("size=%dG", diskLimitGb))
+	if diskLimitMb > 0 {
+		args = append(args, "--storage-opt", fmt.Sprintf("size=%dM", diskLimitMb))
 	}
-	if workDir != "" {
-		args = append(args, "-w", workDir)
+	if workdir != "" {
+		args = append(args, "-w", workdir)
 	}
 	args = append(args, image)
 	if command != "" {
@@ -313,6 +313,21 @@ func dockerNetworkList() ([]map[string]any, error) {
 		})
 	}
 	return items, nil
+}
+
+// dockerLimits 动态调整容器资源限制（docker update，运行中即时生效）。
+// memoryMb → -m；cpus → --cpus。
+func dockerLimits(id string, memoryMb int, cpus float64) error {
+	args := []string{"update"}
+	if memoryMb > 0 {
+		args = append(args, "-m", fmt.Sprintf("%dm", memoryMb))
+	}
+	if cpus > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(cpus, 'f', -1, 64))
+	}
+	args = append(args, id)
+	_, err := cliRun(cliTimeout, "docker", args...)
+	return err
 }
 
 // dockerClone 克隆容器：commit 当前文件系统为临时镜像，再以新名字创建容器。

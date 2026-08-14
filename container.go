@@ -24,6 +24,12 @@ import (
 // errContainerUnsupported 当前平台不支持容器能力的哨兵错误。
 var errContainerUnsupported = errors.New("当前平台不支持容器环境")
 
+// bastilleVolume 挂载对（宿主机路径 → jail 内路径），Bastille create 的 volumes 条目。
+type bastilleVolume struct {
+	Source string `json:"source"`
+	Dest   string `json:"dest"`
+}
+
 // jobLogMaxLines 长任务日志保留行数上限，防止构建日志无限膨胀。
 const jobLogMaxLines = 500
 
@@ -160,9 +166,10 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/volume/list", d.auth(d.handleVolumeList))
 	mux.HandleFunc("DELETE /api/volume/{name}", d.auth(d.handleVolumeRemove))
 	mux.HandleFunc("GET /api/network/list", d.auth(d.handleNetworkList))
-	// 容器克隆 / 导出导入
+	// 容器克隆 / 导出导入 / 资源限制
 	mux.HandleFunc("POST /api/container/{id}/clone", d.auth(d.handleContainerClone))
 	mux.HandleFunc("POST /api/container/{id}/export", d.auth(d.handleContainerExport))
+	mux.HandleFunc("POST /api/container/{id}/limits", d.auth(d.handleContainerLimits))
 	mux.HandleFunc("POST /api/image/import", d.auth(d.handleImageImport))
 
 	// Bastille（FreeBSD）
@@ -177,7 +184,7 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bastille/jails/{name}/destroy", d.auth(d.handleBastilleDestroy))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/clone", d.auth(d.handleBastilleClone))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/export", d.auth(d.handleBastilleExport))
-	mux.HandleFunc("POST /api/bastille/import", d.auth(d.handleBastilleImport))
+	mux.HandleFunc("POST /api/bastille/jails/import", d.auth(d.handleBastilleImport))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/console", d.auth(d.handleBastilleConsole))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/cmd", d.auth(d.handleBastilleCmd))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfig))
@@ -189,6 +196,7 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bastille/templates/apply", d.auth(d.handleBastilleApply))
 	mux.HandleFunc("POST /api/bastille/rdr", d.auth(d.handleBastilleRdrAdd))
 	mux.HandleFunc("DELETE /api/bastille/rdr", d.auth(d.handleBastilleRdrDelete))
+	mux.HandleFunc("GET /api/bastille/rdr", d.auth(d.handleBastilleRdrList))
 	// 长任务进度（bootstrap / setup / 模板应用），与 /api/image/build-progress 同构
 	mux.HandleFunc("GET /api/bastille/jobs/{jobId}", d.auth(d.handleBastilleJobProgress))
 }
@@ -231,20 +239,20 @@ func (d *Daemon) handleContainerPS(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleContainerCreate 创建容器（不启动）。
-// POST /api/container/create body: {name, image, command?, workDir?, ports, volumes, env, restartPolicy?, memoryLimitMb?, cpus?, diskLimitGb?}
+// POST /api/container/create body: {name, image, command?, workdir?, ports, volumes, env, restartPolicy?, memoryLimitMb?, cpus?, diskLimitMb?}
 func (d *Daemon) handleContainerCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name          string            `json:"name"`
 		Image         string            `json:"image"`
 		Command       string            `json:"command"`
-		WorkDir       string            `json:"workDir"`
+		Workdir       string            `json:"workdir"`
 		Ports         []string          `json:"ports"`
 		Volumes       []string          `json:"volumes"`
 		Env           map[string]string `json:"env"`
 		RestartPolicy string            `json:"restartPolicy"`
 		MemoryLimitMb int               `json:"memoryLimitMb"`
 		Cpus          float64           `json:"cpus"`
-		DiskLimitGb   int               `json:"diskLimitGb"`
+		DiskLimitMb   int               `json:"diskLimitMb"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
@@ -254,8 +262,8 @@ func (d *Daemon) handleContainerCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 image 参数")
 		return
 	}
-	info, err := dockerCreate(body.Name, body.Image, body.Command, body.WorkDir, body.Ports, body.Volumes,
-		body.Env, body.RestartPolicy, body.MemoryLimitMb, body.Cpus, body.DiskLimitGb)
+	info, err := dockerCreate(body.Name, body.Image, body.Command, body.Workdir, body.Ports, body.Volumes,
+		body.Env, body.RestartPolicy, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
 	if err != nil {
 		containerErr(w, err)
 		return
@@ -514,17 +522,27 @@ func (d *Daemon) handleBastilleJails(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, items)
 }
 
-// handleBastilleCreate 创建 jail。
-// POST /api/bastille/jails/create body: {name, release, ip?, type, vnet?, bridge?, mac?}
+// handleBastilleCreate 创建 jail（含类型/VNET/桥接/IP 与创建后配置）。
+// POST /api/bastille/jails/create
+// body: {name, release, ip?, type: thin|thick|clone|empty|linux, vnet?, bridge?, mac?,
+//
+//	volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
+//
+// 响应: {name, warnings: [配置步骤失败告警]}（创建成功但后置配置失败不视为失败）
 func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name    string `json:"name"`
-		Release string `json:"release"`
-		IP      string `json:"ip"`
-		Type    string `json:"type"`
-		Vnet    bool   `json:"vnet"`
-		Bridge  bool   `json:"bridge"`
-		Mac     string `json:"mac"`
+		Name          string           `json:"name"`
+		Release       string           `json:"release"`
+		IP            string           `json:"ip"`
+		Type          string           `json:"type"`
+		Vnet          bool             `json:"vnet"`
+		Bridge        bool             `json:"bridge"`
+		Mac           string           `json:"mac"`
+		Volumes       []bastilleVolume `json:"volumes"`
+		Workdir       string           `json:"workdir"`
+		MemoryLimitMb int              `json:"memoryLimitMb"`
+		Cpus          int              `json:"cpus"`
+		DiskLimitMb   int              `json:"diskLimitMb"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
@@ -534,16 +552,18 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 name/release 参数")
 		return
 	}
-	if err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, body.Vnet, body.Bridge, body.Mac); err != nil {
+	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, body.Vnet, body.Bridge,
+		body.Mac, body.Volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
+	if err != nil {
 		containerErr(w, err)
 		return
 	}
-	writeOK(w, true)
+	writeOK(w, info)
 }
 
 // handleBastilleStart 启动 jail。
 func (d *Daemon) handleBastilleStart(w http.ResponseWriter, r *http.Request) {
-	if err := bastilleAction(r.PathValue("name"), "start"); err != nil {
+	if err := bastilleAction(r.PathValue("name"), "start", false); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -552,7 +572,7 @@ func (d *Daemon) handleBastilleStart(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleStop 停止 jail。
 func (d *Daemon) handleBastilleStop(w http.ResponseWriter, r *http.Request) {
-	if err := bastilleAction(r.PathValue("name"), "stop"); err != nil {
+	if err := bastilleAction(r.PathValue("name"), "stop", false); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -561,7 +581,7 @@ func (d *Daemon) handleBastilleStop(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleRestart 重启 jail。
 func (d *Daemon) handleBastilleRestart(w http.ResponseWriter, r *http.Request) {
-	if err := bastilleAction(r.PathValue("name"), "restart"); err != nil {
+	if err := bastilleAction(r.PathValue("name"), "restart", false); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -569,8 +589,9 @@ func (d *Daemon) handleBastilleRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBastilleDestroy 销毁 jail。
+// POST /api/bastille/jails/{name}/destroy?force=1 → force=1 附加 -a（可摧毁运行中的 jail）
 func (d *Daemon) handleBastilleDestroy(w http.ResponseWriter, r *http.Request) {
-	if err := bastilleAction(r.PathValue("name"), "destroy"); err != nil {
+	if err := bastilleAction(r.PathValue("name"), "destroy", queryParam(r, "force") == "1"); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -812,30 +833,44 @@ func (d *Daemon) handleImageImport(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, true)
 }
 
-// handleBastilleSetup 容器软件初始化设置（网络、Linux Jail 功能等）→ {jobId}。
-// POST /api/bastille/setup body: {options: ["key=value", ...]}
+// handleBastilleSetup 容器软件初始化设置（docs/container-support.md §3.3）。
+// POST /api/bastille/setup body: {mode: pf|vnet|linux|check, extIf?, tunIf?, addr?}
+//
+//	pf:    bastille setup pf <extIf>（防火墙规则）
+//	vnet:  bastille setup vnet <extIf> <tunIf> <addr>（VNET 网关）
+//	linux: bastille setup linux（Linuxulator 初始化）
+//	check: bastille setup --check（环境检查）
+//
+// 响应: {ok, detail?, checked?}（check 模式含 checked）
 func (d *Daemon) handleBastilleSetup(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Options []string `json:"options"`
+		Mode  string `json:"mode"`
+		ExtIf string `json:"extIf"`
+		TunIf string `json:"tunIf"`
+		Addr  string `json:"addr"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	jobID, err := bastilleSetup(body.Options)
+	if body.Mode == "" {
+		writeError(w, http.StatusBadRequest, "缺少 mode 参数（pf/vnet/linux/check）")
+		return
+	}
+	result, err := bastilleSetupMode(body.Mode, body.ExtIf, body.TunIf, body.Addr)
 	if err != nil {
 		containerErr(w, err)
 		return
 	}
-	writeOK(w, map[string]any{"jobId": jobID})
+	writeOK(w, result)
 }
 
 // handleBastilleClone 克隆 jail（bastille clone NAME NEW_NAME [NEW_IP]）。
-// POST /api/bastille/jails/{name}/clone body: {newName, newIp?}
+// POST /api/bastille/jails/{name}/clone body: {newName, ip?}
 func (d *Daemon) handleBastilleClone(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		NewName string `json:"newName"`
-		NewIP   string `json:"newIp"`
+		IP      string `json:"ip"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
@@ -845,15 +880,15 @@ func (d *Daemon) handleBastilleClone(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 newName 参数")
 		return
 	}
-	if err := bastilleClone(r.PathValue("name"), body.NewName, body.NewIP); err != nil {
+	if err := bastilleClone(r.PathValue("name"), body.NewName, body.IP); err != nil {
 		containerErr(w, err)
 		return
 	}
 	writeOK(w, true)
 }
 
-// handleBastilleExport 导出 jail 为归档，返回下载票据。
-// POST /api/bastille/jails/{name}/export → {password, addr, fileName}
+// handleBastilleExport 导出 jail 为归档到同步区。
+// POST /api/bastille/jails/{name}/export → {path: 归档路径（可作 import 的 file）}
 func (d *Daemon) handleBastilleExport(w http.ResponseWriter, r *http.Request) {
 	info, err := bastilleExport(d, r.PathValue("name"))
 	if err != nil {
@@ -863,22 +898,23 @@ func (d *Daemon) handleBastilleExport(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, info)
 }
 
-// handleBastilleImport 从同步区归档导入 jail（bastille import FILE [NAME]）。
-// POST /api/bastille/import body: {fileName, name?}
+// handleBastilleImport 从同步区归档导入 jail（bastille import FILE [NEW_NAME]）。
+// POST /api/bastille/jails/import body: {file, newName?, replace?}
 func (d *Daemon) handleBastilleImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		FileName string `json:"fileName"`
-		Name     string `json:"name"`
+		File    string `json:"file"`
+		NewName string `json:"newName"`
+		Replace bool   `json:"replace"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if body.FileName == "" {
-		writeError(w, http.StatusBadRequest, "缺少 fileName 参数")
+	if body.File == "" {
+		writeError(w, http.StatusBadRequest, "缺少 file 参数")
 		return
 	}
-	if err := bastilleImport(d, body.FileName, body.Name); err != nil {
+	if err := bastilleImport(d, body.File, body.NewName, body.Replace); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -928,17 +964,49 @@ func (d *Daemon) handleBastilleMountRemove(w http.ResponseWriter, r *http.Reques
 	writeOK(w, true)
 }
 
-// handleBastilleLimits 设置 jail 硬件资源限制（rctl 规则）。
-// POST /api/bastille/jails/{name}/limits body: {args: ["rctl 规则", ...]}
+// handleBastilleLimits 设置 jail 硬件资源限制（docs/container-support.md §3.3）。
+// POST /api/bastille/jails/{name}/limits body: {memoryMb?, cpus?, diskMb?}
+// memoryMb → rctl memoryuse；cpus → rctl cpuset（分配 0..cpus-1 号核）；diskMb → ZFS 配额
 func (d *Daemon) handleBastilleLimits(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Args []string `json:"args"`
+		MemoryMb int `json:"memoryMb"`
+		Cpus     int `json:"cpus"`
+		DiskMb   int `json:"diskMb"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if err := bastilleLimits(r.PathValue("name"), body.Args); err != nil {
+	if err := bastilleApplyLimits(r.PathValue("name"), body.MemoryMb, body.Cpus, body.DiskMb); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleRdrList 端口转发规则列表（可按 jail 过滤）。
+// GET /api/bastille/rdr?jail= → [{proto, hostPort, jailPort}]
+func (d *Daemon) handleBastilleRdrList(w http.ResponseWriter, r *http.Request) {
+	items, err := bastilleRdrList(queryParam(r, "jail"))
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, items)
+}
+
+// handleContainerLimits 动态调整容器资源限制（docker update，运行中即时生效）。
+// POST /api/container/{id}/limits body: {memoryMb?, cpus?}
+func (d *Daemon) handleContainerLimits(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MemoryMb int     `json:"memoryMb"`
+		Cpus     float64 `json:"cpus"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if err := dockerLimits(r.PathValue("id"), body.MemoryMb, body.Cpus); err != nil {
 		containerErr(w, err)
 		return
 	}
