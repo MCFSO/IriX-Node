@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // bastilleRoot Bastille 数据目录。
@@ -173,8 +174,14 @@ func bastilleCreate(name, release, ip, jtype string, vnet, bridge bool, mac stri
 }
 
 // bastilleAction jail 操作（start/stop/restart/destroy）。
+// destroy 运行中的 jail 必须带 -a（bastille destroy 的强制销毁参数）。
 func bastilleAction(name, action string) error {
-	_, err := cliRun(cliTimeout, "bastille", action, name)
+	args := []string{action}
+	if action == "destroy" {
+		args = append(args, "-a")
+	}
+	args = append(args, name)
+	_, err := cliRun(cliTimeout, "bastille", args...)
 	return err
 }
 
@@ -282,6 +289,98 @@ func commandWithEnv(env map[string]string, name string, args ...string) *exec.Cm
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	return cmd
+}
+
+// bastilleSetup 容器软件初始化设置（网络、Linux Jail 功能等）→ 后台任务 {jobId}。
+// options 直传给 bastille setup（如 vnet_default_interface=vtnet0），
+// 不带参数时 setup 会进入交互模式，故必须由调用方显式给出选项。
+func bastilleSetup(options []string) (string, error) {
+	jobID := jobs.create()
+	if jobID == "" {
+		return "", errors.New("任务已满，请稍后重试")
+	}
+	args := append([]string{"setup"}, options...)
+	go runLongJob(jobID, "bastille", args...)
+	return jobID, nil
+}
+
+// bastilleClone 克隆 jail 为新的名字与 IP（bastille clone NAME NEW_NAME NEW_IP）。
+func bastilleClone(name, newName, newIP string) error {
+	args := []string{"clone", name, newName}
+	if newIP != "" {
+		args = append(args, newIP)
+	}
+	_, err := cliRun(cliLongTimeout, "bastille", args...)
+	return err
+}
+
+// bastilleMount 挂载宿主机目录到 jail（写入 fstab 并挂载）。
+func bastilleMount(name, source, dest string) error {
+	_, err := cliRun(cliTimeout, "bastille", "mount", name, source, dest)
+	return err
+}
+
+// bastilleUmount 解除 jail 挂载（按目标路径）。
+func bastilleUmount(name, dest string) error {
+	_, err := cliRun(cliTimeout, "bastille", "umount", name, dest)
+	return err
+}
+
+// bastilleLimits 设置 jail 资源限制（rctl 规则）。
+// args 直传给 bastille limits（如 cpuset=0-1、cpulimit:50 等 rctl 规则）。
+func bastilleLimits(name string, args []string) error {
+	all := append([]string{"limits", name}, args...)
+	_, err := cliRun(cliTimeout, "bastille", all...)
+	return err
+}
+
+// bastilleExport 导出 jail 为归档到同步区，返回下载票据。
+// 响应: {password, addr, fileName}（fileName 相对同步区根，如 ".exports/xxx.tar.gz"）
+func bastilleExport(d *Daemon, name string) (map[string]any, error) {
+	expDir := filepath.Join(d.clusterRoot(), ".exports")
+	if err := os.MkdirAll(expDir, 0o755); err != nil {
+		return nil, err
+	}
+	fileName := name + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".tar.gz"
+	filePath := filepath.Join(expDir, fileName)
+	f, err := os.Create(filePath)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("bastille", "export", name)
+	cmd.Stdout = f
+	cmd.Stderr = f // 警告信息一并落盘，失败时便于排查
+	if err := cmd.Run(); err != nil {
+		f.Close()
+		_ = os.Remove(filePath)
+		return nil, fmt.Errorf("bastille export 失败: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	password := tickets.Create("cluster", d.clusterRoot(), "")
+	if password == "" {
+		return nil, errors.New("下载票据已满，请稍后重试")
+	}
+	return map[string]any{
+		"password": password,
+		"addr":     d.publicAddr(),
+		"fileName": ".exports/" + fileName,
+	}, nil
+}
+
+// bastilleImport 从同步区归档导入 jail（bastille import FILE [NAME]）。
+func bastilleImport(d *Daemon, fileName, name string) error {
+	filePath, err := d.clusterPath(fileName)
+	if err != nil {
+		return err
+	}
+	args := []string{"import", filePath}
+	if name != "" {
+		args = append(args, name)
+	}
+	_, err = cliRun(cliLongTimeout, "bastille", args...)
+	return err
 }
 
 // bastilleRdr 端口转发：add=true 添加，false 删除。

@@ -447,6 +447,35 @@ func TestContainerUnavailable(t *testing.T) {
 			t.Fatalf("%s 业务状态应 501, 实际 %d %s", p, resp.Status, body)
 		}
 	}
+	// POST 型端点同样应 501
+	for _, p := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/api/container/x/clone", map[string]any{"name": "y"}},
+		{"/api/container/x/export", nil},
+		{"/api/image/import", map[string]any{"fileName": "/a.tar", "name": "img"}},
+		{"/api/bastille/setup", map[string]any{"options": []string{"vnet_default_interface=vtnet0"}}},
+		{"/api/bastille/jails/x/clone", map[string]any{"newName": "y"}},
+		{"/api/bastille/jails/x/export", nil},
+		{"/api/bastille/import", map[string]any{"fileName": "/a.tar.gz"}},
+		{"/api/bastille/jails/x/mounts", map[string]any{"source": "/s", "dest": "/d"}},
+		{"/api/bastille/jails/x/limits", map[string]any{"args": []string{"cpulimit:50"}}},
+	} {
+		code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
+		if code != http.StatusOK {
+			t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+		}
+		var resp struct {
+			Status int `json:"status"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			t.Fatalf("解析失败: %v（%s）", err, body)
+		}
+		if resp.Status != http.StatusNotImplemented {
+			t.Fatalf("%s 业务状态应 501, 实际 %d %s", p.path, resp.Status, body)
+		}
+	}
 }
 
 // TestFileListHasSyncFields 实例级文件列表条目含 mtime/sha256（集群文档 §4 要求）。

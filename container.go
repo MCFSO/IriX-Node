@@ -160,25 +160,36 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/volume/list", d.auth(d.handleVolumeList))
 	mux.HandleFunc("DELETE /api/volume/{name}", d.auth(d.handleVolumeRemove))
 	mux.HandleFunc("GET /api/network/list", d.auth(d.handleNetworkList))
+	// 容器克隆 / 导出导入
+	mux.HandleFunc("POST /api/container/{id}/clone", d.auth(d.handleContainerClone))
+	mux.HandleFunc("POST /api/container/{id}/export", d.auth(d.handleContainerExport))
+	mux.HandleFunc("POST /api/image/import", d.auth(d.handleImageImport))
 
 	// Bastille（FreeBSD）
 	mux.HandleFunc("GET /api/bastille/releases", d.auth(d.handleBastilleReleases))
 	mux.HandleFunc("POST /api/bastille/bootstrap", d.auth(d.handleBastilleBootstrap))
+	mux.HandleFunc("POST /api/bastille/setup", d.auth(d.handleBastilleSetup))
 	mux.HandleFunc("GET /api/bastille/jails", d.auth(d.handleBastilleJails))
 	mux.HandleFunc("POST /api/bastille/jails/create", d.auth(d.handleBastilleCreate))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/start", d.auth(d.handleBastilleStart))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/stop", d.auth(d.handleBastilleStop))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/restart", d.auth(d.handleBastilleRestart))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/destroy", d.auth(d.handleBastilleDestroy))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/clone", d.auth(d.handleBastilleClone))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/export", d.auth(d.handleBastilleExport))
+	mux.HandleFunc("POST /api/bastille/import", d.auth(d.handleBastilleImport))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/console", d.auth(d.handleBastilleConsole))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/cmd", d.auth(d.handleBastilleCmd))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfig))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMounts))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountAdd))
+	mux.HandleFunc("DELETE /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountRemove))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/limits", d.auth(d.handleBastilleLimits))
 	mux.HandleFunc("GET /api/bastille/templates", d.auth(d.handleBastilleTemplates))
 	mux.HandleFunc("POST /api/bastille/templates/apply", d.auth(d.handleBastilleApply))
 	mux.HandleFunc("POST /api/bastille/rdr", d.auth(d.handleBastilleRdrAdd))
 	mux.HandleFunc("DELETE /api/bastille/rdr", d.auth(d.handleBastilleRdrDelete))
-	// 长任务进度（bootstrap / 模板应用），与 /api/image/build-progress 同构
+	// 长任务进度（bootstrap / setup / 模板应用），与 /api/image/build-progress 同构
 	mux.HandleFunc("GET /api/bastille/jobs/{jobId}", d.auth(d.handleBastilleJobProgress))
 }
 
@@ -220,18 +231,20 @@ func (d *Daemon) handleContainerPS(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleContainerCreate 创建容器（不启动）。
-// POST /api/container/create body: {name, image, command?, ports, volumes, env, restartPolicy?, memoryLimitMb?, cpus?}
+// POST /api/container/create body: {name, image, command?, workDir?, ports, volumes, env, restartPolicy?, memoryLimitMb?, cpus?, diskLimitGb?}
 func (d *Daemon) handleContainerCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name          string            `json:"name"`
 		Image         string            `json:"image"`
 		Command       string            `json:"command"`
+		WorkDir       string            `json:"workDir"`
 		Ports         []string          `json:"ports"`
 		Volumes       []string          `json:"volumes"`
 		Env           map[string]string `json:"env"`
 		RestartPolicy string            `json:"restartPolicy"`
 		MemoryLimitMb int               `json:"memoryLimitMb"`
 		Cpus          float64           `json:"cpus"`
+		DiskLimitGb   int               `json:"diskLimitGb"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
@@ -241,8 +254,8 @@ func (d *Daemon) handleContainerCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 image 参数")
 		return
 	}
-	info, err := dockerCreate(body.Name, body.Image, body.Command, body.Ports, body.Volumes,
-		body.Env, body.RestartPolicy, body.MemoryLimitMb, body.Cpus)
+	info, err := dockerCreate(body.Name, body.Image, body.Command, body.WorkDir, body.Ports, body.Volumes,
+		body.Env, body.RestartPolicy, body.MemoryLimitMb, body.Cpus, body.DiskLimitGb)
 	if err != nil {
 		containerErr(w, err)
 		return
@@ -746,4 +759,188 @@ func parseDockerSize(s string) uint64 {
 		return 0
 	}
 	return uint64(v * float64(mult))
+}
+
+// handleContainerClone 克隆容器（Docker：commit 文件系统为临时镜像再创建）。
+// POST /api/container/{id}/clone body: {name} → {id, name, image}
+func (d *Daemon) handleContainerClone(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	info, err := dockerClone(r.PathValue("id"), body.Name)
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, info)
+}
+
+// handleContainerExport 导出容器文件系统为归档，返回下载票据。
+// POST /api/container/{id}/export → {password, addr, fileName}
+func (d *Daemon) handleContainerExport(w http.ResponseWriter, r *http.Request) {
+	info, err := dockerExport(d, r.PathValue("id"))
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, info)
+}
+
+// handleImageImport 从同步区归档导入镜像。
+// POST /api/image/import body: {fileName, name}
+func (d *Daemon) handleImageImport(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		FileName string `json:"fileName"`
+		Name     string `json:"name"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.FileName == "" || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "缺少 fileName/name 参数")
+		return
+	}
+	if err := dockerImageImport(d, body.FileName, body.Name); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleSetup 容器软件初始化设置（网络、Linux Jail 功能等）→ {jobId}。
+// POST /api/bastille/setup body: {options: ["key=value", ...]}
+func (d *Daemon) handleBastilleSetup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Options []string `json:"options"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	jobID, err := bastilleSetup(body.Options)
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, map[string]any{"jobId": jobID})
+}
+
+// handleBastilleClone 克隆 jail（bastille clone NAME NEW_NAME [NEW_IP]）。
+// POST /api/bastille/jails/{name}/clone body: {newName, newIp?}
+func (d *Daemon) handleBastilleClone(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		NewName string `json:"newName"`
+		NewIP   string `json:"newIp"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.NewName == "" {
+		writeError(w, http.StatusBadRequest, "缺少 newName 参数")
+		return
+	}
+	if err := bastilleClone(r.PathValue("name"), body.NewName, body.NewIP); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleExport 导出 jail 为归档，返回下载票据。
+// POST /api/bastille/jails/{name}/export → {password, addr, fileName}
+func (d *Daemon) handleBastilleExport(w http.ResponseWriter, r *http.Request) {
+	info, err := bastilleExport(d, r.PathValue("name"))
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, info)
+}
+
+// handleBastilleImport 从同步区归档导入 jail（bastille import FILE [NAME]）。
+// POST /api/bastille/import body: {fileName, name?}
+func (d *Daemon) handleBastilleImport(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		FileName string `json:"fileName"`
+		Name     string `json:"name"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.FileName == "" {
+		writeError(w, http.StatusBadRequest, "缺少 fileName 参数")
+		return
+	}
+	if err := bastilleImport(d, body.FileName, body.Name); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleMountAdd 挂载宿主机目录到 jail（bastille mount NAME SOURCE DEST）。
+// POST /api/bastille/jails/{name}/mounts body: {source, dest}
+func (d *Daemon) handleBastilleMountAdd(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Source string `json:"source"`
+		Dest   string `json:"dest"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Source == "" || body.Dest == "" {
+		writeError(w, http.StatusBadRequest, "缺少 source/dest 参数")
+		return
+	}
+	if err := bastilleMount(r.PathValue("name"), body.Source, body.Dest); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleMountRemove 解除 jail 挂载（bastille umount NAME DEST）。
+// DELETE /api/bastille/jails/{name}/mounts body: {dest}
+func (d *Daemon) handleBastilleMountRemove(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Dest string `json:"dest"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Dest == "" {
+		writeError(w, http.StatusBadRequest, "缺少 dest 参数")
+		return
+	}
+	if err := bastilleUmount(r.PathValue("name"), body.Dest); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleLimits 设置 jail 硬件资源限制（rctl 规则）。
+// POST /api/bastille/jails/{name}/limits body: {args: ["rctl 规则", ...]}
+func (d *Daemon) handleBastilleLimits(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Args []string `json:"args"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if err := bastilleLimits(r.PathValue("name"), body.Args); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
 }

@@ -33,3 +33,21 @@ func bastilleApply(jail, template string, args map[string]string) (string, error
 func bastilleRdr(jail, proto string, hostPort, jailPort int, add bool) error {
 	return errContainerUnsupported
 }
+
+func bastilleSetup(options []string) (string, error) { return "", errContainerUnsupported }
+
+func bastilleClone(name, newName, newIP string) error { return errContainerUnsupported }
+
+func bastilleMount(name, source, dest string) error { return errContainerUnsupported }
+
+func bastilleUmount(name, dest string) error { return errContainerUnsupported }
+
+func bastilleLimits(name string, args []string) error { return errContainerUnsupported }
+
+func bastilleExport(d *Daemon, name string) (map[string]any, error) {
+	return nil, errContainerUnsupported
+}
+
+func bastilleImport(d *Daemon, fileName, name string) error {
+	return errContainerUnsupported
+}

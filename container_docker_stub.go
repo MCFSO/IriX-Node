@@ -6,8 +6,18 @@ package main
 
 func dockerPS(all bool) ([]map[string]any, error) { return nil, errContainerUnsupported }
 
-func dockerCreate(name, image, command string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64) (map[string]any, error) {
+func dockerCreate(name, image, command, workDir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitGb int) (map[string]any, error) {
 	return nil, errContainerUnsupported
+}
+
+func dockerClone(id, name string) (map[string]any, error) { return nil, errContainerUnsupported }
+
+func dockerExport(d *Daemon, id string) (map[string]any, error) {
+	return nil, errContainerUnsupported
+}
+
+func dockerImageImport(d *Daemon, fileName, name string) error {
+	return errContainerUnsupported
 }
 
 func dockerAction(id, action string) error { return errContainerUnsupported }

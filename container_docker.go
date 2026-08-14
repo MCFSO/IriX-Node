@@ -6,13 +6,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // containerRuntimeInfo 能力探测：Linux 节点 → Docker。
@@ -87,7 +90,9 @@ func dockerPS(all bool) ([]map[string]any, error) {
 }
 
 // dockerCreate 创建容器（不启动），返回 {id, name}。
-func dockerCreate(name, image, command string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64) (map[string]any, error) {
+// workDir 经 -w 设置容器内工作目录；diskLimitGb 经 --storage-opt size= 限制
+// 容器可写层大小（需 overlay2 且启用 quota，否则该参数无效）。
+func dockerCreate(name, image, command, workDir string, ports, volumes []string, env map[string]string, restartPolicy string, memoryLimitMb int, cpus float64, diskLimitGb int) (map[string]any, error) {
 	args := []string{"create"}
 	if name != "" {
 		args = append(args, "--name", name)
@@ -113,6 +118,12 @@ func dockerCreate(name, image, command string, ports, volumes []string, env map[
 	}
 	if cpus > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(cpus, 'f', -1, 64))
+	}
+	if diskLimitGb > 0 {
+		args = append(args, "--storage-opt", fmt.Sprintf("size=%dG", diskLimitGb))
+	}
+	if workDir != "" {
+		args = append(args, "-w", workDir)
 	}
 	args = append(args, image)
 	if command != "" {
@@ -302,4 +313,86 @@ func dockerNetworkList() ([]map[string]any, error) {
 		})
 	}
 	return items, nil
+}
+
+// dockerClone 克隆容器：commit 当前文件系统为临时镜像，再以新名字创建容器。
+// Docker 无原生 clone 命令，commit+create 是标准等效做法。
+func dockerClone(id, name string) (map[string]any, error) {
+	img := "irix-clone-" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+	if _, err := cliRun(cliLongTimeout, "docker", "commit", id, img); err != nil {
+		return nil, fmt.Errorf("提交容器文件系统失败: %w", err)
+	}
+	args := []string{"create"}
+	if name != "" {
+		args = append(args, "--name", name)
+	}
+	args = append(args, img)
+	out, err := cliRun(cliTimeout, "docker", args...)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"id":    strings.TrimSpace(out),
+		"name":  name,
+		"image": img,
+	}, nil
+}
+
+// dockerExport 导出容器文件系统为 tar 到同步区，返回下载票据。
+// 响应: {password, addr, fileName}（fileName 相对同步区根，如 ".exports/xxx.tar"）
+func dockerExport(d *Daemon, id string) (map[string]any, error) {
+	expDir := filepath.Join(d.clusterRoot(), ".exports")
+	if err := os.MkdirAll(expDir, 0o755); err != nil {
+		return nil, err
+	}
+	fileName := id + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".tar"
+	filePath := filepath.Join(expDir, fileName)
+	f, err := os.Create(filePath)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cliLongTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "export", id)
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Run(); err != nil {
+		f.Close()
+		_ = os.Remove(filePath)
+		return nil, fmt.Errorf("docker export 失败: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	password := tickets.Create("cluster", d.clusterRoot(), "")
+	if password == "" {
+		return nil, errors.New("下载票据已满，请稍后重试")
+	}
+	return map[string]any{
+		"password": password,
+		"addr":     d.publicAddr(),
+		"fileName": ".exports/" + fileName,
+	}, nil
+}
+
+// dockerImageImport 从同步区归档导入镜像（docker import - <name>，tar 经 stdin 传入）。
+func dockerImageImport(d *Daemon, fileName, name string) error {
+	filePath, err := d.clusterPath(fileName)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), cliLongTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "import", "-", name)
+	cmd.Stdin = f
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker import 失败: %v（%s）", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
