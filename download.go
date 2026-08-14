@@ -160,8 +160,9 @@ func (d *Daemon) handleFileUploadTicket(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeOK(w, map[string]any{
-		"password": password,
-		"addr":     d.publicAddr(),
+		"password":   password,
+		"addr":       d.publicAddr(),
+		"upload_dir": uploadDir,
 	})
 }
 
@@ -178,6 +179,11 @@ func (d *Daemon) handleDirectDownload(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		http.Error(w, "下载票据无效或已过期", http.StatusForbidden)
 		return
+	}
+	// 集群票据（uuid 固定为 "cluster"）的 cwd 是同步区根：
+	// 兼容客户端按 /mirrors/... 虚拟前缀拼接的下载路径。
+	if t.uuid == "cluster" && strings.HasPrefix(seg[1], "mirrors/") {
+		seg[1] = strings.TrimPrefix(seg[1], "mirrors/")
 	}
 	filePath, err := NormalizePath(t.cwd, seg[1])
 	if err != nil {

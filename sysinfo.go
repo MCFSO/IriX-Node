@@ -79,6 +79,75 @@ func cpuJiffies() float64 {
 	return float64(total)
 }
 
+// diskInfo 返回路径所在文件系统的 (总容量, 已用, 使用率 0-1)。
+// 路径通常取数据目录：实例文件都在该盘上，与 MCSM 的磁盘统计口径一致。
+func diskInfo(path string) (total, used uint64, usage float64) {
+	t, f := osDisk(path)
+	if t == 0 {
+		return 0, 0, 0
+	}
+	if t >= f {
+		used = t - f
+	}
+	return t, used, float64(used) / float64(t)
+}
+
+// netRates 采样网络收发速率（字节/秒）。
+// 两次读取网卡计数器、间隔约 300ms，差值除以实际耗时。
+func netRates() (down, up float64) {
+	rx1, tx1 := netCounters()
+	start := time.Now()
+	time.Sleep(300 * time.Millisecond)
+	rx2, tx2 := netCounters()
+	dt := time.Since(start).Seconds()
+	if dt <= 0 {
+		return 0, 0
+	}
+	if rx2 >= rx1 {
+		down = float64(rx2-rx1) / dt
+	}
+	if tx2 >= tx1 {
+		up = float64(tx2-tx1) / dt
+	}
+	return down, up
+}
+
+// parseNetstatIB 解析 netstat -ib 输出（FreeBSD/OpenBSD/macOS 通用）：
+// 从表头定位 Ibytes / Obytes 列，累加所有非回环接口的收发字节。
+func parseNetstatIB(out string) (rx, tx uint64) {
+	lines := strings.Split(out, "\n")
+	if len(lines) < 2 {
+		return 0, 0
+	}
+	headers := strings.Fields(lines[0])
+	iRx, iTx := -1, -1
+	for i, h := range headers {
+		switch h {
+		case "Ibytes":
+			iRx = i
+		case "Obytes":
+			iTx = i
+		}
+	}
+	if iRx < 0 || iTx < 0 {
+		return 0, 0
+	}
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) <= iTx || fields[0] == "Name" {
+			continue
+		}
+		if strings.HasPrefix(fields[0], "lo") {
+			continue
+		}
+		r, _ := strconv.ParseUint(fields[iRx], 10, 64)
+		t, _ := strconv.ParseUint(fields[iTx], 10, 64)
+		rx += r
+		tx += t
+	}
+	return rx, tx
+}
+
 // processAlloc 当前进程堆内存占用（字节）。
 func processAlloc() uint64 {
 	var ms runtime.MemStats

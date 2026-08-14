@@ -134,6 +134,58 @@
 
 ---
 
+## 6.1 容器环境（irix-node 全功能；客户端已实现，服务端按此对接）
+
+> 客户端（`lib/services/node_api_client.dart` + `lib/services/container/node_container_backend.dart`）
+> 已按以下契约实现调用方；`irix-node` 需实现这些端点，字段名以本表为准。
+> 详细设计见 `docs/container-support.md` §3。
+
+**能力探测**（UI 按 `runtime`/`platform` 决定展示 Docker 或 Bastille 管理）：
+
+```
+GET /api/container/info
+// 响应 data: { runtime: "docker"|"bastille", platform: "linux"|"freebsd", version: "…", available: true }
+```
+
+**Docker（platform=linux）**：
+
+| 方法 | 路径 | 参数 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/container/ps` | `all=1` | 容器列表，条目：`{id, name, image, status, state, ports: [..], createdAt, restartPolicy}` |
+| `POST` | `/api/container/create` | body: `{name, image, command?, ports: [..], volumes: [..], env: {}, restartPolicy?, memoryLimitMb?, cpus?}` | 创建容器（不启动） |
+| `POST` | `/api/container/{id}/start` `stop` `restart` `kill` | | 容器操作 |
+| `DELETE` | `/api/container/{id}` | `force=1` | 删除容器 |
+| `GET` | `/api/container/{id}/logs` | `tail=N` | 日志尾部 |
+| `POST` | `/api/container/{id}/exec` | body: `{command}` | 容器内执行命令 |
+| `GET` | `/api/container/{id}/stats` | | `{cpuPercent, memoryBytes, memoryLimitBytes, netRxBytes, netTxBytes}` |
+| `GET` | `/api/image/list` | | 镜像列表，条目：`{id, tags: [..], sizeBytes, createdAt}` |
+| `POST` | `/api/image/pull` | body: `{name}` | 拉取镜像 |
+| `POST` | `/api/image/build` | body: `{dockerfile, name, tag}` | 构建镜像 → `{jobId}` |
+| `GET` | `/api/image/build-progress` | `jobId` | `{status: building\|done\|failed, log: [..], image: "name:tag"}` |
+| `DELETE` | `/api/image/{name}` | | 删除镜像 |
+| `GET` | `/api/volume/list` / `DELETE /api/volume/{name}` | | 卷列表 / 删除 |
+| `GET` | `/api/network/list` | | 网络列表，条目：`{name, driver, subnet?}` |
+
+**Bastille（platform=freebsd）**：
+
+| 方法 | 路径 | 参数 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/bastille/releases` | | bootstrap 的发行版列表，条目：`{name, version, sizeBytes?, createdAt?}` |
+| `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}` |
+| `GET` | `/api/bastille/jails` | | jail 列表，条目：`{name, release, status, state?, ports: [..], createdAt?}` |
+| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip?, type: thin\|thick\|clone\|empty\|linux, vnet?, bridge?, mac?}` | 创建 jail |
+| `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` `destroy` | | jail 操作 |
+| `GET` | `/api/bastille/jails/{name}/console` | `tail=N` | 日志尾部 |
+| `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令 |
+| `GET` | `/api/bastille/templates` | | 模板列表（project/template 格式） |
+| `POST` | `/api/bastille/templates/apply` | body: `{jail, template, args: {KEY=VALUE}}` | 应用模板 |
+| `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发 / 删除转发 |
+
+**回退**：MCSM 面板无 `/api/container/info`，客户端自动回退到 §6 受限模式
+（镜像构建 + 容器/网络只读列表），UI 标注「MCSM 受限模式」。
+
+---
+
 ## 7. 多机模式功能 → 依赖端点映射
 
 | 功能 | 依赖端点 |
@@ -152,9 +204,11 @@
 
 | 能力 | irix-node | MCSM | 说明 |
 |------|-----------|------|------|
-| 本文档 §2–§4 全部端点 | ✅ | ✅ | 现有实现，双方均已支持 |
+| 本文档 §2–§4 全部端点 | ✅ | ✅ | 现有实现，双方均已支持（含 §2 磁盘/网络/version 字段、§4 上传票据 `upload_dir`） |
 | §5 用户管理 / §6 Docker | ❌ | ✅ | 仅 MCSM 面板提供 |
-| 节点级文件存储 / 递归快照 / 集群自组织 | 规划中 | ❌ | 见 `docs/cluster-node-api.md`（P0–P2） |
+| §6.1 容器环境（Docker / Bastille 全功能） | ✅ | ❌ | irix-node 已实现（CLI 包装：Linux 为 Docker、FreeBSD 为 Bastille），客户端全功能模式即生效 |
+| 节点级文件存储 / 递归快照 / 集群自组织 | ✅ 基础版 | ❌ | `docs/cluster-node-api.md` P0–P2 已实现基础版（P2 为内存态协调，未持久化） |
 
 > 结论：MCSM 节点是多机模式中的「阉割」节点 —— 可托管实例、可作为迁移目标（先建实例再上传），
-> 但无法参与节点间直传与自组织；`irix-node` 补齐 `docs/cluster-node-api.md` 的 P0–P2 后可实现真正的节点间直传 + 自组织。
+> 但无法参与节点间直传与自组织；`irix-node` 已补齐 `docs/cluster-node-api.md` 的 P0–P2（基础版），
+> 可实现节点间直传与基础自组织（心跳/事件/任务均为内存态，重启后需重新登记）。

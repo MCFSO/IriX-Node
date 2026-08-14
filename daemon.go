@@ -191,18 +191,31 @@ type Daemon struct {
 	LogDir      string      // 实例日志落盘目录（空 = 不落盘）
 	LogMaxBytes int64       // 单实例日志文件轮转上限（字节）
 	AuditLog    *fileLogger // 审计日志落盘器（nil = 未启用 -audit-log=false）
+
+	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
+	clusterMu        sync.Mutex
+	clusterMonitor   string                  // 监控节点 id（空 = 尚无监控者）
+	clusterRole      string                  // 自身角色：monitor | worker
+	clusterPeers     []map[string]any        // 已登记的对等节点列表
+	clusterEvents    []map[string]any        // 最近事件（保留 100 条）
+	clusterHeartbeat map[string]any          // 最近一次心跳快照
+	transfers        map[string]*transferJob // 节点间数据拉取任务
 }
 
 // NewDaemon 创建守护进程实例。
 func NewDaemon(dataDir, apiKey string) *Daemon {
 	return &Daemon{
-		DataDir:     dataDir,
-		APIKey:      apiKey,
-		Port:        12346,
-		UUID:        newUUID(),
-		Instances:   []*Instance{},
-		StartedAt:   time.Now(),
-		LogMaxBytes: 64 << 20, // 默认 64MB
+		DataDir:       dataDir,
+		APIKey:        apiKey,
+		Port:          12346,
+		UUID:          newUUID(),
+		Instances:     []*Instance{},
+		StartedAt:     time.Now(),
+		LogMaxBytes:   64 << 20, // 默认 64MB
+		clusterRole:   "worker",
+		clusterPeers:  []map[string]any{},
+		clusterEvents: []map[string]any{},
+		transfers:     map[string]*transferJob{},
 	}
 }
 

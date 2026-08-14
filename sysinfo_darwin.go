@@ -1,6 +1,6 @@
-//go:build freebsd || openbsd
+//go:build darwin
 
-// BSD 系统信息采集（sysctl，零依赖、无 cgo）。
+// macOS 系统信息采集：内存/运行时间/版本（sysctl）+ 磁盘（statfs）+ 网络（netstat -ib）。
 
 package main
 
@@ -9,24 +9,17 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-// sysctl 执行 sysctl -n 读取内核参数。
+// sysctl -n 读取内核参数。
 func sysctl(name string) (string, error) {
 	out, err := exec.Command("sysctl", "-n", name).Output()
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// freePagesName 空闲内存页数的 sysctl 参数名。
-func freePagesName() string {
-	if runtime.GOOS == "openbsd" {
-		return "uvmexp.free"
-	}
-	return "vm.stats.vm.v_free_count"
 }
 
 // osUptime 系统运行秒数（自 kern.boottime 推算）。
@@ -53,16 +46,13 @@ func osUptime() float64 {
 
 // osMem 返回总内存与可用内存（字节）。
 func osMem() (total, free uint64) {
-	totalStr, err := sysctl("hw.physmem")
+	totalStr, err := sysctl("hw.memsize")
 	if err != nil {
 		return 0, 0
 	}
 	total, _ = strconv.ParseUint(totalStr, 10, 64)
-	if total == 0 {
-		return 0, 0
-	}
-	// 空闲内存 = 空闲页数 × 页大小
-	freePages, err1 := sysctl(freePagesName())
+	// 空闲内存 = 空闲页数 × 页大小（vm.page_free_count 仅在内存压力不大时准确，容错）
+	freePages, err1 := sysctl("vm.page_free_count")
 	pageSize, err2 := sysctl("hw.pagesize")
 	if err1 != nil || err2 != nil {
 		return total, 0
@@ -73,7 +63,13 @@ func osMem() (total, free uint64) {
 }
 
 // osDisk 返回路径所在文件系统总容量与可用容量（字节，statfs）。
-// freebsd 与 openbsd 的 Statfs_t 字段不同，实现见 sysinfo_freebsd.go / sysinfo_openbsd.go。
+func osDisk(path string) (total, free uint64) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0
+	}
+	return st.Blocks * uint64(st.Bsize), st.Bavail * uint64(st.Bsize)
+}
 
 // netCounters 读取网络收发总字节数（netstat -ib 解析 Ibytes/Obytes 列）。
 func netCounters() (rx, tx uint64) {
@@ -84,10 +80,10 @@ func netCounters() (rx, tx uint64) {
 	return parseNetstatIB(string(out))
 }
 
-// osDistro 发行版版本：BSD 无发行版号概念，返回空串由调用方回退 release。
+// osDistro 发行版版本：macOS 无发行版号概念，返回空串由调用方回退 release。
 func osDistro() string { return "" }
 
-// osVersion 读取发行版本。
+// osVersion 读取内核版本。
 func osVersion() string {
 	v, err := sysctl("kern.osrelease")
 	if err != nil || v == "" {

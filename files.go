@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -30,6 +29,8 @@ func entryType(info os.FileInfo) int {
 
 // handleFileList 获取文件列表。
 // GET /api/files/list?daemonId&uuid&target&page&page_size
+// 条目含 name/size/time/mode/type，以及增量同步用的 mtime/sha256
+// （sha256 为文件内容摘要，目录为空串；详见 docs/cluster-node-api.md §4）。
 func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 	uuid := queryParam(r, "uuid")
 	cwd, err := d.CwdOf(uuid)
@@ -37,24 +38,32 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dir, err := NormalizePath(cwd, queryParam(r, "target"))
+	items, total, abs, err := listDir(cwd, queryParam(r, "target"),
+		atoiDefault(queryParam(r, "page"), 1), atoiDefault(queryParam(r, "page_size"), 100))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	page, _ := strconv.Atoi(queryParam(r, "page"))
-	pageSize, _ := strconv.Atoi(queryParam(r, "page_size"))
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = 100
-	}
+	writeOK(w, map[string]any{
+		"items":        items,
+		"page":         atoiDefault(queryParam(r, "page"), 1) - 1,
+		"pageSize":     atoiDefault(queryParam(r, "page_size"), 100),
+		"total":        total,
+		"absolutePath": abs,
+	})
+}
 
+// listDir 列出目录内容：条目含 name/size/time/mode/type/mtime/sha256，
+// 目录在前按名称排序，按 page/pageSize 分页。
+// 返回 (当前页条目, 总条目数, 相对 cwd 的绝对路径, 错误)。
+func listDir(cwd, target string, page, pageSize int) ([]map[string]any, int, string, error) {
+	dir, err := NormalizePath(cwd, target)
+	if err != nil {
+		return nil, 0, "", err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "无法读取目录: "+err.Error())
-		return
+		return nil, 0, "", err
 	}
 
 	items := make([]map[string]any, 0, len(entries))
@@ -63,13 +72,21 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		items = append(items, map[string]any{
-			"name": e.Name(),
-			"size": info.Size(),
-			"time": info.ModTime().Format(fileTimeFormat),
-			"mode": int(info.Mode().Perm()),
-			"type": entryType(info),
-		})
+		full := filepath.Join(dir, e.Name())
+		item := map[string]any{
+			"name":  e.Name(),
+			"size":  info.Size(),
+			"time":  info.ModTime().Format(fileTimeFormat),
+			"mtime": info.ModTime().Format(clusterMtimeFormat),
+			"mode":  int(info.Mode().Perm()),
+			"type":  entryType(info),
+		}
+		if info.IsDir() {
+			item["sha256"] = ""
+		} else {
+			item["sha256"] = fileSHA256(full)
+		}
+		items = append(items, item)
 	}
 	// 目录在前，按名称排序
 	sort.Slice(items, func(a, b int) bool {
@@ -80,6 +97,12 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 		return items[a]["name"].(string) < items[b]["name"].(string)
 	})
 
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 100
+	}
 	start := (page - 1) * pageSize
 	if start > len(items) {
 		start = len(items)
@@ -93,13 +116,7 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 	if abs == "" {
 		abs = "/"
 	}
-	writeOK(w, map[string]any{
-		"items":        items[start:end],
-		"page":         page - 1,
-		"pageSize":     pageSize,
-		"total":        len(items),
-		"absolutePath": abs,
-	})
+	return items[start:end], len(items), abs, nil
 }
 
 // maxTextReadBytes 文本读取接口的单文件上限。

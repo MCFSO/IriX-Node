@@ -17,21 +17,29 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 	osType, platform, release := hostInfo()
 
 	now := time.Now()
+	diskTotal, diskUsed, diskUsage := diskInfo(d.DataDir)
+	netDown, netUp := netRates()
 	system := map[string]any{
-		"type":       osType,
-		"hostname":   hostname,
-		"platform":   platform,
-		"release":    release,
-		"uptime":     uptimeSeconds(),
-		"totalmem":   totalMem(),
-		"freemem":    freeMem(),
-		"cpuUsage":   cpuUsage(),
-		"memUsage":   memUsage(),
-		"processCpu": 0,
-		"processMem": 0,
-		"node":       runtime.Version(),
-		"time":       now.UnixMilli(),
-		"cwd":        d.DataDir,
+		"type":            osType,
+		"hostname":        hostname,
+		"platform":        platform,
+		"release":         release,
+		"version":         osDistro(), // 发行版版本号（如 "22.04"）；空则由应用侧回退 release
+		"uptime":          uptimeSeconds(),
+		"totalmem":        totalMem(),
+		"freemem":         freeMem(),
+		"cpuUsage":        cpuUsage(),
+		"memUsage":        memUsage(),
+		"diskusage":       diskUsage,
+		"disktotal":       diskTotal,
+		"diskused":        diskUsed,
+		"networkDownload": netDown,
+		"networkUpload":   netUp,
+		"processCpu":      0,
+		"processMem":      0,
+		"node":            runtime.Version(),
+		"time":            now.UnixMilli(),
+		"cwd":             d.DataDir,
 	}
 
 	processInfo := map[string]any{

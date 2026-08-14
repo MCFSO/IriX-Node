@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -267,4 +268,12 @@ func FormatSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// atoiDefault 解析整数字符串，非法或为空时返回默认值。
+func atoiDefault(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return v
+	}
+	return def
 }

@@ -97,6 +97,12 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 下载/上传直连通道
 	mux.HandleFunc("GET /download/", d.handleDirectDownload)
 	mux.HandleFunc("POST /upload/", d.handleDirectUpload)
+
+	// 容器环境（Docker / Bastille，NODE_API.md §6.1）
+	d.registerContainerRoutes(mux)
+
+	// 集群节点 API（P0-P2，docs/cluster-node-api.md）
+	d.registerClusterRoutes(mux)
 }
 
 // auth 包装器：校验 API 密钥。
