@@ -386,9 +386,11 @@ func bastilleMounts(name string) ([]string, error) {
 }
 
 // bastilleMount 挂载宿主机目录到 jail（nullfs；写入 fstab，运行中则即时挂载）。
-// 语法：bastille mount JAIL HOST JAILPATH nullfs
+// 语法：bastille mount JAIL HOST JAILPATH nullfs rw 0 0
+// 实测：bastille 1.4.4 校验完整 fstab 格式（OPTIONS 必须含 rw/ro，DUMP/PASS 必填），
+// 只传 nullfs 会报 "FSTAB format not recognized"。
 func bastilleMount(name, source, dest string) error {
-	_, err := cliRun(cliTimeout, bastilleBin, "mount", name, source, dest, "nullfs")
+	_, err := cliRun(cliTimeout, bastilleBin, "mount", name, source, dest, "nullfs", "rw", "0", "0")
 	return err
 }
 
@@ -459,9 +461,11 @@ func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) erro
 	return nil
 }
 
-// bastilleClone 克隆 jail 为新的名字与可选新 IP（bastille clone TARGET NEW_NAME [IP]）。
+// bastilleClone 克隆 jail 为新的名字与可选新 IP。
+// 语法：bastille clone TARGET NEW_NAME [IP]；附加 -a（auto 模式）：
+// 源 jail 运行中时自动停止/恢复，否则会报 "Jail is running"。
 func bastilleClone(name, newName, newIP string) error {
-	args := []string{"clone", name, newName}
+	args := []string{"clone", "-a", name, newName}
 	if newIP != "" {
 		args = append(args, newIP)
 	}
@@ -469,18 +473,38 @@ func bastilleClone(name, newName, newIP string) error {
 	return err
 }
 
-// bastilleExport 导出 jail 为 txz 归档到 bastille/backups/（默认输出目录）。
-// 语法：bastille export --txz TARGET PATH；返回 {path}（绝对路径，可直接作 import 的 file）。
+// bastilleExport 导出 jail 为 txz 归档到 bastille/backups/。
+// 语法：bastille export --txz TARGET PATH；实测 PATH 为「输出目录」（须存在），
+// 归档文件名由 bastille 生成（<name>_<时间戳>.txz + .sha256）；
+// 运行中的 jail 需 -a（auto 模式，自动停/启）。
+// 返回 {path}：归档文件绝对路径，可直接作 import 的 file。
 func bastilleExport(d *Daemon, name string) (map[string]any, error) {
 	backupDir := filepath.Join(bastilleRoot, "backups")
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return nil, err
 	}
-	outPath := filepath.Join(backupDir, name+"-"+strconv.FormatInt(time.Now().UnixMilli(), 10)+".txz")
-	if _, err := cliRun(cliLongTimeout, bastilleBin, "export", "--txz", name, outPath); err != nil {
+	if _, err := cliRun(cliLongTimeout, bastilleBin, "export", "-a", "--txz", name, backupDir); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": outPath}, nil
+	// 归档文件名由 bastille 生成：取备份目录内最新 .txz
+	latest, latestMod := "", time.Time{}
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".txz") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(latestMod) {
+			latestMod = info.ModTime()
+			latest = e.Name()
+		}
+	}
+	if latest == "" {
+		return nil, fmt.Errorf("导出失败：备份目录中未找到归档文件")
+	}
+	return map[string]any{"path": filepath.Join(backupDir, latest)}, nil
 }
 
 // resolveImportFile 解析 import 的 file 参数：
@@ -496,13 +520,31 @@ func (d *Daemon) resolveImportFile(file string) (string, error) {
 	return d.clusterPath(file)
 }
 
+// bastilleJailNames 返回全部 jail 名集合。
+func bastilleJailNames() map[string]bool {
+	set := map[string]bool{}
+	entries, err := os.ReadDir(filepath.Join(bastilleRoot, "jails"))
+	if err != nil {
+		return set
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			set[e.Name()] = true
+		}
+	}
+	return set
+}
+
 // bastilleImport 从归档导入 jail（bastille import [-f] FILE [RELEASE]）。
-// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和；返回导入后的 jail 名。
+// RELEASE 为「导入到指定发行版」；force(-f) 跳过校验和。
+// 返回导入后的 jail 名：对比导入前后 jails 目录差异（bastille import
+// 的输出无稳定格式，目录差异最可靠），兜底解析输出。
 func bastilleImport(d *Daemon, file, release string, force bool) (string, error) {
 	filePath, err := d.resolveImportFile(file)
 	if err != nil {
 		return "", err
 	}
+	before := bastilleJailNames()
 	args := []string{"import"}
 	if force {
 		args = append(args, "-f")
@@ -514,6 +556,11 @@ func bastilleImport(d *Daemon, file, release string, force bool) (string, error)
 	out, err := cliRun(cliLongTimeout, bastilleBin, args...)
 	if err != nil {
 		return "", err
+	}
+	for name := range bastilleJailNames() {
+		if !before[name] {
+			return name, nil
+		}
 	}
 	return importJailName(out), nil
 }

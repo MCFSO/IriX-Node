@@ -1,0 +1,20 @@
+SSH 实测 Bastille 全功能，修复 4 处命令语法偏差（FreeBSD 15.1 + bastille 1.4.4 验证）
+
+- clone：附加 -a（auto 模式）——源 jail 运行中时否则报 "Jail is running"；
+  实测 UFS 下克隆成功（官方文档标注 ZFS only 为旧说明）
+- mount：补完整 fstab 格式 nullfs rw 0 0——bastille 1.4.4 校验 OPTIONS/DUMP/PASS，
+  只传 nullfs 报 "FSTAB format not recognized"；实测挂载 + workdir（exec.start
+  改写 cd /data && ...）成功
+- export：PATH 语义修正为「输出目录」（bastille 在其中生成 <name>_<ts>.txz +
+  .sha256），并附加 -a；服务端取备份目录最新 .txz 返回 {path}；实测成功
+- import：响应 name 改为对比导入前后 jails 目录差异（bastille import 输出无稳定
+  格式）；实测返回 {name: "mcmount2"} 成功恢复
+
+实测通过清单：start/stop/restart、destroy(-y -a)、thin/thick/empty 类型、
+clone(-a)、volumes nullfs 挂载、workdir 强制工作目录、setup default/firewall、
+export→import 全流程、rdr（此前已测）。
+
+环境依赖（错误信息已透传，非代码问题）：
+- limits 需要 RACCT/RCTL：kern.racct.enable=1 写入 /boot/loader.conf 并重启
+- linux 类型需要 Linuxulator：kldload linux64 / linux_enable=YES
+- setup 的 vnet/shared 模式会修改网络配置且 vnet 部分版本交互式，建议人工执行
