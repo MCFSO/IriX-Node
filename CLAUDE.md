@@ -14,6 +14,7 @@ go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试
 go test -race -count=1 ./...  # 带竞态检测的测试（Windows 本地需 gcc）
 go run . -port 12346 -data <目录> [-apikey <key>]   # 本地运行
+go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局域网访问）
 go run . -port 12346 -data <目录> -instance-log=false  # 关闭实例日志落盘
 go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）
 ```

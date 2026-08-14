@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,7 +27,8 @@ import (
 
 func main() {
 	var (
-		port          = flag.Int("port", 12346, "监听端口")
+		port          = flag.Int("port", 12346, "监听端口（1-65535）")
+		bindHost      = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时读 IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
 		dataDir       = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
 		apiKey        = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 		instanceLog   = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
@@ -42,11 +44,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -bind 0.0.0.0 -port 23333 -apikey mykey  # 监听全部网卡的 23333 端口（局域网可访问）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -bind 192.168.1.5 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
 	}
 	flag.Parse()
 
+	if *port <= 0 || *port > 65535 {
+		log.Fatalf("端口无效: %d（须在 1-65535 之间）", *port)
+	}
 	if *dataDir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -98,13 +105,10 @@ func main() {
 		}
 	}
 
-	bindHost := "127.0.0.1"
-	if strings.EqualFold(os.Getenv("IRIX_NODE_BIND_ALL"), "1") {
-		bindHost = "0.0.0.0"
-	}
+	bind := resolveBind(*bindHost, os.Getenv("IRIX_NODE_BIND_ALL"))
 	// 记录实际监听主机：下载/上传票据据此生成客户端可达的直连地址
-	d.BindHost = bindHost
-	addr := fmt.Sprintf("%s:%d", bindHost, *port)
+	d.BindHost = bind
+	addr := net.JoinHostPort(bind, strconv.Itoa(*port))
 
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
@@ -177,6 +181,18 @@ func limitAPIBody(next http.Handler) http.Handler {
 
 // Version 守护进程版本号。
 const Version = "1.0.0"
+
+// resolveBind 解析监听地址：-bind 显式指定优先；留空时读 IRIX_NODE_BIND_ALL
+// 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1。
+func resolveBind(flagValue, envValue string) string {
+	if strings.TrimSpace(flagValue) != "" {
+		return strings.TrimSpace(flagValue)
+	}
+	if strings.EqualFold(strings.TrimSpace(envValue), "1") {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
 
 // NormalizePath 将 API 传入的路径规范化为相对目录的绝对路径。
 //

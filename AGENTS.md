@@ -12,6 +12,7 @@ go build -o irix-node .       # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试（CI 必跑）
 go run . -port 12346 -data <目录> [-apikey <key>]   # 本地运行
+go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局域网访问）
 ```
 
 修改代码后必须通过 `go vet ./...` 与 `go build .`。

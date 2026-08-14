@@ -11,13 +11,15 @@ MCSM 节点与本节点。
 
 ```bash
 go build -o irix-node .
-./irix-node                  # 默认端口 12346，数据目录为当前目录
+./irix-node                  # 默认监听 127.0.0.1:12346，数据目录为当前目录
 ./irix-node -port 23334 -data D:\irix-node-data -apikey secret
+./irix-node -bind 0.0.0.0 -port 23333 -apikey secret   # 监听全部网卡（局域网可访问）
 ```
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `-port` | HTTP 监听端口 | `12346` |
+| `-bind` | 监听地址（IP 或主机名，如 `127.0.0.1` / `0.0.0.0` / `192.168.1.5` / `::`）；留空时读 `IRIX_NODE_BIND_ALL` 环境变量（=1 则 `0.0.0.0`） | `127.0.0.1` |
+| `-port` | HTTP 监听端口（1-65535） | `12346` |
 | `-data` | 数据目录（实例配置 instances.json 与配对码 auth.hash 存放于此） | 当前目录 |
 | `-apikey` | 固定 API 密钥；留空则启用配对码机制 | 空 |
 | `-audit-log` | 将用户操作审计日志落盘到 `{data}/logs/audit.log` | 开启 |

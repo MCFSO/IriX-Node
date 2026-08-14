@@ -1014,3 +1014,23 @@ func TestLongRunStability(t *testing.T) {
 		t.Errorf("疑似 goroutine 泄漏: +%d", leaked)
 	}
 }
+
+// TestResolveBind 监听地址解析：-bind 显式指定优先，环境变量与默认值回退。
+func TestResolveBind(t *testing.T) {
+	cases := []struct {
+		flag, env, want string
+	}{
+		{"", "", "127.0.0.1"},                  // 默认
+		{"", "1", "0.0.0.0"},                   // 环境变量开启全部网卡
+		{"", "0", "127.0.0.1"},                 // 环境变量关闭
+		{"192.168.1.5", "", "192.168.1.5"},     // flag 优先
+		{"0.0.0.0", "0", "0.0.0.0"},            // flag 覆盖环境变量
+		{"::", "", "::"},                       // IPv6
+		{"  192.168.1.5  ", "", "192.168.1.5"}, // 去空白
+	}
+	for _, c := range cases {
+		if got := resolveBind(c.flag, c.env); got != c.want {
+			t.Fatalf("resolveBind(%q, %q) = %q, 期望 %q", c.flag, c.env, got, c.want)
+		}
+	}
+}
