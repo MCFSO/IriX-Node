@@ -37,6 +37,44 @@ type rdrRule struct {
 	JailPort int
 }
 
+// parseRdrLine 解析单条 pf rdr 规则行的 hostPort/jailPort。
+// 规则形如 "rdr on em0 inet proto tcp from any to any port = 2001 -> 10.17.89.1 port 22"：
+// "->" 之前的最后一个 "port [=] N" 为 hostPort，之后的为 jailPort。
+func parseRdrLine(line string) (hostPort, jailPort int) {
+	idx := strings.Index(line, "->")
+	hostPart, jailPart := line, ""
+	if idx >= 0 {
+		hostPart, jailPart = line[:idx], line[idx+2:]
+	}
+	hostPort = lastPortIn(hostPart)
+	jailPort = lastPortIn(jailPart)
+	return hostPort, jailPort
+}
+
+// lastPortIn 取字符串中最后一个 "port = N" 或 "port N" 的 N；不存在返回 0。
+func lastPortIn(s string) int {
+	fields := strings.Fields(s)
+	last := 0
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "port" {
+			// 支持 "port = 2001"（官方 rdr list 输出带等号）与 "port 2001" 两种形式
+			if i+2 < len(fields) && fields[i+1] == "=" {
+				if n, err := strconv.Atoi(fields[i+2]); err == nil {
+					last = n
+				}
+				i += 2
+				continue
+			}
+			if i+1 < len(fields) {
+				if n, err := strconv.Atoi(fields[i+1]); err == nil {
+					last = n
+				}
+			}
+		}
+	}
+	return last
+}
+
 // jobLogMaxLines 长任务日志保留行数上限，防止构建日志无限膨胀。
 const jobLogMaxLines = 500
 

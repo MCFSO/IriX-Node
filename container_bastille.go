@@ -189,11 +189,12 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	case "linux":
 		args = append(args, "-L")
 	}
+	// INTERFACE 是位置参数（NAME RELEASE IP [INTERFACE]），不是 -V/-B 的选项参数
 	switch vnetMode {
 	case "vnet":
-		args = append(args, "-V", iface)
+		args = append(args, "-V")
 	case "bridge":
-		args = append(args, "-B", iface)
+		args = append(args, "-B")
 	}
 	args = append(args, name)
 	if jtype != "empty" {
@@ -201,6 +202,9 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 			ip = "0.0.0.0"
 		}
 		args = append(args, release, ip)
+		if vnetMode != "none" {
+			args = append(args, iface)
+		}
 	}
 	if _, err := cliRun(cliLongTimeout, "bastille", args...); err != nil {
 		return nil, err
@@ -342,11 +346,12 @@ func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) erro
 		}
 	}
 	if cpus > 0 {
-		set := "0"
-		if cpus > 1 {
-			set = fmt.Sprintf("0-%d", cpus-1)
+		// cpuset 为逗号分隔的 CPU 列表（官方：bastille limits TARGET cpu 2,3,4）
+		cores := make([]string, 0, cpus)
+		for i := 0; i < cpus; i++ {
+			cores = append(cores, strconv.Itoa(i))
 		}
-		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "cpu", set); err != nil {
+		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "cpu", strings.Join(cores, ",")); err != nil {
 			return err
 		}
 	}
@@ -519,34 +524,6 @@ func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
 		}
 	}
 	return nil
-}
-
-// parseRdrLine 解析单条 pf rdr 规则行的 hostPort/jailPort。
-// 规则形如 "rdr pass proto tcp from any to any port 2222 -> 10.0.0.2 port 22"：
-// "->" 之前的最后一个 "port N" 为 hostPort，之后的为 jailPort。
-func parseRdrLine(line string) (hostPort, jailPort int) {
-	idx := strings.Index(line, "->")
-	hostPart, jailPart := line, ""
-	if idx >= 0 {
-		hostPart, jailPart = line[:idx], line[idx+2:]
-	}
-	hostPort = lastPortIn(hostPart)
-	jailPort = lastPortIn(jailPart)
-	return hostPort, jailPort
-}
-
-// lastPortIn 取字符串中最后一个 "port N" 的 N；不存在返回 0。
-func lastPortIn(s string) int {
-	fields := strings.Fields(s)
-	last := 0
-	for i := 0; i+1 < len(fields); i++ {
-		if fields[i] == "port" {
-			if n, err := strconv.Atoi(fields[i+1]); err == nil {
-				last = n
-			}
-		}
-	}
-	return last
 }
 
 // bastilleTemplates 模板列表（project/template 格式）。

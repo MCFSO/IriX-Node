@@ -650,3 +650,17 @@ func TestParseDockerSize(t *testing.T) {
 		}
 	}
 }
+
+// TestParseRdrLine 按 Bastille 官方文档的 rdr list 实例输出解析端口。
+func TestParseRdrLine(t *testing.T) {
+	// 官方输出形如: rdr on em0 inet proto tcp from any to any port = 2001 -> 10.17.89.1 port 22
+	h, j := parseRdrLine("rdr on em0 inet proto tcp from any to any port = 2001 -> 10.17.89.1 port 22")
+	if h != 2001 || j != 22 {
+		t.Fatalf("解析错误: hostPort=%d jailPort=%d", h, j)
+	}
+	// pass 行（无 ->）应解析出 jailPort=0 从而被过滤
+	_, j2 := parseRdrLine("pass in on bge0 inet proto tcp from any to 10.17.89.1 port = 22 flags S/SA keep state")
+	if j2 != 0 {
+		t.Fatalf("pass 行不应解析出 jailPort: %d", j2)
+	}
+}
