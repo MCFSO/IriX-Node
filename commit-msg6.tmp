@@ -1,0 +1,11 @@
+修复 Bastille：发行版列表返回真实大小；CLI 改用绝对路径防 PATH 缺失
+
+- releases 的 sizeBytes 由 0 改为真实统计：walk 发行版目录累加普通文件
+  （跳过符号链接防循环），带缓存（目录 mtime 未变时复用，避免每次列表
+  全量遍历数万文件）
+- bastille/jls/zfs 全部改为绝对路径（/usr/local/bin/bastille、
+  /usr/sbin/jls、/sbin/zfs）：FreeBSD 以服务方式启动时 PATH 常不含
+  /usr/local/bin，依赖 PATH 查找会报 executable file not found ——
+  这是「无法创建 Jail」的高概率根因
+- create 的 release/ip 缺失改为明确报错（此前 ip 缺省补 0.0.0.0，
+  会被 bastille 以含糊错误拒绝）

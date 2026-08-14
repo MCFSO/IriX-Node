@@ -9,16 +9,26 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // bastilleRoot Bastille 数据目录。
 const bastilleRoot = "/usr/local/bastille"
+
+// CLI 绝对路径：FreeBSD 上以服务方式启动时 PATH 常不含 /usr/local/bin 与 sbin，
+// 依赖 PATH 查找会报 "executable file not found"，全部固定绝对路径。
+const (
+	bastilleBin = "/usr/local/bin/bastille"
+	jlsBin      = "/usr/sbin/jls"
+	zfsBin      = "/sbin/zfs"
+)
 
 // containerRuntimeInfo 能力探测：FreeBSD 节点 → Bastille。
 func containerRuntimeInfo() (runtime, platform, version string, ok bool) {
@@ -32,10 +42,47 @@ func bastilleAvailable() (version string, ok bool) {
 		return "", false
 	}
 	// bastille version 输出形如 "0.10.20231013"；失败不阻断可用性判断
-	if out, err := cliRun(cliTimeout, "bastille", "version"); err == nil {
+	if out, err := cliRun(cliTimeout, bastilleBin, "version"); err == nil {
 		return strings.TrimSpace(out), true
 	}
 	return "", true
+}
+
+// releaseSizeEntry 发行版大小缓存条目。
+type releaseSizeEntry struct {
+	modTime time.Time
+	size    int64
+}
+
+// releaseSizeCache 发行版目录大小缓存（目录 mtime 未变时复用，避免每次列表全量遍历）。
+var releaseSizeCache sync.Map // release 名 → releaseSizeEntry
+
+// bastilleReleaseSize 统计发行版目录总大小（字节，walk 累加普通文件，跳过符号链接）。
+func bastilleReleaseSize(name string) int64 {
+	dir := filepath.Join(bastilleRoot, "releases", name)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return 0
+	}
+	if v, ok := releaseSizeCache.Load(name); ok {
+		if e := v.(releaseSizeEntry); e.modTime.Equal(info.ModTime()) {
+			return e.size
+		}
+	}
+	var size int64
+	_ = filepath.WalkDir(dir, func(path string, de fs.DirEntry, err error) error {
+		if err != nil || de.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		if de.Type().IsRegular() {
+			if fi, err := de.Info(); err == nil {
+				size += fi.Size()
+			}
+		}
+		return nil
+	})
+	releaseSizeCache.Store(name, releaseSizeEntry{modTime: info.ModTime(), size: size})
+	return size
 }
 
 // bastilleReleases 已 bootstrap 的发行版列表（目录名如 "14.1-RELEASE"）。
@@ -58,7 +105,7 @@ func bastilleReleases() ([]map[string]any, error) {
 		items = append(items, map[string]any{
 			"name":      name,
 			"version":   strings.TrimSuffix(name, "-RELEASE"),
-			"sizeBytes": 0, // 目录大小无意义，由客户端按需估算
+			"sizeBytes": bastilleReleaseSize(name),
 			"createdAt": createdAt,
 		})
 	}
@@ -71,7 +118,7 @@ func bastilleBootstrap(release string) (string, error) {
 	if jobID == "" {
 		return "", errors.New("任务已满，请稍后重试")
 	}
-	go runLongJob(jobID, "bastille", "bootstrap", release)
+	go runLongJob(jobID, bastilleBin, "bootstrap", release)
 	return jobID, nil
 }
 
@@ -124,7 +171,7 @@ func bastilleJailRelease(name string) string {
 
 // bastilleRunningSet 返回运行中 jail 名集合（jls 输出的 Hostname 列）。
 func bastilleRunningSet() map[string]bool {
-	out, err := cliRun(cliTimeout, "jls")
+	out, err := cliRun(cliTimeout, jlsBin)
 	if err != nil {
 		return map[string]bool{}
 	}
@@ -198,15 +245,18 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 	}
 	args = append(args, name)
 	if jtype != "empty" {
+		if release == "" {
+			return nil, fmt.Errorf("缺少 release 参数")
+		}
 		if ip == "" {
-			ip = "0.0.0.0"
+			return nil, fmt.Errorf("缺少 ip 参数")
 		}
 		args = append(args, release, ip)
 		if vnetMode != "none" {
 			args = append(args, iface)
 		}
 	}
-	if _, err := cliRun(cliLongTimeout, "bastille", args...); err != nil {
+	if _, err := cliRun(cliLongTimeout, bastilleBin, args...); err != nil {
 		return nil, err
 	}
 
@@ -244,13 +294,13 @@ func bastilleAction(name, action string, force bool) error {
 		}
 	}
 	args = append(args, name)
-	_, err := cliRun(cliTimeout, "bastille", args...)
+	_, err := cliRun(cliTimeout, bastilleBin, args...)
 	return err
 }
 
 // bastilleLogs jail 控制台日志尾部（bastille logs 输出全部，Go 侧截取尾部 N 行）。
 func bastilleLogs(name string, tail int) (string, error) {
-	out, err := cliRun(cliTimeout, "bastille", "logs", name)
+	out, err := cliRun(cliTimeout, bastilleBin, "logs", name)
 	if err != nil {
 		return "", err
 	}
@@ -263,7 +313,7 @@ func bastilleLogs(name string, tail int) (string, error) {
 
 // bastilleCmd jail 内执行命令（经 sh -c 支持 shell 语法）。
 func bastilleCmd(name, command string) (string, error) {
-	return cliRun(cliTimeout, "bastille", "cmd", name, "sh", "-c", command)
+	return cliRun(cliTimeout, bastilleBin, "cmd", name, "sh", "-c", command)
 }
 
 // bastilleConfig 返回 jail.conf 内容。
@@ -294,13 +344,13 @@ func bastilleMounts(name string) ([]string, error) {
 // bastilleMount 挂载宿主机目录到 jail（nullfs；写入 fstab，运行中则即时挂载）。
 // 语法：bastille mount JAIL HOST JAILPATH nullfs
 func bastilleMount(name, source, dest string) error {
-	_, err := cliRun(cliTimeout, "bastille", "mount", name, source, dest, "nullfs")
+	_, err := cliRun(cliTimeout, bastilleBin, "mount", name, source, dest, "nullfs")
 	return err
 }
 
 // bastilleUmount 解除 jail 挂载（按目标路径）。
 func bastilleUmount(name, dest string) error {
-	_, err := cliRun(cliTimeout, "bastille", "umount", name, dest)
+	_, err := cliRun(cliTimeout, bastilleBin, "umount", name, dest)
 	return err
 }
 
@@ -340,7 +390,7 @@ func bastilleSetWorkdir(name, workdir string) error {
 // - diskLimitMb → zfs set quota=<N>M（jail 数据集，按挂载点路径定位）
 func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) error {
 	if memoryLimitMb > 0 {
-		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "add",
+		if _, err := cliRun(cliTimeout, bastilleBin, "limits", name, "add",
 			"memoryuse", fmt.Sprintf("%dM", memoryLimitMb)); err != nil {
 			return err
 		}
@@ -351,14 +401,14 @@ func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) erro
 		for i := 0; i < cpus; i++ {
 			cores = append(cores, strconv.Itoa(i))
 		}
-		if _, err := cliRun(cliTimeout, "bastille", "limits", name, "cpu", strings.Join(cores, ",")); err != nil {
+		if _, err := cliRun(cliTimeout, bastilleBin, "limits", name, "cpu", strings.Join(cores, ",")); err != nil {
 			return err
 		}
 	}
 	if diskLimitMb > 0 {
 		jailDir := filepath.Join(bastilleRoot, "jails", name)
 		// zfs set 接受挂载点路径；非 ZFS 环境将报错（容错：仅记录失败）
-		if _, err := cliRun(cliTimeout, "zfs", "set", fmt.Sprintf("quota=%dM", diskLimitMb), jailDir); err != nil {
+		if _, err := cliRun(cliTimeout, zfsBin, "set", fmt.Sprintf("quota=%dM", diskLimitMb), jailDir); err != nil {
 			return err
 		}
 	}
@@ -371,7 +421,7 @@ func bastilleClone(name, newName, newIP string) error {
 	if newIP != "" {
 		args = append(args, newIP)
 	}
-	_, err := cliRun(cliLongTimeout, "bastille", args...)
+	_, err := cliRun(cliLongTimeout, bastilleBin, args...)
 	return err
 }
 
@@ -383,7 +433,7 @@ func bastilleExport(d *Daemon, name string) (map[string]any, error) {
 		return nil, err
 	}
 	outPath := filepath.Join(backupDir, name+"-"+strconv.FormatInt(time.Now().UnixMilli(), 10)+".txz")
-	if _, err := cliRun(cliLongTimeout, "bastille", "export", "--txz", name, outPath); err != nil {
+	if _, err := cliRun(cliLongTimeout, bastilleBin, "export", "--txz", name, outPath); err != nil {
 		return nil, err
 	}
 	return map[string]any{"path": outPath}, nil
@@ -417,7 +467,7 @@ func bastilleImport(d *Daemon, file, release string, force bool) error {
 	if release != "" {
 		args = append(args, release)
 	}
-	_, err = cliRun(cliLongTimeout, "bastille", args...)
+	_, err = cliRun(cliLongTimeout, bastilleBin, args...)
 	return err
 }
 
@@ -455,7 +505,7 @@ func bastilleSetupMode(mode, extIf, tunIf, addr string) (map[string]any, error) 
 	default:
 		return nil, fmt.Errorf("mode 仅支持 default/firewall/vnet/bridge/shared/linux")
 	}
-	out, err := cliRun(cliLongTimeout, "bastille", args...)
+	out, err := cliRun(cliLongTimeout, bastilleBin, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +520,7 @@ func bastilleRdrList(jail string) ([]rdrRule, error) {
 		args = append(args, jail)
 	}
 	args = append(args, "list")
-	out, err := cliRun(cliTimeout, "bastille", args...)
+	out, err := cliRun(cliTimeout, bastilleBin, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +550,7 @@ func bastilleRdrList(jail string) ([]rdrRule, error) {
 
 // bastilleRdrAdd 添加端口转发（bastille rdr JAIL tcp|udp HOST_PORT JAIL_PORT）。
 func bastilleRdrAdd(jail, proto string, hostPort, jailPort int) error {
-	_, err := cliRun(cliTimeout, "bastille", "rdr", jail, proto,
+	_, err := cliRun(cliTimeout, bastilleBin, "rdr", jail, proto,
 		strconv.Itoa(hostPort), strconv.Itoa(jailPort))
 	return err
 }
@@ -512,7 +562,7 @@ func bastilleRdrDelete(jail, proto string, hostPort, jailPort int) error {
 	if err != nil {
 		return err
 	}
-	if _, err := cliRun(cliTimeout, "bastille", "rdr", jail, "clear"); err != nil {
+	if _, err := cliRun(cliTimeout, bastilleBin, "rdr", jail, "clear"); err != nil {
 		return err
 	}
 	for _, r := range rules {
@@ -563,7 +613,7 @@ func bastilleApply(jail, template string, args map[string]string) (string, error
 		return "", errors.New("任务创建失败")
 	}
 	go func() {
-		cmd := commandWithEnv(args, "bastille", "template", jail, template)
+		cmd := commandWithEnv(args, bastilleBin, "template", jail, template)
 		col := &logCollector{job: job}
 		cmd.Stdout = col
 		cmd.Stderr = col
