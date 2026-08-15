@@ -55,7 +55,7 @@ go build -o irix-node .
 - 能力探测 `GET /api/container/info`：CLI 缺失时 `available=false`，客户端自动隐藏容器 UI。
 - 客户端契约细节见 `docs/container-support.md`（字段级契约，实现须逐条对齐）。
 
-> ⚠️ **Bastille PF 初始化注意事项**：`bastille setup firewall` 生成的
+>  **Bastille PF 初始化注意事项**：`bastille setup firewall` 生成的
 > `/etc/pf.conf` 把 `block in all` 放在 `pass in proto tcp port ssh` **之前**，
 > 而 PF 是 last-match 语义——直接 `service pf start` 会立刻切断 SSH 等一切入站连接。
 > 启用 PF 前必须把管理流量放行（SSH、ICMP）移到 `block in all` 之前并加 `quick`：
