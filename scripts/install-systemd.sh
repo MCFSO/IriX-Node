@@ -18,6 +18,7 @@
 #   -data <目录>     数据目录（默认 /var/lib/irix-node）
 #   -apikey <密钥>   固定 API 密钥（留空启用配对码机制，首次启动仅显示一次）
 #   -user <用户>     运行用户（默认 root；Bastille/Docker 管理需要高权限）
+#   -update          仅更新二进制并重启（保留已有配置，用于升级）
 #   -no-instance-log 关闭实例日志落盘
 #   -no-audit-log    关闭审计日志落盘
 #   -h               显示帮助
@@ -35,6 +36,7 @@ PORT="12346"
 DATA_DIR="/var/lib/irix-node"
 APIKEY=""
 RUN_USER="root"
+UPDATE_ONLY=false
 INSTANCE_LOG=true
 INSTANCE_LOG_MAX=64
 AUDIT_LOG=true
@@ -67,6 +69,7 @@ while [ $# -gt 0 ]; do
 		-data) DATA_DIR="$2"; shift 2 ;;
 		-apikey) APIKEY="$2"; shift 2 ;;
 		-user) RUN_USER="$2"; shift 2 ;;
+		-update) UPDATE_ONLY=true; shift ;;
 		-no-instance-log) INSTANCE_LOG=false; shift ;;
 		-no-audit-log) AUDIT_LOG=false; shift ;;
 		-h|--help) usage; exit 0 ;;
@@ -93,6 +96,13 @@ fi
 
 log "安装二进制 -> $INSTALL_BIN"
 install -m 0755 "$BIN_SRC" "$INSTALL_BIN"
+
+# ---- 仅更新模式：替换二进制后直接重启，不覆盖任何已有配置 ----
+if [ "$UPDATE_ONLY" = true ]; then
+	systemctl restart irix-node.service || die "重启服务失败（若服务未安装，请先不带 -update 完整安装一次）"
+	log "更新完成（配置未改动），查看状态: systemctl status irix-node"
+	exit 0
+fi
 
 # ---- 数据目录 ----
 log "创建数据目录: $DATA_DIR"
