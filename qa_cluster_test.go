@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -369,6 +370,9 @@ func TestClusterTransfer(t *testing.T) {
 
 	// 目标节点：发起 transfer
 	dst, _ := newTestDaemon(t)
+	// 测试源为 httptest（127.0.0.1 环回）：显式放行环回走通端到端链路，
+	// 生产默认禁止（防认证后 SSRF），SSRF 拒绝路径见 TestClusterTransferSSRF
+	dst.transferAllowLoopback = true
 	dstSrv := newTestServer(dst)
 	defer dstSrv.Close()
 	base := dstSrv.URL + "/api/cluster"
@@ -413,6 +417,134 @@ func TestClusterTransfer(t *testing.T) {
 	}
 }
 
+// TestClusterTransferSSRF 认证后 SSRF 防护：环回/未指定/链路本地/任意协议目标必须被拒。
+// （审计报告 #5：此前 /api/cluster/transfer 可打 127.0.0.1:12399 完整成功）
+func TestClusterTransferSSRF(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	srv := newTestServer(d)
+	defer srv.Close()
+	base := srv.URL + "/api/cluster/transfer?apikey=test-key"
+
+	blocked := map[string]string{
+		"环回 IPv4":         "127.0.0.1:12399",
+		"环回 IPv6":         "[::1]:12399",
+		"环回不带协议":          "127.0.0.1:12399",
+		"未指定地址":           "0.0.0.0:12399",
+		"链路本地（云元数据）":      "169.254.169.254",
+		"RFC1918 内网":      "192.168.1.1:12346",
+		"RFC1918 内网 10/8": "10.0.0.5:12346",
+		"任意协议 file":       "file:///etc/passwd",
+		"任意协议 gopher":     "gopher://127.0.0.1:6379/_x",
+	}
+	for name, addr := range blocked {
+		code, body := apiPost(t, base, map[string]any{
+			"instanceId": "i-ssrf",
+			"source": map[string]any{
+				"address": addr, "apikey": "test-key",
+				"uuid": "u-1", "daemonId": "d-1",
+			},
+			"dest": "/mirrors/i-ssrf",
+		})
+		var resp struct {
+			Status int `json:"status"`
+		}
+		_ = json.Unmarshal(body, &resp)
+		if resp.Status != http.StatusBadRequest || code != http.StatusBadRequest {
+			t.Errorf("[SSRF] %s（%q）应被拒绝（HTTP/业务 400），实际 HTTP=%d 业务=%d %s",
+				name, addr, code, resp.Status, body)
+		}
+		t.Logf("[SSRF] %s（%q）已被拒绝: HTTP %d", name, addr, code)
+	}
+
+	// -transfer-allow-cidr 显式放行内网后，RFC1918 地址可被受理（集群 LAN 直传）
+	d.transferAllowCIDR = "192.168.0.0/16,10.0.0.0/8"
+	if err := d.parseTransferAllowCIDR(); err != nil {
+		t.Fatalf("解析 allow-cidr 失败: %v", err)
+	}
+	for name, addr := range map[string]string{
+		"放行后 192.168/16": "http://192.168.1.7:12346",
+		"放行后 10/8":       "http://10.0.1.9:12346",
+	} {
+		code, body := apiPost(t, base, map[string]any{
+			"instanceId": "i-lan",
+			"source": map[string]any{
+				"address": addr, "apikey": "test-key",
+				"uuid": "u-3", "daemonId": "d-3",
+			},
+			"dest": "/mirrors/i-lan",
+		})
+		if code != http.StatusOK {
+			t.Errorf("[SSRF] %s（%q）配置放行后应被受理，实际 %d %s", name, addr, code, body)
+		}
+		t.Logf("[SSRF] %s（%q）配置 -transfer-allow-cidr 后已受理", name, addr)
+	}
+	// 硬性拒绝项不因 allow-cidr 放行：环回仍被拒
+	code, body := apiPost(t, base, map[string]any{
+		"instanceId": "i-lo",
+		"source": map[string]any{
+			"address": "127.0.0.1:12399", "apikey": "test-key",
+			"uuid": "u-4", "daemonId": "d-4",
+		},
+		"dest": "/mirrors/i-lo",
+	})
+	var resp struct {
+		Status int `json:"status"`
+	}
+	_ = json.Unmarshal(body, &resp)
+	if resp.Status != http.StatusBadRequest {
+		t.Errorf("[SSRF] 配置放行后环回仍应被拒（硬性拒绝），实际 %d %s", resp.Status, body)
+	}
+
+	// 合法地址（公网，非本机）通过入口校验：不要求任务成功，只要求被受理
+	code, body = apiPost(t, base, map[string]any{
+		"instanceId": "i-ok",
+		"source": map[string]any{
+			"address": "http://203.0.113.10:12346", "apikey": "test-key",
+			"uuid": "u-2", "daemonId": "d-2",
+		},
+		"dest": "/mirrors/i-ok",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("合法地址应被受理: %d %s", code, body)
+	}
+	data := decodeData(t, body)
+	if data["jobId"] == "" {
+		t.Fatalf("受理响应缺 jobId: %v", data)
+	}
+}
+
+// TestParseTransferAllowCIDR -transfer-allow-cidr 配置解析：逗号分隔、去空白、
+// 空配置、非法 CIDR 报错。
+func TestParseTransferAllowCIDR(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// 空配置：不报错、不放行任何网段
+	if err := d.parseTransferAllowCIDR(); err != nil {
+		t.Fatalf("空配置应可解析: %v", err)
+	}
+	if len(d.transferAllowNets) != 0 {
+		t.Fatalf("空配置不应有放行网段: %v", d.transferAllowNets)
+	}
+
+	// 正常解析（含空白分隔）
+	d.transferAllowCIDR = " 192.168.0.0/16 , 10.0.0.0/8,"
+	if err := d.parseTransferAllowCIDR(); err != nil {
+		t.Fatalf("正常配置应可解析: %v", err)
+	}
+	if len(d.transferAllowNets) != 2 {
+		t.Fatalf("应解析出 2 个网段，实际 %d", len(d.transferAllowNets))
+	}
+	if !d.ipInAllowCIDR(net.ParseIP("192.168.5.5")) || d.ipInAllowCIDR(net.ParseIP("172.16.3.3")) {
+		t.Fatalf("网段匹配错误")
+	}
+
+	// 非法 CIDR：报错
+	d.transferAllowCIDR = "192.168.0.0/16,not-a-cidr"
+	if err := d.parseTransferAllowCIDR(); err == nil {
+		t.Fatalf("非法 CIDR 应报错")
+	}
+}
+
 // TestContainerUnavailable 容器能力探测与平台行为一致性：
 // - 本机运行时不可用 → available=false，Docker 操作端点 501
 // - 本机运行时可用（如 CI 的 Linux runner 自带 Docker）→ available=true
@@ -437,7 +569,7 @@ func TestContainerUnavailable(t *testing.T) {
 			t.Fatalf("运行时不可用但探测可用: %v", info)
 		}
 	}
-	// Bastille 端点在非 FreeBSD 平台恒 501
+	// Bastille 端点在非 FreeBSD 平台恒 501（HTTP 与 body.status 一致）
 	if runtime.GOOS != "freebsd" {
 		for _, p := range []string{
 			"/api/bastille/releases?apikey=test-key",
@@ -445,8 +577,8 @@ func TestContainerUnavailable(t *testing.T) {
 			"/api/bastille/templates?apikey=test-key",
 		} {
 			code, body := doReq(t, srv.URL+p)
-			if code != http.StatusOK {
-				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p, code, body)
+			if code != http.StatusNotImplemented {
+				t.Fatalf("%s HTTP 应 501, 实际 %d %s", p, code, body)
 			}
 			var resp struct {
 				Status int `json:"status"`
@@ -472,8 +604,8 @@ func TestContainerUnavailable(t *testing.T) {
 			{"/api/bastille/jails/create", map[string]any{"name": "y", "release": "14.1-RELEASE"}},
 		} {
 			code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
-			if code != http.StatusOK {
-				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+			if code != http.StatusNotImplemented {
+				t.Fatalf("%s HTTP 应 501, 实际 %d %s", p.path, code, body)
 			}
 			var resp struct {
 				Status int `json:"status"`
@@ -495,8 +627,8 @@ func TestContainerUnavailable(t *testing.T) {
 			"/api/network/list?apikey=test-key",
 		} {
 			code, body := doReq(t, srv.URL+p)
-			if code != http.StatusOK {
-				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p, code, body)
+			if code != http.StatusNotImplemented {
+				t.Fatalf("%s HTTP 应 501, 实际 %d %s", p, code, body)
 			}
 			var resp struct {
 				Status int `json:"status"`
@@ -518,8 +650,8 @@ func TestContainerUnavailable(t *testing.T) {
 			{"/api/image/import", map[string]any{"fileName": "/a.tar", "name": "img"}},
 		} {
 			code, body := apiPost(t, srv.URL+p.path+"?apikey=test-key", p.body)
-			if code != http.StatusOK {
-				t.Fatalf("%s HTTP 应 200, 实际 %d %s", p.path, code, body)
+			if code != http.StatusNotImplemented {
+				t.Fatalf("%s HTTP 应 501, 实际 %d %s", p.path, code, body)
 			}
 			var resp struct {
 				Status int `json:"status"`

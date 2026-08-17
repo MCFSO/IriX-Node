@@ -11,12 +11,14 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -250,7 +252,9 @@ func (d *Daemon) handleClusterDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "文件不存在: "+body.Path)
 		return
 	}
-	password := tickets.Create("cluster", d.clusterRoot(), "")
+	// 集群票据为目录范围票据（file 为空）：下载路径按同步区根解析，
+	// 兼容 /mirrors/... 虚拟前缀（见 handleDirectDownload）。
+	password := tickets.CreateDownload("cluster", d.clusterRoot(), "")
 	if password == "" {
 		writeError(w, http.StatusServiceUnavailable, "下载票据已满，请稍后重试")
 		return
@@ -353,7 +357,7 @@ func (d *Daemon) handleInstanceSnapshot(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "快照失败: "+err.Error())
 		return
 	}
-	password := tickets.Create("snapshot", d.clusterRoot(), "")
+	password := tickets.CreateDownload("snapshot", d.clusterRoot(), "")
 	if password == "" {
 		writeError(w, http.StatusServiceUnavailable, "下载票据已满，请稍后重试")
 		return
@@ -481,6 +485,163 @@ type transferJob struct {
 	err    error
 }
 
+// validateTransferTarget 校验集群拉取目标地址，防止认证后 SSRF（审计报告 #5）：
+//   - 只允许 http/https 协议（拒绝 file/gopher 等任意协议）；
+//   - 解析出的 IP 不得是环回 / 未指定 / 链路本地 / 组播 / 广播地址；
+//   - 不得指向本守护进程自身网卡（自我回打）；
+//   - 解析失败同样拒绝，避免依赖「校验后 / 连接前」解析时机的 rebinding 手法。
+func (d *Daemon) validateTransferTarget(raw string) error {
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		return fmt.Errorf("不支持的协议（仅允许 http/https）: %s", raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("无效地址: %v", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("地址缺少主机名: %s", raw)
+	}
+	if d.transferAllowLoopback {
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("无法解析主机 %s: %v", host, err)
+	}
+	for _, ip := range ips {
+		if err := d.checkTransferIP(ip); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkTransferIP 校验单个目标 IP：拒绝环回/未指定/链路本地/组播/广播及本机地址；
+// RFC1918 内网（10/8、172.16/12、192.168/16，含 IPv6 ULA fc00::/7）默认同样拒绝，
+// 集群 LAN 直传需通过 -transfer-allow-cidr 显式放行（见 parseTransferAllowCIDR）。
+// 硬性拒绝项（环回/链路本地/本机等）任何配置都不可放行。
+func (d *Daemon) checkTransferIP(ip net.IP) error {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return fmt.Errorf("禁止访问的地址: %s", ip)
+	}
+	if d.isLocalIP(ip) {
+		return fmt.Errorf("禁止访问本节点自身: %s", ip)
+	}
+	if isRFC1918(ip) && !d.ipInAllowCIDR(ip) {
+		return fmt.Errorf("禁止访问内网地址（集群 LAN 直传需配置 -transfer-allow-cidr）: %s", ip)
+	}
+	return nil
+}
+
+// isRFC1918 判断 IP 是否为私网地址：IPv4 RFC1918（10/8、172.16/12、192.168/16）
+// 与 IPv6 ULA（fc00::/7）。环回/链路本地由调用方另行拒绝。
+func isRFC1918(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		}
+		return false
+	}
+	ip6 := ip.To16()
+	if ip6 == nil {
+		return false
+	}
+	return ip6[0]&0xfe == 0xfc // fc00::/7
+}
+
+// parseTransferAllowCIDR 解析 -transfer-allow-cidr 配置（逗号分隔 CIDR 列表），
+// 供 checkTransferIP 放行内网地址；非法 CIDR 返回错误（启动时直接失败）。
+// 测试中直接设置 d.transferAllowCIDR 后调用本方法。
+func (d *Daemon) parseTransferAllowCIDR() error {
+	d.transferAllowNets = nil
+	for _, c := range strings.Split(d.transferAllowCIDR, ",") {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(c)
+		if err != nil {
+			return fmt.Errorf("无效 CIDR %q: %v", c, err)
+		}
+		d.transferAllowNets = append(d.transferAllowNets, ipNet)
+	}
+	return nil
+}
+
+// ipInAllowCIDR 判断 IP 是否落在 -transfer-allow-cidr 放行的网段内。
+func (d *Daemon) ipInAllowCIDR(ip net.IP) bool {
+	for _, n := range d.transferAllowNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLocalIP 判断 IP 是否为本机任一网卡地址（防自我回打）。
+func (d *Daemon) isLocalIP(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		var nip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			nip = v.IP
+		case *net.IPAddr:
+			nip = v.IP
+		}
+		if nip != nil && nip.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// transferDialContext 构造集群拉取专用拨号器：每次拨号前重新解析主机并逐个
+// 校验目标 IP，只连接通过校验的地址 —— 防止 DNS rebinding 在「校验后、连接前」
+// 把域名换绑到内网地址。IP 字面量直接参与校验。
+func (d *Daemon) transferDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			if !d.transferAllowLoopback {
+				if err := d.checkTransferIP(ip); err != nil {
+					lastErr = err
+					continue
+				}
+			}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return conn, nil
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("无可用目标地址")
+		}
+		return nil, lastErr
+	}
+}
+
 // handleClusterTransfer 指示节点从对等节点拉取实例数据到本地同步区（节点间直传）。
 // POST /api/cluster/transfer body: {instanceId, source: {address, apikey, uuid, daemonId}, dest}
 func (d *Daemon) handleClusterTransfer(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +661,15 @@ func (d *Daemon) handleClusterTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.InstanceID == "" || body.Source.Address == "" || body.Source.UUID == "" {
 		writeError(w, http.StatusBadRequest, "缺少 instanceId/source.address/source.uuid 参数")
+		return
+	}
+	// SSRF 防护：申请任务前先校验来源地址（与 runTransfer 中的校验一致）
+	addr := body.Source.Address
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		addr = "http://" + addr
+	}
+	if err := d.validateTransferTarget(addr); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	dest, err := d.clusterPath(body.Dest)
@@ -547,11 +717,29 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
 		base = "http://" + base
 	}
+	// 传输用客户端：拨号前按目标 IP 校验（防 DNS rebinding），
+	// 重定向逐跳校验（防「先放行、再跳到内网」的跳板式 SSRF）。
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = d.transferDialContext()
+	client := &http.Client{
+		Timeout:   30 * time.Minute,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := d.validateTransferTarget(req.URL.String()); err != nil {
+				return fmt.Errorf("重定向目标被拒绝: %w", err)
+			}
+			return nil
+		},
+	}
+	if err := d.validateTransferTarget(base); err != nil {
+		fail(fmt.Errorf("来源地址被拒绝: %w", err))
+		return
+	}
 	auth := ""
 	if apikey != "" {
 		auth = "?apikey=" + url.QueryEscape(apikey)
 	}
-	snap, err := postJSON(base+"/api/instance/snapshot"+auth, map[string]any{
+	snap, err := postJSON(client, base+"/api/instance/snapshot"+auth, map[string]any{
 		"uuid": uuid, "daemonId": daemonID,
 	})
 	if err != nil {
@@ -570,6 +758,11 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 	} else if !strings.HasPrefix(snapAddr, "http://") && !strings.HasPrefix(snapAddr, "https://") {
 		snapAddr = "http://" + snapAddr
 	}
+	// 直连下载地址来自远端响应（攻击者可伪造）：同样必须通过目标校验
+	if err := d.validateTransferTarget(snapAddr); err != nil {
+		fail(fmt.Errorf("下载地址被拒绝: %w", err))
+		return
+	}
 	// 2. 直连下载归档到本地临时文件
 	tmpZip := filepath.Join(d.clusterRoot(), ".transfer", jobID+".zip")
 	if err := os.MkdirAll(filepath.Dir(tmpZip), 0o755); err != nil {
@@ -577,7 +770,6 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 		return
 	}
 	dlURL := snapAddr + "/download/" + url.PathEscape(password) + "/" + strings.TrimPrefix(fileName, "/")
-	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Get(dlURL)
 	if err != nil {
 		fail(fmt.Errorf("下载归档失败: %w", err))
@@ -617,12 +809,12 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 }
 
 // postJSON 发送 JSON 请求并解析 MCSM 风格响应 {status, data}。
-func postJSON(url string, body any) (map[string]any, error) {
+// client 由调用方提供（集群拉取使用带 SSRF 校验的传输客户端）。
+func postJSON(client *http.Client, url string, body any) (map[string]any, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: cliLongTimeout}
 	resp, err := client.Post(url, "application/json; charset=utf-8", bytes.NewReader(b))
 	if err != nil {
 		return nil, err

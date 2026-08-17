@@ -36,6 +36,7 @@ func main() {
 		auditLog      = flag.Bool("audit-log", true, "将用户操作审计日志异步落盘到 {data}/logs/audit.log（记录每次 API 请求的完整细节）")
 		auditLogMB    = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		loadTune      = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
+		transferCIDR  = flag.String("transfer-allow-cidr", "", "集群拉取（POST /api/cluster/transfer）额外放行的内网 CIDR 列表（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置（环回/链路本地/本机地址任何配置都不可放行）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -49,6 +50,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  irix-node -bind 192.168.1.5 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -transfer-allow-cidr 192.168.0.0/16  # 集群 LAN 直传放行内网网段\n")
 	}
 	flag.Parse()
 
@@ -68,6 +70,10 @@ func main() {
 
 	d := NewDaemon(*dataDir, *apiKey)
 	d.Port = *port
+	d.transferAllowCIDR = *transferCIDR
+	if err := d.parseTransferAllowCIDR(); err != nil {
+		log.Fatalf("-transfer-allow-cidr 配置无效: %v", err)
+	}
 	if *loadTune {
 		go tuner.loop() // 负载自适应调谐（后台 goroutine 周期采样）
 	}
@@ -247,6 +253,88 @@ func pathWithin(base, p string) bool {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// forbiddenCwdDirs 返回系统目录黑名单：实例工作目录位于这些目录内
+// （含本身）时拒绝创建/更新。防止认证后把 cwd 指向系统目录，配合文件 API
+// 形成全盘读写（审计报告 #4）。
+// Windows 含 \Users（各用户 Profile 根）：Profile 内是横向渗透的高价值目标
+// （浏览器凭据 / .ssh 密钥 / 启动目录持久化），整树拒绝，仅豁免系统临时目录
+// （见 validateCwd）。Unix 的 /home 未列入：Linux 游戏服常驻 /home 且无
+// Profile 凭据集中存放问题，敏感子目录（.ssh 等）建议用独立账户/系统策略。
+func forbiddenCwdDirs() []string {
+	if runtime.GOOS == "windows" {
+		return []string{
+			`\Windows`, `\Program Files`, `\Program Files (x86)`,
+			`\ProgramData`, `\Users`, `\System Volume Information`, `\$Recycle.Bin`,
+		}
+	}
+	return []string{
+		"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
+		"/boot", "/dev", "/proc", "/sys", "/var/log", "/var/run", "/root",
+	}
+}
+
+// validateCwd 校验实例工作目录：拒绝空目录、文件系统/磁盘根目录与系统目录。
+// 相对路径按守护进程当前目录解析为绝对路径后再做黑名单比对。
+func validateCwd(cwd string) error {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return errors.New("工作目录不能为空")
+	}
+	cleaned := filepath.Clean(cwd)
+	if cleaned == string(filepath.Separator) {
+		return fmt.Errorf("工作目录不能是文件系统根目录: %s", cwd)
+	}
+	if runtime.GOOS == "windows" {
+		if isDriveRoot(cleaned) {
+			return fmt.Errorf("工作目录不能是磁盘根目录（含盘符根与 UNC 共享根）: %s", cwd)
+		}
+	}
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return fmt.Errorf("工作目录解析失败: %v", err)
+	}
+	for _, bad := range forbiddenCwdDirs() {
+		// Windows 黑名单为卷内相对路径（如 \Users）：挂到各盘符卷根后比对；
+		// Unix 黑名单为绝对路径，直接比对。
+		base := bad
+		if runtime.GOOS == "windows" {
+			vol := filepath.VolumeName(abs)
+			if vol == "" {
+				continue
+			}
+			base = filepath.Clean(vol + bad)
+		}
+		if pathWithin(base, abs) {
+			// \Users 整树拒绝，但豁免系统临时目录（%TEMP%，通常为
+			// <用户>\AppData\Local\Temp）：临时目录无浏览器凭据/SSH 密钥/
+			// 启动项等敏感数据，且大量部署与测试依赖它（Go 测试临时目录）。
+			if runtime.GOOS == "windows" && bad == `\Users` && pathWithin(os.TempDir(), abs) {
+				continue
+			}
+			return fmt.Errorf("工作目录不能位于系统目录内: %s", cwd)
+		}
+	}
+	return nil
+}
+
+// isDriveRoot 判断 Windows 路径是否为磁盘根（C:\、C:）或 UNC 共享根（\\server\share）。
+// 注意 filepath.Clean("C:") 会得到 "C:."（盘符相对路径），尾点同样视为根。
+func isDriveRoot(p string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	p = filepath.Clean(p)
+	vol := filepath.VolumeName(p)
+	if vol == "" {
+		return false
+	}
+	switch strings.TrimPrefix(p, vol) {
+	case "", "/", "\\", ".":
+		return true
+	}
+	return false
 }
 
 // SplitCommand 将启动命令字符串拆分为参数列表，支持单/双引号。

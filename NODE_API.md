@@ -19,6 +19,7 @@
 | 认证 | `apikey` 查询参数（本地节点可为空）；请求头 `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
 | 请求体 | `application/json; charset=utf-8` |
 | 响应体 | 统一 `{ "status": 200, "data": <payload>, "time": <unix_ms> }`；`status != 200` 时 `data` 为错误消息字符串 |
+| 错误 | 错误响应 **HTTP 状态码与 `body.status` 一致**（如 400/403/500），供监控 / WAF / 负载均衡识别；成功恒为 200 |
 | 超时 | 应用侧默认 15s；连接失败 / 超时视为节点离线 |
 | 分页 | `page` / `page_size` 查询参数 |
 
@@ -86,6 +87,13 @@
 | `GET` | `/api/protected_instance/command` | `uuid`, `daemonId`, `command` | 向实例 stdin 发命令 |
 | `GET` | `/api/protected_instance/outputlog` | `uuid`, `daemonId`, `size?` | 读取实例输出日志 |
 
+> **cwd 限制**：创建 / 更新实例时 `cwd` 不得为文件系统 / 磁盘根目录
+> （`C:\`、`/` 等）、系统目录（Windows：`\Windows`、`\Program Files`、
+> `\ProgramData` 等；Unix：`/etc`、`/usr`、`/bin`、`/var/log` 等）或
+> **用户 Profile 目录**（Windows `\Users` 整树，含浏览器凭据 / `.ssh` 密钥 /
+> 启动目录等横向渗透高价值目标；仅豁免系统临时目录 `%TEMP%`），
+> 防止认证后把文件 API 作用域扩到整块磁盘或用户数据（安全审计 #4）。
+
 ---
 
 ## 4. 文件管理（实例级，迁移 / 远程文件管理器）
@@ -108,8 +116,12 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/download/{password}/{fileName}` | 凭票据直连下载（大文件走 Rust downloader 断点续传） |
-| `POST` | `/upload/{password}` | 凭票据直连上传（multipart，字段名 `file`） |
+| `GET` | `/download/{password}/{fileName}` | 凭下载票据直连下载（大文件走 Rust downloader 断点续传）。实例级票据绑定申请时的**单文件**；集群/快照票据为目录范围 |
+| `POST` | `/upload/{password}` | 凭上传票据直连上传（multipart，字段名 `file`） |
+
+> 下载与上传票据严格区分，互相不可复用；票据 10 分钟有效。下载/上传直连
+> URL 中的票据密码在审计日志中打码（`/download/***/...`），防日志可读者
+> 凭密码免密下载。
 
 ---
 

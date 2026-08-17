@@ -23,7 +23,7 @@ func newAuditServer(d *Daemon) *httptest.Server {
 }
 
 // bodyHasStatus 解析 MCSM 风格响应体，判断 status 字段是否等于 want。
-// API 的 HTTP 状态码恒为 200，真实结果在 body.status 中。
+// 错误响应 HTTP 状态码与 body.status 一致（writeError 透传）。
 func bodyHasStatus(body []byte, want int) bool {
 	var resp struct {
 		Status int `json:"status"`
@@ -156,6 +156,26 @@ func TestRedactQuery(t *testing.T) {
 	for in, want := range cases {
 		if got := redactQuery(in); got != want {
 			t.Errorf("redactQuery(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRedactPath 直连通道路径中的票据密码必须打码（审计报告 #3）：
+// 票据是 10 分钟有效的免密凭据，日志可读者拿到明文即可在有效期内免密下载。
+func TestRedactPath(t *testing.T) {
+	cases := map[string]string{
+		"/api/overview":                    "/api/overview",
+		"/download/":                       "/download/",
+		"/download/abc123/private.txt":     "/download/***/private.txt",
+		"/download/abc123/sub/private.txt": "/download/***/sub/private.txt",
+		"/download/abc123":                 "/download/***",
+		"/upload/abc123":                   "/upload/***",
+		"/upload/":                         "/upload/",
+		"/api/files/download":              "/api/files/download",
+	}
+	for in, want := range cases {
+		if got := redactPath(in); got != want {
+			t.Errorf("redactPath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

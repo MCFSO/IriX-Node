@@ -15,9 +15,12 @@ import (
 	"time"
 )
 
-// writeJSON 输出 MCSM 风格的统一响应体 {status, data, time}。
+// writeJSON 输出 MCSM 风格的统一响应体 {status, data, time}，
+// 并把 status 透传为真实 HTTP 状态码：成功 200，错误与业务状态一致（writeError 传入）。
+// 此前恒 200 的约定让 WAF/监控/负载均衡无法识别失败请求，审计报告 #6 要求透传。
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": status,
 		"data":   data,
@@ -232,6 +235,10 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "工作目录 (cwd) 不能为空")
 		return
 	}
+	if err := validateCwd(cfg.Cwd); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	cfg.CreateDatetime = time.Now().UnixMilli()
 	cfg.LastDatetime = cfg.CreateDatetime
 
@@ -257,6 +264,10 @@ func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 	var cfg InstanceConfig
 	if err := parseJSONBody(r, &cfg); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if err := validateCwd(cfg.Cwd); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := d.UpdateInstance(inst, cfg); err != nil {

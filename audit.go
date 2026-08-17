@@ -5,7 +5,8 @@
 //	2026-08-13 12:00:00.123 | 127.0.0.1 | POST /api/instance?apikey=*** | 200 | 5ms | {请求体前缀}
 //
 // 设计要点：
-//   - 每条请求都记录：时间、来源 IP、方法、路径与查询参数（apikey 一律打码）、
+//   - 每条请求都记录：时间、来源 IP、方法、路径与查询参数（apikey 一律打码、
+//     直连通道 /download/、/upload/ 路径中的票据密码同样打码）、
 //     响应状态码、耗时、请求体前 auditBodyMax 字节——用户的「一举一动」可完整回溯；
 //   - 请求体只捕获前缀，防大文件上传把审计日志撑爆；控制字符转义，
 //     防恶意请求体/参数换行伪造日志行；
@@ -108,6 +109,28 @@ func redactQuery(raw string) string {
 	return "?" + strings.Join(parts, "&")
 }
 
+// redactPath 将直连通道 URL 路径中的票据密码打码
+// （/download/{password}/...、/upload/{password} → /download/***/...）。
+// 票据是 10 分钟有效的免密凭据：审计日志可读者若拿到明文密码，
+// 即可在有效期内直接下载目标文件，故路径中的票据段必须与 apikey 同等打码。
+// 无票据段的裸路径（/download/、/upload/）原样返回。
+func redactPath(p string) string {
+	for _, prefix := range []string{"/download/", "/upload/"} {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := p[len(prefix):]
+		if rest == "" {
+			return p
+		}
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			return prefix + "***/" + rest[i+1:]
+		}
+		return prefix + "***"
+	}
+	return p
+}
+
 // sanitizeLog 将控制字符转义为可见形式，防止恶意请求体/参数伪造日志行。
 func sanitizeLog(s string) string {
 	if !strings.ContainsAny(s, "\r\n\t") {
@@ -154,7 +177,7 @@ func (d *Daemon) auditMiddleware(next http.Handler) http.Handler {
 		}
 		d.auditLogf("%s | %s | %s %s%s | %d | %s | %s",
 			time.Now().Format("2006-01-02 15:04:05.000"),
-			clientIP(r), r.Method, r.URL.Path, redactQuery(r.URL.RawQuery),
+			clientIP(r), r.Method, redactPath(r.URL.Path), redactQuery(r.URL.RawQuery),
 			status, time.Since(start).Round(time.Millisecond), body)
 	})
 }

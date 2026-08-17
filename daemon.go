@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -200,6 +201,19 @@ type Daemon struct {
 	clusterEvents    []map[string]any        // 最近事件（保留 100 条）
 	clusterHeartbeat map[string]any          // 最近一次心跳快照
 	transfers        map[string]*transferJob // 节点间数据拉取任务
+
+	// transferAllowLoopback 仅测试用：放行集群拉取访问环回地址。
+	// 生产必须保持 false —— 集群拉取由节点间直传使用，目标应为对等节点
+	// 的公网/LAN 地址；放行环回会让认证后的 /api/cluster/transfer 变成
+	// 全功能 SSRF（自我回打 / 探测本机服务），审计报告 #5。
+	transferAllowLoopback bool
+
+	// transferAllowCIDR -transfer-allow-cidr 原始配置（逗号分隔 CIDR，如
+	// "192.168.0.0/16,10.0.0.0/8"）：显式放行 RFC1918 内网地址的集群拉取
+	// （集群 LAN 直传所需）。默认空 = 拒绝全部内网地址。
+	// 解析结果存 transferAllowNets（启动时解析一次，之后只读）。
+	transferAllowCIDR string
+	transferAllowNets []*net.IPNet
 }
 
 // NewDaemon 创建守护进程实例。

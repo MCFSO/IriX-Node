@@ -107,6 +107,265 @@ func (e *fileTestEnv) apiCall(t *testing.T, method, path string, payload any) (f
 // 文件管理 API 功能正确性（第一轮零覆盖）
 // ---------------------------------------------------------------------------
 
+// TestInstanceDownloadTicketBindsSingleFile 实例下载票据必须绑定单文件：
+// 为 public.txt 申请的票据不得读取同目录 private.txt，也不得触发目录列表浏览
+// 整棵 cwd 树（审计报告 #2）。
+func TestInstanceDownloadTicketBindsSingleFile(t *testing.T) {
+	e := newFileEnv(t)
+	if err := os.WriteFile(filepath.Join(e.cwd, "public.txt"), []byte("public"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.cwd, "private.txt"), []byte("private-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(e.cwd, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	status, data := e.apiCall(t, http.MethodPost, "/api/files/download?file_name=public.txt", nil)
+	if status != 200 {
+		t.Fatalf("申请下载票据失败: %v %s", status, data)
+	}
+	var ticket struct {
+		Password string `json:"password"`
+	}
+	json.Unmarshal(data, &ticket)
+
+	// 同目录其他文件：拒绝
+	resp, err := http.Get(e.base + "/download/" + ticket.Password + "/private.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("同目录文件应被拒绝（HTTP 403），实际 %d", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "private-secret") {
+		t.Errorf("票据越权读取了同目录文件")
+	}
+
+	// 目录请求：拒绝（不得出现 http.ServeFile 的目录列表）
+	resp, err = http.Get(e.base + "/download/" + ticket.Password + "/subdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("目录浏览应被拒绝（HTTP 403），实际 %d", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "private.txt") || strings.Contains(string(body), "Parent Directory") {
+		t.Errorf("目录列表泄漏: %s", body)
+	}
+
+	// 绑定文件本身：正常下载
+	resp, err = http.Get(e.base + "/download/" + ticket.Password + "/public.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "public" {
+		t.Fatalf("绑定文件下载失败: HTTP %d %q", resp.StatusCode, body)
+	}
+	t.Logf("[验证] 实例下载票据已绑定单文件：同目录文件与目录列表均被拒绝")
+}
+
+// TestDownloadTicketNotUsableAsUpload 下载票据不得被当作上传票据使用：
+// 空 dir 若被当作上传目标，NormalizePath 会把空 cwd 当相对路径，
+// 文件将直接写进守护进程工作目录（审计报告 #1）。
+func TestDownloadTicketNotUsableAsUpload(t *testing.T) {
+	e := newFileEnv(t)
+	if err := os.WriteFile(filepath.Join(e.cwd, "public.txt"), []byte("public"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 申请下载票据
+	status, data := e.apiCall(t, http.MethodPost, "/api/files/download?file_name=public.txt", nil)
+	if status != 200 {
+		t.Fatalf("申请下载票据失败: %v %s", status, data)
+	}
+	var ticket struct {
+		Password string `json:"password"`
+	}
+	json.Unmarshal(data, &ticket)
+
+	// 用下载票据向 /upload/ 提交文件
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "escaped.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.Write([]byte("pwned"))
+	mw.Close()
+	req, err := http.NewRequest(http.MethodPost, e.base+"/upload/"+ticket.Password, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("上传请求失败: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("下载票据作上传应被拒绝（HTTP 403），实际 %d %s", resp.StatusCode, body)
+	}
+	// 守护进程工作目录（旧漏洞落点）不得出现文件
+	if _, err := os.Stat(filepath.Join(".", "escaped.txt")); err == nil {
+		t.Errorf("下载票据被当作上传票据使用，文件写进了守护进程工作目录")
+	}
+	t.Logf("[验证] 下载票据作上传被拒绝: HTTP %d", resp.StatusCode)
+}
+
+// TestUploadTicketNotUsableAsDownload 上传票据不得被当作下载票据使用。
+func TestUploadTicketNotUsableAsDownload(t *testing.T) {
+	e := newFileEnv(t)
+	status, data := e.apiCall(t, http.MethodPost, "/api/files/upload?upload_dir=/uploads", nil)
+	if status != 200 {
+		t.Fatalf("申请上传票据失败: %v %s", status, data)
+	}
+	var ticket struct {
+		Password string `json:"password"`
+	}
+	json.Unmarshal(data, &ticket)
+	resp, err := http.Get(e.base + "/download/" + ticket.Password + "/anything.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("上传票据作下载应被拒绝（HTTP 403），实际 %d", resp.StatusCode)
+	}
+}
+
+// TestValidateCwd 工作目录校验：盘符根 / 文件系统根 / 系统目录拒绝，正常目录放行。
+func TestValidateCwd(t *testing.T) {
+	// 空目录
+	if err := validateCwd(""); err == nil {
+		t.Error("空工作目录应被拒绝")
+	}
+	if err := validateCwd("   "); err == nil {
+		t.Error("空白工作目录应被拒绝")
+	}
+	// 文件系统根
+	if err := validateCwd(string(filepath.Separator)); err == nil {
+		t.Error("文件系统根应被拒绝")
+	}
+	// 正常目录（相对/绝对）
+	if err := validateCwd("server"); err != nil {
+		t.Errorf("相对目录应放行: %v", err)
+	}
+	if err := validateCwd(t.TempDir()); err != nil {
+		t.Errorf("临时目录应放行: %v", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		for _, bad := range []string{`C:\`, `C:`, `C:\Windows`, `C:\Windows\System32`, `C:\Program Files`, `C:\ProgramData`} {
+			if err := validateCwd(bad); err == nil {
+				t.Errorf("Windows 系统目录/盘符根 %q 应被拒绝", bad)
+			}
+		}
+		// 用户 Profile 整树拒绝（浏览器凭据/.ssh 密钥/启动目录是高价值目标），
+		// 仅豁免系统临时目录（%TEMP%）
+		for _, bad := range []string{`C:\Users`, `C:\Users\someone`, `C:\Users\someone\.ssh`, `C:\Users\someone\AppData\Roaming`, `C:\Users\someone\server`} {
+			if err := validateCwd(bad); err == nil {
+				t.Errorf("用户 Profile 目录 %q 应被拒绝", bad)
+			}
+		}
+		if err := validateCwd(os.TempDir()); err != nil {
+			t.Errorf("系统临时目录 %q 应豁免（部署/测试依赖）: %v", os.TempDir(), err)
+		}
+		if err := validateCwd(`C:\Games\server`); err != nil {
+			t.Errorf("正常盘符路径应放行: %v", err)
+		}
+	} else {
+		for _, bad := range []string{"/etc", "/usr/local", "/bin", "/proc", "/var/log"} {
+			if err := validateCwd(bad); err == nil {
+				t.Errorf("Unix 系统目录 %q 应被拒绝", bad)
+			}
+		}
+		if err := validateCwd("/home/user/server"); err != nil {
+			t.Errorf("正常 Unix 路径应放行: %v", err)
+		}
+	}
+}
+
+// TestCreateInstanceRejectsSystemCwd API 层：cwd 指向系统目录/盘符根时创建被拒
+// （审计报告 #4：此前 POST /api/instance 可设 cwd=C:\ 实现全盘文件访问）。
+func TestCreateInstanceRejectsSystemCwd(t *testing.T) {
+	e := newFileEnv(t)
+	bad := "/etc"
+	if runtime.GOOS == "windows" {
+		bad = `C:\`
+	}
+	status, data := e.apiCall(t, http.MethodPost, "/api/instance", map[string]any{
+		"nickname":     "恶意实例",
+		"startCommand": "ping 127.0.0.1 -t",
+		"cwd":          bad,
+	})
+	if status != http.StatusBadRequest {
+		t.Errorf("系统目录 cwd 创建实例应被拒绝（业务 400），实际 %v %s", status, data)
+	}
+	// 正常 cwd 创建成功
+	status, _ = e.apiCall(t, http.MethodPost, "/api/instance", map[string]any{
+		"nickname":     "正常实例",
+		"startCommand": "ping 127.0.0.1 -t",
+		"cwd":          e.cwd,
+	})
+	if status != 200 {
+		t.Errorf("正常 cwd 创建实例失败: %v", status)
+	}
+}
+
+// TestWriteErrorHTTPStatus 错误响应透传真实 HTTP 状态码（审计报告 #6）：
+// 此前全部错误恒 200，监控/WAF/负载均衡无法识别失败。
+func TestWriteErrorHTTPStatus(t *testing.T) {
+	e := newFileEnv(t)
+
+	// 认证失败 → HTTP 403 + body 403
+	req, _ := http.NewRequest(http.MethodGet, e.base+"/api/overview", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var out struct {
+		Status int `json:"status"`
+	}
+	json.Unmarshal(raw, &out)
+	if resp.StatusCode != http.StatusForbidden || out.Status != http.StatusForbidden {
+		t.Errorf("认证失败应 HTTP 403 + body 403，实际 HTTP %d body %d", resp.StatusCode, out.Status)
+	}
+
+	// 参数错误（实例不存在）→ HTTP 400 + body 400
+	resp, err = http.DefaultClient.Get(e.base + "/api/instance?apikey=test-key&uuid=no-such-uuid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	json.Unmarshal(raw, &out)
+	if resp.StatusCode != http.StatusBadRequest || out.Status != http.StatusBadRequest {
+		t.Errorf("实例不存在应 HTTP 400 + body 400，实际 HTTP %d body %d", resp.StatusCode, out.Status)
+	}
+
+	// 成功响应仍为 HTTP 200
+	resp, err = http.DefaultClient.Get(e.base + "/api/overview?apikey=test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("成功响应应 HTTP 200，实际 %d", resp.StatusCode)
+	}
+}
+
 // TestFileAPIRoundTrip 新建/写入/读取/复制/移动/删除全链路。
 func TestFileAPIRoundTrip(t *testing.T) {
 	e := newFileEnv(t)

@@ -24,6 +24,7 @@ go build -o irix-node .
 | `-apikey` | 固定 API 密钥；留空则启用配对码机制 | 空 |
 | `-audit-log` | 将用户操作审计日志落盘到 `{data}/logs/audit.log` | 开启 |
 | `-audit-log-max` | 审计日志单文件轮转上限（MB，超过后轮转为 `.1`） | `64` |
+| `-transfer-allow-cidr` | 集群拉取（`POST /api/cluster/transfer`）放行的内网 CIDR 列表（逗号分隔）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置，如 `192.168.0.0/16,10.0.0.0/8` | 空 |
 
 不指定 `-apikey` 时启用**配对码机制**：
 
@@ -84,4 +85,9 @@ go build -o irix-node .
 
 - 未指定 `-apikey` 时启用配对码认证，所有 API 请求必须携带首次启动时显示的配对码。
 - 文件操作被限制在实例工作目录内（`..` 越界会被拒绝）。
+- 实例 `cwd` 拒绝文件系统/磁盘根、系统目录与 Windows 用户 Profile 目录
+  （`\Users` 整树，仅豁免 `%TEMP%`）。
+- 集群拉取（节点间直传）默认拒绝环回、链路本地与本机地址（防认证后 SSRF），
+  并默认拒绝 RFC1918 内网地址；LAN 直传需显式配置 `-transfer-allow-cidr`，
+  该配置即信任边界——仅放行自己管辖的网段。
 - 建议配合防火墙仅监听 127.0.0.1；如需局域网访问请设置 `-apikey`。

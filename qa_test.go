@@ -694,10 +694,10 @@ func TestHTTPRoutesSmoke(t *testing.T) {
 			t.Errorf("%s status 字段异常: %v", name, resp["status"])
 		}
 	}
-	// 未认证访问：MCSM 约定 HTTP 恒为 200，业务状态在 body.status 字段
+	// 未认证访问：HTTP 状态码与 body.status 一致（403），供监控/WAF 识别失败
 	code, body := doReq(t, srv.URL+"/api/overview")
-	if code != http.StatusOK {
-		t.Errorf("MCSM 约定 HTTP 应为 200，实际 %d", code)
+	if code != http.StatusForbidden {
+		t.Errorf("未认证应返回 HTTP 403，实际 %d", code)
 	}
 	var resp map[string]any
 	_ = json.Unmarshal(body, &resp)

@@ -408,7 +408,9 @@ func dockerExport(d *Daemon, id string) (map[string]any, error) {
 	if err := f.Close(); err != nil {
 		return nil, err
 	}
-	password := tickets.Create("cluster", d.clusterRoot(), "")
+	// 导出票据为目录范围下载票据（与快照一致）：客户端按
+	// /download/{password}/.exports/xxx.tar 下载。
+	password := tickets.CreateDownload("cluster", d.clusterRoot(), "")
 	if password == "" {
 		return nil, errors.New("下载票据已满，请稍后重试")
 	}
