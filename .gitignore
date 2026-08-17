@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# IriX-Node runtime artifacts (generated when run from repo root)
+auth.hash
+logs/
+.mimosa/
