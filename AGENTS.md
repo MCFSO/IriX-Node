@@ -12,6 +12,7 @@ go build -o irix-node .       # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试（CI 必跑）
 go run . -port 12346 -data <目录> [-apikey <key>]   # 本地运行
+go run . -config config.json  # 用配置文件启动（全部启动参数可写入）
 go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局域网访问）
 ```
 
@@ -21,7 +22,8 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 入口：flag 解析、配对码初始化、路由注册、`NormalizePath`/`SplitCommand` 等通用工具 |
+| `main.go` | 入口：flag 解析、配置文件加载与合并、配对码初始化、路由注册、`NormalizePath`/`SplitCommand` 等通用工具 |
+| `config.go` | 配置文件（`config.json`）加载：`Config` 结构、`loadConfigFile`、`nodeOptions` 命令行/配置文件合并（优先级：命令行显式参数 > 配置文件 > 默认值） |
 | `daemon.go` | 核心模型：`Daemon`/`Instance`/`InstanceConfig`、`instances.json` 持久化、增删改查 |
 | `instance.go` | 实例相关 API 处理器、路由注册表 `RegisterRoutes`、认证包装器 `auth` |
 | `process.go` | 进程管理：启动/停止/重启/强杀、环形日志缓冲 `LogBuffer`、stdin 命令下发 |
@@ -56,3 +58,10 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 
 - `instances.json`：实例配置列表（`PersistedInstance`）。
 - `auth.hash`：配对码 SHA-256 哈希（首次启动生成，仅显示一次；删除后重启可重置）。
+
+## 配置文件
+
+- `config.json`：启动参数配置（JSON，可用 `-config` 指定路径，不存在则忽略）。
+  字段见 `config.example.json`；优先级为 **命令行显式参数 > 配置文件 > 默认值**。
+  布尔/整数字段用指针区分「未设置」（回退默认值）与「显式 false/0」。
+- Linux systemd 安装脚本生成 `/etc/irix-node/config.json` 并以 `-config` 启动。
