@@ -474,6 +474,13 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	inst.SetStatus(StatusRunning)
 	_ = d.Save()
 
+	// 先释放忙碌标记，再挂退出监听：进程秒退时（如 `exit 1`）done 可能在
+	// Save 期间就已关闭，watcher 一注册会立即触发 autoRestart；若 Busy
+	// 仍未清，下次启动会被误判为「实例正在执行其他操作」而丢弃，防抖链条中断。
+	inst.mu.Lock()
+	inst.Busy = false
+	inst.mu.Unlock()
+
 	// 监听进程退出：意外退出且启用 AutoRestart 时自动重启（带防抖）
 	go func() {
 		<-proc.done

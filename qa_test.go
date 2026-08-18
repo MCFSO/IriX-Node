@@ -548,25 +548,28 @@ func TestAutoRestartCrashLoop(t *testing.T) {
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
 	}
-	// 等待防抖停止
-	deadline := time.Now().Add(5 * time.Second)
+	// 等待防抖停止：先观察到防抖介入（计数>0），再等待其完成
+	// （Stopped 且计数复位）。不能仅凭 Stopped 判定——每次崩溃退出到
+	// 下次自动重启之间也存在瞬时 Stopped，会误读为防抖已停止。
+	deadline := time.Now().Add(10 * time.Second)
+	engaged := false
 	for time.Now().Before(deadline) {
 		inst.mu.Lock()
-		s := inst.Status
+		s, a := inst.Status, inst.arAttempts
 		inst.mu.Unlock()
-		if s == StatusStopped {
+		if a > 0 {
+			engaged = true
+		}
+		if engaged && s == StatusStopped && a == 0 {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	inst.mu.Lock()
 	status, attempts := inst.Status, inst.arAttempts
 	inst.mu.Unlock()
-	if status != StatusStopped {
-		t.Fatalf("崩溃循环应被防抖停止，状态=%d", status)
-	}
-	if attempts != 0 {
-		t.Fatalf("防抖停止后计数应复位，实际 %d", attempts)
+	if status != StatusStopped || attempts != 0 {
+		t.Fatalf("崩溃循环应被防抖停止且计数复位，实际 状态=%d 计数=%d", status, attempts)
 	}
 	t.Logf("[验证] 崩溃循环经防抖后停止，未无限重启")
 }
