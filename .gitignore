@@ -35,3 +35,4 @@ go.work.sum
 auth.hash
 logs/
 .mimosa/
+config.json

@@ -27,8 +27,9 @@ import (
 
 func main() {
 	var (
+		configPath    = flag.String("config", "config.json", "配置文件路径（JSON，不存在则忽略）；全部启动参数均可写入配置文件（字段见 config.example.json），命令行显式参数优先级高于配置文件")
 		port          = flag.Int("port", 12346, "监听端口（1-65535）")
-		bindHost      = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时读 IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
+		bindHost      = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时依次读配置文件 bind、IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
 		dataDir       = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
 		apiKey        = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 		instanceLog   = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
@@ -41,9 +42,12 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
 		fmt.Fprintf(os.Stderr, "用法: irix-node [选项]\n\n")
+		fmt.Fprintf(os.Stderr, "所有参数均可写入配置文件（默认 ./config.json，可用 -config 指定路径，\n")
+		fmt.Fprintf(os.Stderr, "字段说明见 config.example.json）；优先级：命令行显式参数 > 配置文件 > 默认值。\n\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -config /etc/irix-node/config.json  # 用配置文件启动（推荐）\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -bind 0.0.0.0 -port 23333 -apikey mykey  # 监听全部网卡的 23333 端口（局域网可访问）\n")
@@ -54,36 +58,63 @@ func main() {
 	}
 	flag.Parse()
 
-	if *port <= 0 || *port > 65535 {
-		log.Fatalf("端口无效: %d（须在 1-65535 之间）", *port)
+	// 命令行显式设置的参数名集合：这些参数不被配置文件覆盖
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// 加载配置文件并合并启动选项（不存在则静默跳过，与纯命令行启动一致）
+	cfg, cfgLoaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	if *dataDir == "" {
+	opts := &nodeOptions{
+		Port:              *port,
+		BindHost:          *bindHost,
+		DataDir:           *dataDir,
+		APIKey:            *apiKey,
+		InstanceLog:       *instanceLog,
+		InstanceLogMax:    *instanceLogMB,
+		AuditLog:          *auditLog,
+		AuditLogMax:       *auditLogMB,
+		LoadTune:          *loadTune,
+		TransferAllowCIDR: *transferCIDR,
+	}
+	opts.applyConfig(cfg, setFlags)
+
+	if opts.Port <= 0 || opts.Port > 65535 {
+		log.Fatalf("端口无效: %d（须在 1-65535 之间；请检查命令行参数或配置文件 %s）", opts.Port, *configPath)
+	}
+	if opts.InstanceLogMax < 1 || opts.AuditLogMax < 1 {
+		log.Fatalf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
+			opts.InstanceLogMax, opts.AuditLogMax, *configPath)
+	}
+	if opts.DataDir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
 			log.Fatalf("无法获取当前目录: %v", err)
 		}
-		*dataDir = wd
+		opts.DataDir = wd
 	}
-	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-		log.Fatalf("无法创建数据目录 %s: %v", *dataDir, err)
+	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
+		log.Fatalf("无法创建数据目录 %s: %v", opts.DataDir, err)
 	}
 
-	d := NewDaemon(*dataDir, *apiKey)
-	d.Port = *port
-	d.transferAllowCIDR = *transferCIDR
+	d := NewDaemon(opts.DataDir, opts.APIKey)
+	d.Port = opts.Port
+	d.transferAllowCIDR = opts.TransferAllowCIDR
 	if err := d.parseTransferAllowCIDR(); err != nil {
-		log.Fatalf("-transfer-allow-cidr 配置无效: %v", err)
+		log.Fatalf("transfer-allow-cidr 配置无效: %v（请检查命令行参数或配置文件 %s）", err, *configPath)
 	}
-	if *loadTune {
+	if opts.LoadTune {
 		go tuner.loop() // 负载自适应调谐（后台 goroutine 周期采样）
 	}
-	logDir := filepath.Join(*dataDir, "logs")
-	if *instanceLog {
+	logDir := filepath.Join(opts.DataDir, "logs")
+	if opts.InstanceLog {
 		d.LogDir = logDir
-		d.LogMaxBytes = int64(*instanceLogMB) << 20
+		d.LogMaxBytes = int64(opts.InstanceLogMax) << 20
 	}
-	if *auditLog {
-		d.AuditLog = newFileLogger(logDir, "audit.log", int64(*auditLogMB)<<20)
+	if opts.AuditLog {
+		d.AuditLog = newFileLogger(logDir, "audit.log", int64(opts.AuditLogMax)<<20)
 	}
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
@@ -98,7 +129,7 @@ func main() {
 			}(inst)
 		}
 	}
-	if *apiKey == "" {
+	if opts.APIKey == "" {
 		code, isNew, err := d.LoadPairing()
 		if err != nil {
 			log.Fatalf("初始化配对码失败: %v", err)
@@ -115,10 +146,10 @@ func main() {
 		}
 	}
 
-	bind := resolveBind(*bindHost, os.Getenv("IRIX_NODE_BIND_ALL"))
+	bind := resolveBind(opts.BindHost, os.Getenv("IRIX_NODE_BIND_ALL"))
 	// 记录实际监听主机：下载/上传票据据此生成客户端可达的直连地址
 	d.BindHost = bind
-	addr := net.JoinHostPort(bind, strconv.Itoa(*port))
+	addr := net.JoinHostPort(bind, strconv.Itoa(opts.Port))
 
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
@@ -133,15 +164,18 @@ func main() {
 	}
 
 	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
-	d.auditLogf("数据目录: %s", *dataDir)
+	if cfgLoaded {
+		d.auditLogf("已加载配置文件: %s", *configPath)
+	}
+	d.auditLogf("数据目录: %s", opts.DataDir)
 	d.auditLogf("监听地址: http://%s/api/overview", addr)
 	if d.LogDir != "" {
-		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, *instanceLogMB)
+		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, opts.InstanceLogMax)
 	}
 	if d.AuditLog != nil {
-		alog.Printf("审计日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", filepath.Join(logDir, "audit.log"), *auditLogMB)
+		alog.Printf("审计日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", filepath.Join(logDir, "audit.log"), opts.AuditLogMax)
 	}
-	if *apiKey == "" {
+	if opts.APIKey == "" {
 		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 
@@ -192,8 +226,9 @@ func limitAPIBody(next http.Handler) http.Handler {
 // Version 守护进程版本号。
 const Version = "1.0.0"
 
-// resolveBind 解析监听地址：-bind 显式指定优先；留空时读 IRIX_NODE_BIND_ALL
-// 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1。
+// resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
+// 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量
+// （=1 则 0.0.0.0），否则默认 127.0.0.1。
 func resolveBind(flagValue, envValue string) string {
 	if strings.TrimSpace(flagValue) != "" {
 		return strings.TrimSpace(flagValue)
