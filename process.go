@@ -181,11 +181,15 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 	if len(args) == 0 {
 		return nil, fmt.Errorf("启动命令为空")
 	}
-	if cwd != "" {
-		info, err := os.Stat(cwd)
-		if err != nil || !info.IsDir() {
-			return nil, fmt.Errorf("工作目录不存在: %s", cwd)
-		}
+	// 空 cwd 必须拒绝，而不是静默继承节点进程自己的工作目录
+	// （systemd 下为 /）：否则进程会在错误目录里读写配置/世界文件，
+	// 表现为「相对路径 jar 找不到、必须塞绝对路径、连不上端口」。
+	if cwd == "" {
+		return nil, fmt.Errorf("工作目录为空")
+	}
+	info, err := os.Stat(cwd)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("工作目录不存在: %s", cwd)
 	}
 
 	cmd := exec.Command(args[0], args[1:]...)

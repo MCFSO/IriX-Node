@@ -321,6 +321,55 @@ func TestCreateInstanceRejectsSystemCwd(t *testing.T) {
 	}
 }
 
+// TestNormalizeCwd 工作目录规范化：空拒绝、相对转绝对、绝对保持、系统目录拒绝。
+// 此前相对路径被原样入库，同一实例 cwd 会随节点启动目录漂移（systemd 下为 /），
+// 导致进程在错误目录启动。
+func TestNormalizeCwd(t *testing.T) {
+	if _, err := normalizeCwd(""); err == nil {
+		t.Error("空工作目录应被拒绝")
+	}
+	if _, err := normalizeCwd("   "); err == nil {
+		t.Error("空白工作目录应被拒绝")
+	}
+	abs, err := normalizeCwd("server")
+	if err != nil {
+		t.Fatalf("相对路径应转为绝对路径: %v", err)
+	}
+	if !filepath.IsAbs(abs) {
+		t.Errorf("规范化结果应为绝对路径: %q", abs)
+	}
+	dir := t.TempDir()
+	got, err := normalizeCwd(dir)
+	if err != nil || got != filepath.Clean(dir) {
+		t.Errorf("绝对路径应原样保持: %q %v", got, err)
+	}
+	if _, err := normalizeCwd(string(filepath.Separator)); err == nil {
+		t.Error("文件系统根应被拒绝")
+	}
+	if runtime.GOOS == "windows" {
+		if _, err := normalizeCwd(`C:\`); err == nil {
+			t.Error("盘符根应被拒绝")
+		}
+	} else {
+		if _, err := normalizeCwd("/etc"); err == nil {
+			t.Error("系统目录应被拒绝")
+		}
+	}
+}
+
+// TestStartProcessRejectsEmptyCwd 空 cwd 拒绝启动：此前空 cwd 被静默放行，
+// 进程继承节点自身工作目录（systemd 下为 /），在错误目录读写文件。
+func TestStartProcessRejectsEmptyCwd(t *testing.T) {
+	// 无此文件可执行也无妨：空 cwd 检查先于任何可执行文件解析
+	p, err := startProcess("echo hi", "", nil)
+	if err == nil || p != nil {
+		t.Fatalf("空 cwd 应拒绝启动: %v", err)
+	}
+	if !strings.Contains(err.Error(), "工作目录为空") {
+		t.Errorf("错误消息应说明工作目录为空: %v", err)
+	}
+}
+
 // TestWriteErrorHTTPStatus 错误响应透传真实 HTTP 状态码（审计报告 #6）：
 // 此前全部错误恒 200，监控/WAF/负载均衡无法识别失败。
 func TestWriteErrorHTTPStatus(t *testing.T) {

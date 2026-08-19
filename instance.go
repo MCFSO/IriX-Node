@@ -231,14 +231,12 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.FillDefaults()
-	if strings.TrimSpace(cfg.Cwd) == "" {
-		writeError(w, http.StatusBadRequest, "工作目录 (cwd) 不能为空")
-		return
-	}
-	if err := validateCwd(cfg.Cwd); err != nil {
+	abs, err := normalizeCwd(cfg.Cwd)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	cfg.Cwd = abs
 	cfg.CreateDatetime = time.Now().UnixMilli()
 	cfg.LastDatetime = cfg.CreateDatetime
 
@@ -266,10 +264,13 @@ func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if err := validateCwd(cfg.Cwd); err != nil {
+	cfg.FillDefaults()
+	abs, err := normalizeCwd(cfg.Cwd)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	cfg.Cwd = abs
 	if err := d.UpdateInstance(inst, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -354,6 +354,26 @@ func validateCwd(cwd string) error {
 	return nil
 }
 
+// normalizeCwd 校验并规范化实例工作目录：相对路径按节点进程当前目录
+// （systemd 下为 /）转成绝对路径后返回，供入库保存。
+// 此前相对路径被原样保存，同一实例的 cwd 会随节点启动目录漂移，
+// 导致进程在错误目录启动（相对 jar 找不到、配置写错位置）。
+func normalizeCwd(cwd string) (string, error) {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return "", errors.New("工作目录不能为空")
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("工作目录解析失败: %v", err)
+	}
+	abs = filepath.Clean(abs)
+	if err := validateCwd(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
 // isDriveRoot 判断 Windows 路径是否为磁盘根（C:\、C:）或 UNC 共享根（\\server\share）。
 // 注意 filepath.Clean("C:") 会得到 "C:."（盘符相对路径），尾点同样视为根。
 func isDriveRoot(p string) bool {

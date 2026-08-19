@@ -267,11 +267,27 @@ func (d *Daemon) Load() error {
 		return nil
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	changed := false
 	for _, p := range list {
+		// 旧数据迁移：此前相对路径 cwd 被原样入库，同一实例的 cwd 会随
+		// 节点启动目录漂移（systemd 下为 /）；加载时统一转绝对路径。
+		// 空 cwd 保持不动——启动时会被明确拒绝并提示，而不是静默漂移。
+		if cwd := strings.TrimSpace(p.Config.Cwd); cwd != "" {
+			if abs, err := filepath.Abs(cwd); err == nil && abs != cwd {
+				p.Config.Cwd = abs
+				changed = true
+			}
+		}
 		inst := NewInstance(p.InstanceUuid, p.Config)
 		inst.Started = p.Started
 		d.Instances = append(d.Instances, inst)
+	}
+	d.mu.Unlock()
+	if changed {
+		// Save 需先 saveMu 后 mu，因此必须先释放 mu 再调用
+		if err := d.Save(); err != nil {
+			alog.Printf("警告: cwd 规范化后写回 instances.json 失败: %v", err)
+		}
 	}
 	return nil
 }

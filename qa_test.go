@@ -385,6 +385,37 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLoadNormalizesRelativeCwd 旧数据迁移：相对 cwd 加载时转绝对路径并写回，
+// 防止同一实例 cwd 随节点启动目录漂移（此前相对路径被原样入库）。
+func TestLoadNormalizesRelativeCwd(t *testing.T) {
+	dir := t.TempDir()
+	old := `[{"instanceUuid":"rel-1","config":{"nickname":"旧数据","startCommand":"echo hi","cwd":"subdir"}}]`
+	if err := os.WriteFile(filepath.Join(dir, "instances.json"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDaemon(dir, "test-key")
+	if err := d.Load(); err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	inst := d.Find("rel-1")
+	if inst == nil {
+		t.Fatal("实例未加载")
+	}
+	inst.mu.Lock()
+	cwd := inst.Config.Cwd
+	inst.mu.Unlock()
+	if !filepath.IsAbs(cwd) {
+		t.Fatalf("相对 cwd 应转绝对: %q", cwd)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "instances.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"cwd": "subdir"`) {
+		t.Fatalf("磁盘上 cwd 应已转绝对: %s", raw)
+	}
+}
+
 // TestCorruptInstancesFileBehavior 实例文件损坏时守护进程能否自愈。
 func TestCorruptInstancesFileBehavior(t *testing.T) {
 	dir := t.TempDir()
