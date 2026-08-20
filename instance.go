@@ -95,6 +95,10 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 
 	// Java 运行时（docs/irix-node-local-parity.md §4.2.1）
 	mux.HandleFunc("GET /api/runtime/java", d.auth(d.handleRuntimeJava))
+	// JDK 安装/卸载（docs/irix-node-local-parity.md §4.2.2，任务化）
+	mux.HandleFunc("POST /api/runtime/java/install", d.auth(d.handleInstallJava))
+	mux.HandleFunc("GET /api/runtime/java/install-progress", d.auth(d.writeTaskStatus))
+	mux.HandleFunc("DELETE /api/runtime/java", d.auth(d.handleUninstallJava))
 
 	// 文件管理
 	mux.HandleFunc("GET /api/files/list", d.auth(d.handleFileList))
