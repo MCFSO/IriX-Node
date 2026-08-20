@@ -196,6 +196,8 @@ type Daemon struct {
 	jobs  *jobStore  // 容器长任务注册表（container.go）
 	tasks *taskStore // 通用异步任务表（JDK 安装 / 核心下载 / 备份恢复等）
 
+	trashMu sync.Mutex // 回收站元数据读写互斥（{data}/trash/<uuid>.json）
+
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex
 	clusterMonitor   string                  // 监控节点 id（空 = 尚无监控者）

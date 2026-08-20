@@ -132,6 +132,12 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/files/download", d.auth(d.handleFileDownloadTicket))
 	mux.HandleFunc("POST /api/files/upload", d.auth(d.handleFileUploadTicket))
 
+	// 实例级回收站（docs/irix-node-local-parity.md §4.6）
+	mux.HandleFunc("POST /api/files/trash", d.auth(d.handleFileTrash))
+	mux.HandleFunc("GET /api/files/trash/list", d.auth(d.handleTrashList))
+	mux.HandleFunc("POST /api/files/trash/restore", d.auth(d.handleTrashRestore))
+	mux.HandleFunc("POST /api/files/trash/empty", d.auth(d.handleTrashEmpty))
+
 	// 下载/上传直连通道
 	mux.HandleFunc("GET /download/", d.handleDirectDownload)
 	mux.HandleFunc("POST /upload/", d.handleDirectUpload)
