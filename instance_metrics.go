@@ -25,8 +25,8 @@ type metricSample struct {
 	UploadBps   int64   `json:"uploadBps"`
 }
 
-// metricsSampleInterval 采样间隔（测试可缩短）。
-var metricsSampleInterval = 15 * time.Second
+// defaultMetricsInterval 默认采样间隔 15 秒（Daemon.metricsInterval 初始值）。
+const defaultMetricsInterval = 15 * time.Second
 
 // metricsRingSize 环形保留条数（15 秒 × 60 = 15 分钟）。
 const metricsRingSize = 60
@@ -63,9 +63,10 @@ func (d *Daemon) sampleAllMetrics() {
 }
 
 // metricsLoop 后台采样循环（首次访问 metrics 接口时惰性启动）。
+// 间隔读取 Daemon.metricsInterval（测试可为单个守护进程缩短，互不干扰）。
 func (d *Daemon) metricsLoop() {
 	for {
-		time.Sleep(metricsSampleInterval)
+		time.Sleep(d.metricsInterval)
 		d.sampleAllMetrics()
 	}
 }

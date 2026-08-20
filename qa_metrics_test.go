@@ -100,11 +100,8 @@ func TestLogsQuery(t *testing.T) {
 
 // TestMetricsSamples 缩短采样间隔后 metrics 返回采样点。
 func TestMetricsSamples(t *testing.T) {
-	old := metricsSampleInterval
-	metricsSampleInterval = time.Second
-	defer func() { metricsSampleInterval = old }()
-
 	d, dir := newTestDaemon(t)
+	d.metricsInterval = time.Second // 仅本守护进程缩短，避免全局竞争
 	inst := NewInstance("metrics-uuid", InstanceConfig{
 		Nickname: "监控", StartCommand: echoCommand(), Cwd: dir,
 	})

@@ -204,7 +204,8 @@ type Daemon struct {
 	frpMu      sync.Mutex   // FRP 隧道列表与进程状态互斥
 	frpTunnels []*frpTunnel // 隧道列表（持久化 {data}/frp/tunnels.json）
 
-	metricsOnce sync.Once // 实例指标采样循环惰性启动
+	metricsOnce     sync.Once     // 实例指标采样循环惰性启动
+	metricsInterval time.Duration // 指标采样间隔（默认 15s；测试可单独缩短）
 
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex
@@ -232,18 +233,19 @@ type Daemon struct {
 // NewDaemon 创建守护进程实例。
 func NewDaemon(dataDir, apiKey string) *Daemon {
 	return &Daemon{
-		DataDir:       dataDir,
-		APIKey:        apiKey,
-		Port:          12346,
-		UUID:          newUUID(),
-		Instances:     []*Instance{},
-		StartedAt:     time.Now(),
-		LogMaxBytes:   64 << 20, // 默认 64MB
-		clusterRole:   "worker",
-		clusterPeers:  []map[string]any{},
-		clusterEvents: []map[string]any{},
-		transfers:     map[string]*transferJob{},
-		tasks:         newTaskStore(),
+		DataDir:         dataDir,
+		APIKey:          apiKey,
+		Port:            12346,
+		UUID:            newUUID(),
+		Instances:       []*Instance{},
+		StartedAt:       time.Now(),
+		LogMaxBytes:     64 << 20, // 默认 64MB
+		metricsInterval: defaultMetricsInterval,
+		clusterRole:     "worker",
+		clusterPeers:    []map[string]any{},
+		clusterEvents:   []map[string]any{},
+		transfers:       map[string]*transferJob{},
+		tasks:           newTaskStore(),
 	}
 }
 

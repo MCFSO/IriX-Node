@@ -150,11 +150,29 @@ func TestStartProcessLogsToDisk(t *testing.T) {
 	t.Logf("[验证] 实例日志端到端落盘成功（%d 字节）", len(data))
 }
 
+// gateWriter 阻塞 Write 直到 gate 关闭（测试用：暂停消费 goroutine）。
+type gateWriter struct{ gate chan struct{} }
+
+func (g gateWriter) Write(p []byte) (int, error) {
+	<-g.gate
+	return len(p), nil
+}
+
 // TestAsyncLoggerDropNoBlock 全局异步日志器缓冲满时丢弃且不阻塞调用方。
+// 消费者先被 gate 阻塞，生产者写满 64 条缓冲后必然触发丢弃（确定性，
+// 不依赖机器速度——此前 io.Discard 消费过快时 drop 可能为 0 造成 flake）。
 func TestAsyncLoggerDropNoBlock(t *testing.T) {
 	oldOut := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(oldOut)
+	gate := make(chan struct{})
+	log.SetOutput(gateWriter{gate: gate})
+	defer func() {
+		select {
+		case <-gate: // 已放行
+		default:
+			close(gate) // 失败路径也放行消费者，避免泄漏
+		}
+		log.SetOutput(oldOut)
+	}()
 
 	a := newAsyncLogger(64)
 	done := make(chan struct{})
@@ -169,10 +187,11 @@ func TestAsyncLoggerDropNoBlock(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatalf("Printf 被阻塞（日志风暴不得阻塞调用方）")
 	}
-	a.Close()
 	if n := a.drop.Load(); n <= 0 {
 		t.Fatalf("预期缓冲满触发丢弃，实际 %d", n)
 	}
+	close(gate) // 放行消费者，Close 排空剩余缓冲
+	a.Close()
 	t.Logf("[验证] 缓冲满时 Printf 立即返回，丢弃 %d 条", a.drop.Load())
 }
 
