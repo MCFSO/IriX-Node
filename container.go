@@ -10,11 +10,15 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -281,7 +285,10 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bastille/jails/import", d.auth(d.handleBastilleImport))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/console", d.auth(d.handleBastilleConsole))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/cmd", d.auth(d.handleBastilleCmd))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/pkg", d.auth(d.handleBastillePkg))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfig))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfigSet))
+	mux.HandleFunc("DELETE /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfigUnset))
 	mux.HandleFunc("GET /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMounts))
 	mux.HandleFunc("POST /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountAdd))
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountRemove))
@@ -293,6 +300,19 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/bastille/rdr", d.auth(d.handleBastilleRdrList))
 	// 长任务进度（bootstrap / setup / 模板应用），与 /api/image/build-progress 同构
 	mux.HandleFunc("GET /api/bastille/jobs/{jobId}", d.auth(d.handleBastilleJobProgress))
+
+	// 运行会话（docs/irix-node-container-api.md §4.11）：jail 内后台长任务
+	mux.HandleFunc("POST /api/bastille/jails/{name}/run", d.auth(d.handleBastilleRunStart))
+	mux.HandleFunc("GET /api/bastille/jails/{name}/run/{session}", d.auth(d.handleBastilleRunStatus))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/run/{session}/stdin", d.auth(d.handleBastilleRunStdin))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/run/{session}/stop", d.auth(d.handleBastilleRunStop))
+	mux.HandleFunc("DELETE /api/bastille/jails/{name}/run/{session}", d.auth(d.handleBastilleRunDelete))
+
+	// 节点级归档（docs/irix-node-container-api.md §4.8）：编排迁移用，任意宿主机路径
+	mux.HandleFunc("POST /api/container/archive", d.auth(d.handleArchiveCreate))
+	mux.HandleFunc("GET /api/container/archive", d.auth(d.handleArchiveDownload))
+	mux.HandleFunc("POST /api/container/archive/upload", d.auth(d.handleArchiveUpload))
+	mux.HandleFunc("POST /api/container/archive/restore", d.auth(d.handleArchiveRestore))
 }
 
 // handleContainerInfo 能力探测。
@@ -622,13 +642,17 @@ func (d *Daemon) handleBastilleJails(w http.ResponseWriter, r *http.Request) {
 
 // handleBastilleCreate 创建 jail（含类型/VNET/桥接/IP 与创建后配置）。
 // POST /api/bastille/jails/create
-// body: {name, release, ip, type: thin|thick|clone|empty|linux,
+// body（新契约 NODE_API.md §6.1）: {name, release, ip?, type: thin|thick|clone|empty|linux,
 //
-//	vnet: none|vnet|bridge, interface?, volumes?: ["宿主机路径:jail内路径"],
-//	workdir?, memoryLimitMb?, cpus?, diskLimitMb?}
+//	vnet?: bool|"none"|"vnet"|"bridge", bridge?, mac?}
+//
+// body（旧契约兼容，container-api.md §4.2）: 另支持 interface、volumes、
+//
+//	workdir、memoryLimitMb、cpus、diskLimitMb（创建后应用）。
 //
 // type 映射：thin=默认(无标志) / thick(-T) / clone(-C) / empty(-E, 仅 NAME) / linux(-L)；
-// vnet=none 共享宿主网络(默认)，vnet/bridge 需 interface 且 IP 须含子网掩码；
+// vnet 为 bool 时 true→vnet、false→none；vnet/bridge 需网卡且 IP 须含子网掩码；
+// mac（bool 或 MAC 地址字符串）→ bastille create -M（静态 MAC，仅 VNET）；
 // linux 与任何 VNET 模式互斥。响应: {name, warnings}。
 func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -636,9 +660,11 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 		Release       string   `json:"release"`
 		IP            string   `json:"ip"`
 		Type          string   `json:"type"`
-		Vnet          string   `json:"vnet"`
-		Interface     string   `json:"interface"`
-		Volumes       []string `json:"volumes"` // "宿主机路径:jail内路径"
+		Vnet          any      `json:"vnet"`      // 新契约：bool 或 "none"|"vnet"|"bridge"
+		Interface     string   `json:"interface"` // 旧契约：VNET/bridge 网卡
+		Bridge        string   `json:"bridge"`    // 新契约：bridge 模式网卡名
+		Mac           any      `json:"mac"`       // 新契约：bool 或 MAC 地址字符串（静态 MAC）
+		Volumes       []string `json:"volumes"`   // "宿主机路径:jail内路径"
 		Workdir       string   `json:"workdir"`
 		MemoryLimitMb int      `json:"memoryLimitMb"`
 		Cpus          int      `json:"cpus"`
@@ -660,8 +686,32 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Type == "" {
 		body.Type = "thin"
 	}
-	if body.Vnet == "" {
-		body.Vnet = "none"
+	// vnet 归一化：bool（新契约）或字符串（旧契约）
+	vnetMode := "none"
+	switch v := body.Vnet.(type) {
+	case bool:
+		if v {
+			vnetMode = "vnet"
+		}
+	case string:
+		vnetMode = strings.TrimSpace(v)
+	}
+	iface := body.Interface
+	if body.Bridge != "" {
+		iface = body.Bridge
+		if vnetMode == "" || vnetMode == "none" {
+			vnetMode = "bridge"
+		}
+	}
+	// mac 归一化：bool → 仅加 -M 标志；字符串 → 加 -M 并写入 jail.conf
+	macFlag, macAddr := false, ""
+	switch m := body.Mac.(type) {
+	case bool:
+		macFlag = m
+	case string:
+		if m = strings.TrimSpace(m); m != "" {
+			macFlag, macAddr = true, m
+		}
 	}
 	// volumes：字符串 "宿主机路径:jail内路径" → 结构化挂载对
 	volumes := make([]bastilleVolume, 0, len(body.Volumes))
@@ -677,8 +727,8 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		volumes = append(volumes, bastilleVolume{Source: parts[0], Dest: parts[1]})
 	}
-	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, body.Vnet,
-		body.Interface, volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
+	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, vnetMode,
+		iface, macFlag, macAddr, volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
 	if err != nil {
 		containerErr(w, err)
 		return
@@ -760,10 +810,39 @@ func (d *Daemon) handleBastilleCmd(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, out)
 }
 
-// handleBastilleConfig jail.conf 内容。
-// GET /api/bastille/jails/{name}/config
+// handleBastillePkg jail 内软件包管理（docs/irix-node-container-api.md §4.9）。
+// POST /api/bastille/jails/{name}/pkg body: {action, packages}
+// action: install/delete/update/upgrade/autoremove（其他 pkg 子命令亦可透传）；
+// 服务端统一附加 -y 避免交互阻塞；响应 data 为命令输出文本。
+func (d *Daemon) handleBastillePkg(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action   string   `json:"action"`
+		Packages []string `json:"packages"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Action == "" {
+		writeError(w, http.StatusBadRequest, "缺少 action 参数")
+		return
+	}
+	if (body.Action == "install" || body.Action == "delete") && len(body.Packages) == 0 {
+		writeError(w, http.StatusBadRequest, "action 为 "+body.Action+" 时必须提供 packages 列表")
+		return
+	}
+	out, err := bastillePkg(r.PathValue("name"), body.Action, body.Packages)
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, out)
+}
+
+// handleBastilleConfig jail.conf 配置（扁平对象，docs/irix-node-container-api.md §4.12）。
+// GET /api/bastille/jails/{name}/config → data: {key: value, ...}
 func (d *Daemon) handleBastilleConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := bastilleConfig(r.PathValue("name"))
+	cfg, err := bastilleConfigGet(r.PathValue("name"))
 	if err != nil {
 		containerErr(w, err)
 		return
@@ -771,15 +850,56 @@ func (d *Daemon) handleBastilleConfig(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, cfg)
 }
 
-// handleBastilleMounts 挂载列表。
+// handleBastilleConfigSet 设置 jail 配置项。
+// POST /api/bastille/jails/{name}/config body: {key, value}
+// 服务端执行 bastille config <name> <key> <value>。
+func (d *Daemon) handleBastilleConfigSet(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Key == "" {
+		writeError(w, http.StatusBadRequest, "缺少 key 参数")
+		return
+	}
+	if err := bastilleConfigSet(r.PathValue("name"), body.Key, body.Value); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleConfigUnset 删除 jail 配置项（从 jail.conf 移除）。
+// DELETE /api/bastille/jails/{name}/config?key=<key>
+// 不存在的 key 返回 200（幂等）。
+func (d *Daemon) handleBastilleConfigUnset(w http.ResponseWriter, r *http.Request) {
+	key := queryParam(r, "key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "缺少 key 参数")
+		return
+	}
+	if err := bastilleConfigUnset(r.PathValue("name"), key); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleMounts 挂载列表（docs/irix-node-container-api.md §4.10）。
 // GET /api/bastille/jails/{name}/mounts
+// data 为数组，条目: {src?, dst, fstype, options?, permanent}
+// （合并 fstab 条目与当前 mount 输出；permanent 表示条目来自 fstab）。
 func (d *Daemon) handleBastilleMounts(w http.ResponseWriter, r *http.Request) {
-	mounts, err := bastilleMounts(r.PathValue("name"))
+	items, err := bastilleMountList(r.PathValue("name"))
 	if err != nil {
 		containerErr(w, err)
 		return
 	}
-	writeOK(w, mounts)
+	writeOK(w, items)
 }
 
 // handleBastilleTemplates 模板列表（project/template 格式）。
@@ -1043,43 +1163,61 @@ func (d *Daemon) handleBastilleImport(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"name": name})
 }
 
-// handleBastilleMountAdd 挂载宿主机目录到 jail（bastille mount NAME SOURCE DEST）。
-// POST /api/bastille/jails/{name}/mounts body: {source, dest}
+// handleBastilleMountAdd 添加挂载（docs/irix-node-container-api.md §4.10）。
+// POST /api/bastille/jails/{name}/mounts body: {src?, dst, fstype, options?}
+//   - nullfs（默认）→ bastille mount <name> <src> <dst>（写 fstab 并即时挂载）
+//   - procfs/devfs → 追加 fstab 条目并立即挂载（thin jail 下为宿主 <jailroot>/<dst>）
 func (d *Daemon) handleBastilleMountAdd(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Source string `json:"source"`
-		Dest   string `json:"dest"`
+		Src     string `json:"src"`
+		Dest    string `json:"dest"` // 旧契约字段名，兼容
+		Dst     string `json:"dst"`
+		Fstype  string `json:"fstype"`
+		Options string `json:"options"`
 	}
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	if body.Source == "" || body.Dest == "" {
-		writeError(w, http.StatusBadRequest, "缺少 source/dest 参数")
+	dst := body.Dst
+	if dst == "" {
+		dst = body.Dest
+	}
+	if dst == "" {
+		writeError(w, http.StatusBadRequest, "缺少 dst 参数（jail 内目标路径）")
 		return
 	}
-	if err := bastilleMount(r.PathValue("name"), body.Source, body.Dest); err != nil {
+	if err := bastilleMountAdd(r.PathValue("name"), body.Src, dst, body.Fstype, body.Options); err != nil {
 		containerErr(w, err)
 		return
 	}
 	writeOK(w, true)
 }
 
-// handleBastilleMountRemove 解除 jail 挂载（bastille umount NAME DEST）。
-// DELETE /api/bastille/jails/{name}/mounts body: {dest}
+// handleBastilleMountRemove 卸载并移除 fstab 条目。
+// DELETE /api/bastille/jails/{name}/mounts?dst=<jail内路径>
+// （兼容旧契约 body: {dest}）；fstab 中找不到条目时仅卸载，不报错。
 func (d *Daemon) handleBastilleMountRemove(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Dest string `json:"dest"`
+	dst := queryParam(r, "dst")
+	if dst == "" {
+		var body struct {
+			Dest string `json:"dest"`
+			Dst  string `json:"dst"`
+		}
+		if err := parseJSONBody(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+			return
+		}
+		dst = body.Dst
+		if dst == "" {
+			dst = body.Dest
+		}
 	}
-	if err := parseJSONBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+	if dst == "" {
+		writeError(w, http.StatusBadRequest, "缺少 dst 参数（jail 内目标路径）")
 		return
 	}
-	if body.Dest == "" {
-		writeError(w, http.StatusBadRequest, "缺少 dest 参数")
-		return
-	}
-	if err := bastilleUmount(r.PathValue("name"), body.Dest); err != nil {
+	if err := bastilleMountRemove(r.PathValue("name"), dst); err != nil {
 		containerErr(w, err)
 		return
 	}
@@ -1142,4 +1280,420 @@ func (d *Daemon) handleContainerLimits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, true)
+}
+
+// --- 运行会话（docs/irix-node-container-api.md §4.11） ---
+
+// handleBastilleRunStart 在 jail 内后台启动运行会话。
+// POST /api/bastille/jails/{name}/run body: {command, cwd?, watch?}
+// command 以 shell 语义执行（sh -c 包装）；watch=true 时进程退出自动停止 jail。
+// 响应 data: {sessionId}。
+func (d *Daemon) handleBastilleRunStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Command string `json:"command"`
+		Cwd     string `json:"cwd"`
+		Watch   bool   `json:"watch"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Command == "" {
+		writeError(w, http.StatusBadRequest, "缺少 command 参数")
+		return
+	}
+	sessionID, err := bastilleRunStart(r.PathValue("name"), body.Command, body.Cwd, body.Watch)
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, map[string]any{"sessionId": sessionID})
+}
+
+// handleBastilleRunStatus 查询会话状态与增量日志。
+// GET /api/bastille/jails/{name}/run/{session}?tail=N&since=<字节偏移>
+// 响应 data: {running, exitCode?, offset, log}；since 缺省时返回最后 tail 行（默认 200）。
+func (d *Daemon) handleBastilleRunStatus(w http.ResponseWriter, r *http.Request) {
+	tail := 200
+	if v, err := strconv.Atoi(queryParam(r, "tail")); err == nil && v > 0 {
+		tail = v
+	}
+	since := int64(0)
+	if v, err := strconv.ParseInt(queryParam(r, "since"), 10, 64); err == nil && v > 0 {
+		since = v
+	}
+	data, err := bastilleRunStatus(r.PathValue("name"), r.PathValue("session"), tail, since)
+	if err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, data)
+}
+
+// handleBastilleRunStdin 向会话进程 stdin 写入输入（控制台命令）。
+// POST /api/bastille/jails/{name}/run/{session}/stdin body: {input}
+func (d *Daemon) handleBastilleRunStdin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Input string `json:"input"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if err := bastilleRunStdin(r.PathValue("name"), r.PathValue("session"), body.Input); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleRunStop 终止会话进程（SIGTERM → 10s 超时 SIGKILL）。
+// POST /api/bastille/jails/{name}/run/{session}/stop
+func (d *Daemon) handleBastilleRunStop(w http.ResponseWriter, r *http.Request) {
+	if err := bastilleRunStop(r.PathValue("name"), r.PathValue("session")); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// handleBastilleRunDelete 清理会话（终止进程 + 删除日志缓冲）。
+// DELETE /api/bastille/jails/{name}/run/{session}
+func (d *Daemon) handleBastilleRunDelete(w http.ResponseWriter, r *http.Request) {
+	if err := bastilleRunDelete(r.PathValue("name"), r.PathValue("session")); err != nil {
+		containerErr(w, err)
+		return
+	}
+	writeOK(w, true)
+}
+
+// --- 节点级归档（docs/irix-node-container-api.md §4.8） ---
+
+// archiveDir 节点级归档目录（{data}/archives）。
+func (d *Daemon) archiveDir() string {
+	return filepath.Join(d.DataDir, "archives")
+}
+
+// errArchiveTraversal 归档条目路径越界（zip-slip / 绝对路径）哨兵错误，
+// 命中时返回 400（归档内容非法）而非 500。
+var errArchiveTraversal = errors.New("归档条目越界")
+
+// safeArchiveName 校验并规范化归档文件名：只允许纯文件名（拒绝路径分隔符与
+// ../ 等穿越尝试），返回规范化后的文件名。
+func safeArchiveName(name string) (string, error) {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if strings.Contains(name, "/") {
+		return "", errors.New("归档文件名不能包含路径分隔符")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "", errors.New("归档文件名无效")
+	}
+	return name, nil
+}
+
+// handleArchiveCreate 压缩节点任意路径为 zip 归档（§4.8）。
+// POST /api/container/archive body: {path, archive?} → {path}
+// archive 缺省自动命名为 "<basename>_<时间戳>.zip"。
+func (d *Daemon) handleArchiveCreate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path    string `json:"path"`
+		Archive string `json:"archive"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, "缺少 path 参数")
+		return
+	}
+	if _, err := os.Stat(body.Path); err != nil {
+		writeError(w, http.StatusBadRequest, "路径不存在或不可访问: "+err.Error())
+		return
+	}
+	name := body.Archive
+	if name == "" {
+		base := filepath.Base(body.Path)
+		if base == "." || base == string(filepath.Separator) || base == "" {
+			base = "archive"
+		}
+		name = fmt.Sprintf("%s_%s.zip", base, time.Now().Format("20060102_150405"))
+	}
+	name, err := safeArchiveName(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := os.MkdirAll(d.archiveDir(), 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建归档目录失败: "+err.Error())
+		return
+	}
+	dst := filepath.Join(d.archiveDir(), name)
+	if err := zipPathTo(body.Path, dst); err != nil {
+		writeError(w, http.StatusInternalServerError, "压缩失败: "+err.Error())
+		return
+	}
+	writeOK(w, map[string]any{"path": dst})
+}
+
+// handleArchiveDownload 原始字节下载归档（不走 JSON 信封）。
+// GET /api/container/archive?file=<归档名>
+func (d *Daemon) handleArchiveDownload(w http.ResponseWriter, r *http.Request) {
+	name, err := safeArchiveName(queryParam(r, "file"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p := filepath.Join(d.archiveDir(), name)
+	if !pathWithin(d.archiveDir(), p) {
+		writeError(w, http.StatusBadRequest, "归档路径越界")
+		return
+	}
+	if _, err := os.Stat(p); err != nil {
+		writeError(w, http.StatusNotFound, "归档不存在: "+name)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	http.ServeFile(w, r, p)
+}
+
+// handleArchiveUpload 原始字节上传归档（multipart，字段名 file）。
+// POST /api/container/archive/upload → {path}
+func (d *Daemon) handleArchiveUpload(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误（multipart）: "+err.Error())
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "缺少 file 字段: "+err.Error())
+		return
+	}
+	defer file.Close()
+	name, err := safeArchiveName(header.Filename)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := os.MkdirAll(d.archiveDir(), 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建归档目录失败: "+err.Error())
+		return
+	}
+	dst := filepath.Join(d.archiveDir(), name)
+	out, err := os.Create(dst)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建归档文件失败: "+err.Error())
+		return
+	}
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		_ = os.Remove(dst)
+		writeError(w, http.StatusInternalServerError, "写入归档失败: "+err.Error())
+		return
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		writeError(w, http.StatusInternalServerError, "写入归档失败: "+err.Error())
+		return
+	}
+	writeOK(w, map[string]any{"path": dst})
+}
+
+// handleArchiveRestore 解压归档到目标路径（覆盖式恢复，防 zip-slip）。
+// POST /api/container/archive/restore body: {file, destPath}
+func (d *Daemon) handleArchiveRestore(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		File     string `json:"file"`
+		DestPath string `json:"destPath"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.File == "" || body.DestPath == "" {
+		writeError(w, http.StatusBadRequest, "缺少 file/destPath 参数")
+		return
+	}
+	name, err := safeArchiveName(body.File)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	archivePath := filepath.Join(d.archiveDir(), name)
+	if !pathWithin(d.archiveDir(), archivePath) {
+		writeError(w, http.StatusBadRequest, "归档路径越界")
+		return
+	}
+	if !filepath.IsAbs(body.DestPath) {
+		writeError(w, http.StatusBadRequest, "destPath 必须为绝对路径")
+		return
+	}
+	if err := unzipTo(archivePath, body.DestPath); err != nil {
+		if errors.Is(err, errArchiveTraversal) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "恢复失败: "+err.Error())
+		return
+	}
+	writeOK(w, true)
+}
+
+// zipPathTo 将 path（文件或目录）压缩为 zip 归档 dst（先写临时文件再原子改名）。
+// 目录归档时条目为相对路径（不含被压缩目录本身），恢复时解压到目标目录内。
+func zipPathTo(src, dst string) error {
+	tmp := dst + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	zw := zip.NewWriter(f)
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		// 单文件：条目名为文件名
+		if err := addZipFile(zw, src, filepath.Base(src)); err != nil {
+			return err
+		}
+	} else {
+		root := filepath.Clean(src)
+		err := filepath.WalkDir(src, func(path string, de os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if path == root {
+				return nil // 不含被压缩目录本身
+			}
+			if de.Type()&os.ModeSymlink != 0 {
+				return nil // 跳过符号链接（与发行版大小统计一致）
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if de.IsDir() {
+				return addZipDir(zw, rel)
+			}
+			return addZipFile(zw, path, rel)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+// addZipDir 向 zip 写入空目录条目（以 / 结尾）。
+func addZipDir(zw *zip.Writer, name string) error {
+	h := &zip.FileHeader{Name: name + "/", Method: zip.Store}
+	h.SetMode(0o755 | os.ModeDir)
+	_, err := zw.CreateHeader(h)
+	return err
+}
+
+// addZipFile 向 zip 写入单个文件条目（defalte 压缩）。
+func addZipFile(zw *zip.Writer, path, name string) error {
+	h := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	if fi, err := os.Stat(path); err == nil {
+		h.SetMode(fi.Mode().Perm())
+		h.Modified = fi.ModTime()
+	}
+	fw, err := zw.CreateHeader(h)
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	_, err = io.Copy(fw, src)
+	return err
+}
+
+// unzipTo 解压 zip 归档到 destPath（覆盖式恢复）。
+// 每个条目的目标路径都校验在 destPath 内（防 zip-slip 路径穿越）。
+func unzipTo(archivePath, destPath string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	dest := filepath.Clean(destPath)
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	for _, f := range zr.File {
+		// 条目名以 / 或 \ 开头视为绝对路径（跨平台一致，FreeBSD 上本来就是绝对路径）
+		if strings.HasPrefix(f.Name, "/") || strings.HasPrefix(f.Name, `\`) {
+			return fmt.Errorf("%w: %s", errArchiveTraversal, f.Name)
+		}
+		name := filepath.Clean(filepath.FromSlash(f.Name))
+		if name == "." || name == "" {
+			continue
+		}
+		// 防穿越：绝对路径或含 .. 直接拒绝
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%w: %s", errArchiveTraversal, f.Name)
+		}
+		out := filepath.Join(dest, name)
+		if !pathWithin(dest, out) {
+			return fmt.Errorf("%w: %s", errArchiveTraversal, f.Name)
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(out, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		w, err := os.Create(out)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, copyErr := io.Copy(w, rc)
+		rc.Close()
+		closeErr := w.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }

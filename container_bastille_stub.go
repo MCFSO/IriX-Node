@@ -10,7 +10,7 @@ func bastilleBootstrap(release string) (string, error) { return "", errContainer
 
 func bastilleJails() ([]map[string]any, error) { return nil, errContainerUnsupported }
 
-func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
+func bastilleCreate(name, release, ip, jtype, vnetMode, iface string, macFlag bool, macAddr string,
 	volumes []bastilleVolume, workdir string, memoryLimitMb, cpus, diskLimitMb int) (map[string]any, error) {
 	return nil, errContainerUnsupported
 }
@@ -21,13 +21,27 @@ func bastilleLogs(name string, tail int) (string, error) { return "", errContain
 
 func bastilleCmd(name, command string) (string, error) { return "", errContainerUnsupported }
 
-func bastilleConfig(name string) (string, error) { return "", errContainerUnsupported }
+func bastillePkg(name, action string, packages []string) (string, error) {
+	return "", errContainerUnsupported
+}
 
-func bastilleMounts(name string) ([]string, error) { return nil, errContainerUnsupported }
+func bastilleConfigGet(name string) (map[string]string, error) {
+	return nil, errContainerUnsupported
+}
 
-func bastilleMount(name, source, dest string) error { return errContainerUnsupported }
+func bastilleConfigSet(name, key, value string) error { return errContainerUnsupported }
 
-func bastilleUmount(name, dest string) error { return errContainerUnsupported }
+func bastilleConfigUnset(name, key string) error { return errContainerUnsupported }
+
+func bastilleMountList(name string) ([]map[string]any, error) {
+	return nil, errContainerUnsupported
+}
+
+func bastilleMountAdd(name, src, dst, fstype, options string) error {
+	return errContainerUnsupported
+}
+
+func bastilleMountRemove(name, dst string) error { return errContainerUnsupported }
 
 func bastilleApplyLimits(name string, memoryLimitMb, cpus, diskLimitMb int) error {
 	return errContainerUnsupported
@@ -62,3 +76,17 @@ func bastilleTemplates() ([]map[string]any, error) { return nil, errContainerUns
 func bastilleApply(jail, template string, args map[string]string) (string, error) {
 	return "", errContainerUnsupported
 }
+
+func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
+	return "", errContainerUnsupported
+}
+
+func bastilleRunStatus(name, session string, tail int, since int64) (map[string]any, error) {
+	return nil, errContainerUnsupported
+}
+
+func bastilleRunStdin(name, session, input string) error { return errContainerUnsupported }
+
+func bastilleRunStop(name, session string) error { return errContainerUnsupported }
+
+func bastilleRunDelete(name, session string) error { return errContainerUnsupported }

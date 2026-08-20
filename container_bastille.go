@@ -9,13 +9,16 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -218,10 +221,12 @@ func bastilleRunningSet() map[string]bool {
 // bastilleCreate 创建 jail（docs/container-support.md §3.3 契约）。
 // type 映射：thin=默认(无标志) / thick(-T) / clone(-C) / empty(-E, 仅 NAME) / linux(-L)。
 // vnetMode：none=共享宿主网络(默认) / vnet(-V INTERFACE，物理网卡) / bridge(-B INTERFACE，桥接网卡)。
+// macFlag/macAddr：静态 MAC（bastille create -M，仅 VNET）；macAddr 非空时创建后
+// 改写 jail.conf 的 vnet.interface 为 { name "..."; mac "..."; }。
 // 校验：linux 与任何 VNET 模式互斥；VNET 时 IP 必须含子网掩码、interface 必须非空。
 // 创建成功后依次应用：volumes（bastille mount 写 fstab, nullfs）、workdir（exec.start
 // 前置 cd）、limits（bastille limits / ZFS 配额）；配置步骤失败记入 warnings 不影响创建结果。
-func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
+func bastilleCreate(name, release, ip, jtype, vnetMode, iface string, macFlag bool, macAddr string,
 	volumes []bastilleVolume, workdir string, memoryLimitMb, cpus, diskLimitMb int) (map[string]any, error) {
 	if jtype == "" {
 		jtype = "thin"
@@ -256,6 +261,9 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 			return nil, fmt.Errorf("VNET 模式 IP 必须含子网掩码（如 10.0.0.2/24）")
 		}
 	}
+	if macFlag && vnetMode == "none" {
+		return nil, fmt.Errorf("mac 仅适用于 VNET 模式（bastille create -M/--static-mac）")
+	}
 
 	args := []string{"create"}
 	switch jtype {
@@ -267,6 +275,9 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 		args = append(args, "-E")
 	case "linux":
 		args = append(args, "-L")
+	}
+	if macFlag {
+		args = append(args, "-M")
 	}
 	// 创建前诊断：给出可读的中文原因，而不是透出 bastille 的原始 stderr
 	if os.Geteuid() != 0 {
@@ -306,6 +317,11 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 
 	// 创建后配置：失败仅告警，不视为创建失败
 	var warnings []string
+	if macAddr != "" {
+		if err := bastilleSetMac(name, macAddr); err != nil {
+			warnings = append(warnings, fmt.Sprintf("设置静态 MAC 失败: %v", err))
+		}
+	}
 	for _, v := range volumes {
 		if v.Source == "" || v.Dest == "" {
 			continue
@@ -325,6 +341,40 @@ func bastilleCreate(name, release, ip, jtype, vnetMode, iface string,
 		}
 	}
 	return map[string]any{"name": name, "warnings": warnings}, nil
+}
+
+// bastilleSetMac 把 jail.conf 的 vnet.interface 改写为带静态 MAC 的形式：
+//
+//	vnet.interface = { name "<iface>"; mac "<mac>"; };
+func bastilleSetMac(name, mac string) error {
+	confPath := filepath.Join(bastilleRoot, "jails", name, "jail.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	idx := strings.Index(content, "vnet.interface")
+	if idx < 0 {
+		return fmt.Errorf("jail.conf 中未找到 vnet.interface 条目")
+	}
+	// 提取行内第一个双引号中的接口名
+	rest := content[idx:]
+	q := strings.IndexByte(rest, '"')
+	if q < 0 {
+		return fmt.Errorf("jail.conf 的 vnet.interface 行格式无法解析（无引号接口名）")
+	}
+	end := strings.IndexByte(rest[q+1:], '"')
+	if end < 0 {
+		return fmt.Errorf("jail.conf 的 vnet.interface 行格式无法解析（引号未闭合）")
+	}
+	iface := rest[q+1 : q+1+end]
+	semi := strings.IndexByte(rest, ';')
+	if semi < 0 {
+		return fmt.Errorf("jail.conf 的 vnet.interface 行格式无法解析（无行尾分号）")
+	}
+	replacement := fmt.Sprintf(`vnet.interface = { name "%s"; mac "%s"; };`, iface, mac)
+	content = content[:idx] + replacement + content[idx+semi+1:]
+	return os.WriteFile(confPath, []byte(content), 0o644)
 }
 
 // bastilleAction jail 操作（start/stop/restart/destroy）。
@@ -360,29 +410,78 @@ func bastilleCmd(name, command string) (string, error) {
 	return cliRun(cliTimeout, bastilleBin, "cmd", name, "sh", "-c", command)
 }
 
-// bastilleConfig 返回 jail.conf 内容。
-func bastilleConfig(name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(bastilleRoot, "jails", name, "jail.conf"))
-	if err != nil {
-		return "", fmt.Errorf("读取 jail.conf 失败: %w", err)
-	}
-	return string(data), nil
+// bastillePkg jail 内软件包管理（docs/irix-node-container-api.md §4.9）。
+// 语法：bastille pkg <name> <action> [-y] [pkgs...]；统一附加 -y 避免交互阻塞。
+// 返回命令输出文本（pkg 安装耗时较长，客户端超时已放大到 10 分钟）。
+func bastillePkg(name, action string, packages []string) (string, error) {
+	args := []string{"pkg", name, action, "-y"}
+	args = append(args, packages...)
+	return cliRun(cliLongTimeout, bastilleBin, args...)
 }
 
-// bastilleMounts 返回 fstab 挂载列表（每行一个挂载）。
-func bastilleMounts(name string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(bastilleRoot, "jails", name, "fstab"))
+// configKeyPattern 配置键格式（仅允许字母数字与 ._-，防 CLI 参数注入）。
+var configKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// bastilleConfigGet 解析 jail.conf 为扁平键值对象（docs/irix-node-container-api.md §4.12）。
+// 仅解析 "key = value;" 形式的参数行；注释 / 块结构 / 无法解析的行跳过。
+func bastilleConfigGet(name string) (map[string]string, error) {
+	data, err := os.ReadFile(filepath.Join(bastilleRoot, "jails", name, "jail.conf"))
 	if err != nil {
-		return nil, fmt.Errorf("读取 fstab 失败: %w", err)
+		return nil, fmt.Errorf("读取 jail.conf 失败: %w", err)
 	}
-	mounts := make([]string, 0, 4)
+	out := map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			mounts = append(mounts, line)
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "{") || strings.HasPrefix(t, "}") {
+			continue
 		}
+		idx := strings.IndexByte(t, '=')
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(t[:idx])
+		if key == "" {
+			continue
+		}
+		val := strings.TrimSpace(t[idx+1:])
+		val = strings.TrimSuffix(val, ";")
+		val = strings.TrimSpace(val)
+		// 剥离成对的外层引号（单引号或双引号）
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1]
+		}
+		out[key] = val
 	}
-	return mounts, nil
+	return out, nil
+}
+
+// bastilleConfigSet 设置配置项：bastille config <name> <key> <value>。
+func bastilleConfigSet(name, key, value string) error {
+	if !configKeyPattern.MatchString(key) {
+		return fmt.Errorf("配置键格式无效（仅允许字母/数字/._-）: %s", key)
+	}
+	_, err := cliRun(cliTimeout, bastilleBin, "config", name, key, value)
+	return err
+}
+
+// bastilleConfigUnset 从 jail.conf 移除配置项（直接改写文件，幂等）。
+// 形如 "key = ...;" 的参数行整行删除；不存在的 key 返回 nil。
+func bastilleConfigUnset(name, key string) error {
+	confPath := filepath.Join(bastilleRoot, "jails", name, "jail.conf")
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return fmt.Errorf("读取 jail.conf 失败: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	var kept []string
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, key) && strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(t, key)), "=") {
+			continue // 命中 "key = ..." 整行删除
+		}
+		kept = append(kept, line)
+	}
+	return os.WriteFile(confPath, []byte(strings.Join(kept, "\n")), 0o644)
 }
 
 // bastilleMount 挂载宿主机目录到 jail（nullfs；写入 fstab，运行中则即时挂载）。
@@ -398,6 +497,235 @@ func bastilleMount(name, source, dest string) error {
 func bastilleUmount(name, dest string) error {
 	_, err := cliRun(cliTimeout, bastilleBin, "umount", name, dest)
 	return err
+}
+
+// --- 挂载管理（docs/irix-node-container-api.md §4.10） ---
+
+// mountBin mount 命令绝对路径（FreeBSD 服务方式启动时 PATH 常缺 sbin）。
+const mountBin = "/sbin/mount"
+
+// bastilleFstabPath 返回 jail 的 fstab 路径。
+func bastilleFstabPath(name string) string {
+	return filepath.Join(bastilleRoot, "jails", name, "fstab")
+}
+
+// bastilleJailRoot 返回 jail 根目录的宿主路径（thin jail 为指向 releases 的符号链接）。
+func bastilleJailRoot(name string) string {
+	return filepath.Join(bastilleRoot, "jails", name, "root")
+}
+
+// fstabEntry 单条 fstab 挂载（device mountpoint fstype options dump pass）。
+type fstabEntry struct {
+	Device  string
+	Mount   string
+	Fstype  string
+	Options string
+}
+
+// readFstab 解析 jail 的 fstab 文件为条目列表（跳过注释与空行）。
+func readFstab(name string) ([]fstabEntry, error) {
+	data, err := os.ReadFile(bastilleFstabPath(name))
+	if err != nil {
+		return nil, err
+	}
+	var out []fstabEntry
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		opts := ""
+		if len(fields) >= 4 {
+			opts = strings.Trim(fields[3], `"'`)
+		}
+		out = append(out, fstabEntry{Device: fields[0], Mount: fields[1], Fstype: fields[2], Options: opts})
+	}
+	return out, nil
+}
+
+// writeFstab 整文件写回 fstab（保留原有注释与空行结构）。
+func writeFstab(name string, lines []string) error {
+	return os.WriteFile(bastilleFstabPath(name), []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// bastilleMountList 挂载列表（fstab 条目 + 当前实际挂载，permanent 区分来源）。
+// 条目: {src?, dst, fstype, options?, permanent}；procfs/devfs 的 src 为 null。
+func bastilleMountList(name string) ([]map[string]any, error) {
+	entries, err := readFstab(name)
+	if err != nil {
+		return nil, fmt.Errorf("读取 fstab 失败: %w", err)
+	}
+	items := make([]map[string]any, 0, len(entries)+2)
+	seen := map[string]bool{} // "fstype|dst" 去重
+	for _, e := range entries {
+		key := e.Fstype + "|" + e.Mount
+		seen[key] = true
+		item := map[string]any{
+			"dst":       e.Mount,
+			"fstype":    e.Fstype,
+			"options":   e.Options,
+			"permanent": true,
+		}
+		if e.Device != "proc" && e.Device != "devfs" {
+			item["src"] = e.Device
+		}
+		items = append(items, item)
+	}
+	// 合并当前实际挂载（未写入 fstab 的即时挂载，permanent=false）
+	jailRoot := bastilleJailRoot(name)
+	out, err := cliRun(cliTimeout, mountBin)
+	if err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			dev, mnt, fstype, opts, ok := parseMountLine(line)
+			if !ok || !strings.HasPrefix(mnt, jailRoot) {
+				continue
+			}
+			dst := strings.TrimPrefix(mnt, jailRoot)
+			if dst == "" || !strings.HasPrefix(dst, "/") {
+				continue
+			}
+			key := fstype + "|" + dst
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			item := map[string]any{
+				"dst":       dst,
+				"fstype":    fstype,
+				"options":   opts,
+				"permanent": false,
+			}
+			if dev != "proc" && dev != "devfs" {
+				item["src"] = dev
+			}
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+// parseMountLine 解析 mount 输出行 "device on mountpoint (fstype, options...)"。
+func parseMountLine(line string) (dev, mnt, fstype, opts string, ok bool) {
+	idx := strings.Index(line, " on ")
+	if idx < 0 {
+		return "", "", "", "", false
+	}
+	dev = strings.TrimSpace(line[:idx])
+	rest := line[idx+4:]
+	pi := strings.Index(rest, " (")
+	if pi < 0 {
+		return "", "", "", "", false
+	}
+	mnt = strings.TrimSpace(rest[:pi])
+	inner := strings.TrimSuffix(rest[pi+2:], ")")
+	parts := strings.SplitN(inner, ",", 2)
+	if len(parts) == 0 {
+		return "", "", "", "", false
+	}
+	fstype = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		opts = strings.TrimSpace(parts[1])
+	}
+	return dev, mnt, fstype, opts, true
+}
+
+// bastilleMountAdd 添加挂载（docs/irix-node-container-api.md §4.10）：
+//   - nullfs（默认）：bastille mount <name> <src> <dst>（写 fstab + 即时挂载）
+//   - procfs/devfs：追加 fstab 条目并立即挂载到宿主 <jailroot>/<dst>；
+//     挂载失败时回滚 fstab 条目。
+func bastilleMountAdd(name, src, dst, fstype, options string) error {
+	if fstype == "" {
+		fstype = "nullfs"
+	}
+	if options == "" {
+		options = "rw"
+	}
+	if !strings.HasPrefix(dst, "/") {
+		return fmt.Errorf("dst 必须为 jail 内绝对路径（以 / 开头）: %s", dst)
+	}
+	switch fstype {
+	case "nullfs":
+		if src == "" {
+			return fmt.Errorf("nullfs 挂载必须提供 src 参数（宿主机源路径）")
+		}
+		_, err := cliRun(cliTimeout, bastilleBin, "mount", name, src, dst, "nullfs", options, "0", "0")
+		return err
+	case "procfs", "devfs":
+		// 防重复：fstab 中已有同 fstype+dst 条目则报错
+		data, err := os.ReadFile(bastilleFstabPath(name))
+		if err != nil {
+			return fmt.Errorf("读取 fstab 失败: %w", err)
+		}
+		lines := strings.Split(string(data), "\n")
+		for _, ln := range lines {
+			fields := strings.Fields(strings.TrimSpace(ln))
+			if len(fields) >= 3 && fields[2] == fstype && fields[1] == dst {
+				return fmt.Errorf("挂载点已存在（fstab 已有 %s %s），请先删除", fstype, dst)
+			}
+		}
+		// 追加 fstab 条目（device 用 fstype 名，与 FreeBSD 惯例一致）
+		line := fmt.Sprintf("%s %s %s %s 0 0", fstype, dst, fstype, options)
+		lines = append(lines, line)
+		if err := writeFstab(name, lines); err != nil {
+			return fmt.Errorf("写入 fstab 失败: %w", err)
+		}
+		// 立即挂载：宿主路径为 jailroot + dst（thin jail 为符号链接，可穿透）
+		hostPath := filepath.Join(bastilleJailRoot(name), strings.TrimPrefix(dst, "/"))
+		if err := os.MkdirAll(hostPath, 0o755); err != nil {
+			_ = bastilleFstabRemove(name, dst, fstype)
+			return fmt.Errorf("创建挂载点目录失败: %w", err)
+		}
+		if _, err := cliRun(cliTimeout, mountBin, "-t", fstype, fstype, hostPath); err != nil {
+			_ = bastilleFstabRemove(name, dst, fstype)
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("fstype 仅支持 nullfs/procfs/devfs（收到 %s）", fstype)
+	}
+}
+
+// mustReadFstab 读取 fstab 原文（bastilleMountAdd 内部使用，失败返回空串）。
+func mustReadFstab(name string) []byte {
+	data, err := os.ReadFile(bastilleFstabPath(name))
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// bastilleFstabRemove 从 fstab 移除匹配 mount 的条目（可选限定 fstype）；返回是否移除。
+func bastilleFstabRemove(name, mount, fstype string) bool {
+	lines := strings.Split(string(mustReadFstab(name)), "\n")
+	var kept []string
+	removed := false
+	for _, line := range lines {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 3 && fields[1] == mount && (fstype == "" || fields[2] == fstype) {
+			removed = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if removed {
+		_ = writeFstab(name, kept)
+	}
+	return removed
+}
+
+// bastilleMountRemove 卸载并移除 fstab 条目（docs/irix-node-container-api.md §4.10）。
+// fstab 中找不到条目时仅卸载，不报错。
+func bastilleMountRemove(name, dst string) error {
+	removed := bastilleFstabRemove(name, dst, "")
+	err := bastilleUmount(name, dst)
+	if err != nil && !removed {
+		return err
+	}
+	return nil
 }
 
 // bastilleSetWorkdir 强制 jail 的工作目录：把 exec.start 改写为
@@ -781,4 +1109,421 @@ func commandWithEnv(env map[string]string, name string, args ...string) *exec.Cm
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	return cmd
+}
+
+// --- 运行会话（docs/irix-node-container-api.md §4.11） ---
+//
+// 在 jail 内后台运行长任务（MC 服务端等）：进程经 `bastille cmd <name> sh -c ...`
+// 启动（jexec 语义），stdout/stderr 写入内存环形缓冲（字节偏移游标，支持 since
+// 增量读取）并镜像落盘 <bastilleRoot>/run/<name>/<session>.log（重启后客户端
+// 仍可按会话 id 读到历史日志）。进程退出后会话保留 sessionRetain 时长供客户端
+// 读取最终状态，之后随下次操作惰性清理。watch=true 时进程退出自动停止 jail。
+
+const (
+	// sessionLogMaxBytes 会话内存环形缓冲上限。
+	sessionLogMaxBytes = 1 << 20
+	// sessionDiskMaxBytes 会话磁盘日志上限（超出后保留尾部 sessionDiskTrimBytes）。
+	sessionDiskMaxBytes = 20 << 20
+	// sessionDiskTrimBytes 磁盘日志超限时保留的尾部字节数。
+	sessionDiskTrimBytes = 5 << 20
+	// sessionRetain 会话结束后保留时长（供客户端读取最终状态）。
+	sessionRetain = 30 * time.Minute
+	// maxBastilleSessions 同时运行中的会话上限。
+	maxBastilleSessions = 32
+	// sessionStopTimeout 停止会话时 SIGTERM 后的等待时长，超时 SIGKILL。
+	sessionStopTimeout = 10 * time.Second
+)
+
+// sessionLog 会话日志环形缓冲（字节偏移语义：offset 单调递增，since 增量读取）。
+type sessionLog struct {
+	mu      sync.Mutex
+	buf     []byte // 线性缓冲，写满后从头部丢弃
+	max     int
+	dropped int64 // 已丢弃字节数（offset 基数）
+}
+
+func newSessionLog() *sessionLog {
+	return &sessionLog{max: sessionLogMaxBytes}
+}
+
+// write 追加内容，超出容量时丢弃最旧字节。
+func (l *sessionLog) write(p []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(p) >= l.max {
+		l.buf = append(l.buf[:0], p[len(p)-l.max:]...)
+		l.dropped += int64(len(p) - l.max)
+		return
+	}
+	if len(l.buf)+len(p) > l.max {
+		drop := len(l.buf) + len(p) - l.max
+		l.buf = l.buf[drop:]
+		l.dropped += int64(drop)
+	}
+	l.buf = append(l.buf, p...)
+}
+
+// snapshot 返回自 since 偏移之后的新增内容与当前末尾偏移。
+// since <= 0 时返回最后 tail 行（tail <= 0 表示全量）；since 早于缓冲起点
+// （数据已被丢弃）时返回缓冲内全部内容（客户端可能看到少量重复，可接受）。
+func (l *sessionLog) snapshot(since int64, tail int) (string, int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	total := l.dropped + int64(len(l.buf))
+	if since <= 0 {
+		s := string(l.buf)
+		if tail > 0 {
+			s = lastNLines(s, tail)
+		}
+		return s, total
+	}
+	if since < l.dropped {
+		return string(l.buf), total
+	}
+	start := int(since - l.dropped)
+	if start > len(l.buf) {
+		start = len(l.buf)
+	}
+	return string(l.buf[start:]), total
+}
+
+// lastNLines 取字符串最后 N 行（按 \n 拆分，保留行内容不含换行符）。
+func lastNLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// sessionSink 会话输出汇：内存环形缓冲 + 磁盘日志镜像（同锁保证字节顺序一致）。
+type sessionSink struct {
+	mu   sync.Mutex
+	ring *sessionLog
+	file *os.File
+	size int64
+}
+
+// Write 实现 io.Writer：写入环形缓冲并镜像落盘（磁盘超限时截断保留尾部）。
+func (s *sessionSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ring.write(p)
+	if s.file != nil {
+		if s.size+int64(len(p)) > sessionDiskMaxBytes {
+			s.trimLocked()
+		}
+		n, err := s.file.Write(p)
+		s.size += int64(n)
+		return n, err
+	}
+	return len(p), nil
+}
+
+// trimLocked 磁盘日志超限：读取尾部 sessionDiskTrimBytes 并重建文件。
+func (s *sessionSink) trimLocked() {
+	if s.file == nil {
+		return
+	}
+	fi, err := s.file.Stat()
+	if err != nil || fi.Size() <= sessionDiskTrimBytes {
+		return
+	}
+	tail := make([]byte, sessionDiskTrimBytes)
+	if _, err := s.file.Seek(-sessionDiskTrimBytes, io.SeekEnd); err != nil {
+		return
+	}
+	if _, err := io.ReadFull(s.file, tail); err != nil {
+		return
+	}
+	if err := s.file.Truncate(0); err != nil {
+		return
+	}
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	_, _ = s.file.Write(tail)
+	s.size = int64(len(tail))
+}
+
+// Close 关闭磁盘日志句柄（删除会话时调用）。
+func (s *sessionSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file != nil {
+		err := s.file.Close()
+		s.file = nil
+		return err
+	}
+	return nil
+}
+
+// bastilleSession 单个运行会话。
+type bastilleSession struct {
+	mu       sync.Mutex
+	id       string
+	jail     string
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	sink     *sessionSink
+	watch    bool
+	running  bool
+	exitCode int
+	done     chan struct{}
+	endedAt  time.Time
+	logPath  string
+}
+
+// isRunning 会话进程是否仍在运行。
+func (s *bastilleSession) isRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
+// sessionStore 会话注册表（全局唯一 id：s-<递增计数>）。
+type sessionStore struct {
+	mu       sync.Mutex
+	sessions map[string]*bastilleSession
+	counter  int
+}
+
+// bastilleSessions 全局长任务会话注册表。
+var bastilleSessions = &sessionStore{sessions: map[string]*bastilleSession{}}
+
+// create 分配会话 id 并清理过期会话；运行中会话数达上限返回空串。
+func (s *sessionStore) create() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked()
+	running := 0
+	for _, sess := range s.sessions {
+		if sess.isRunning() {
+			running++
+		}
+	}
+	if running >= maxBastilleSessions {
+		return ""
+	}
+	s.counter++
+	return fmt.Sprintf("s-%d", s.counter)
+}
+
+// register 登记会话。
+func (s *sessionStore) register(sess *bastilleSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[sess.id] = sess
+}
+
+// get 按 id 获取会话（不存在返回 nil）。
+func (s *sessionStore) get(id string) *bastilleSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessions[id]
+}
+
+// remove 移除会话并关闭其磁盘日志句柄。
+func (s *sessionStore) remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess, ok := s.sessions[id]; ok {
+		delete(s.sessions, id)
+		_ = sess.sink.Close()
+	}
+}
+
+// sweepLocked 清理已结束且超过保留时长的会话（调用方须持有 mu）。
+func (s *sessionStore) sweepLocked() {
+	cutoff := time.Now().Add(-sessionRetain)
+	for id, sess := range s.sessions {
+		sess.mu.Lock()
+		expired := !sess.running && !sess.endedAt.IsZero() && sess.endedAt.Before(cutoff)
+		sess.mu.Unlock()
+		if expired {
+			delete(s.sessions, id)
+			_ = sess.sink.Close()
+		}
+	}
+}
+
+// bastilleRunStart 在 jail 内后台启动运行会话。
+// command 以 shell 语义执行（sh -c 包装）；cwd 非空时前置 cd；
+// watch=true 时进程退出自动执行 bastille stop <name>。
+// 返回会话 id；失败返回错误（含中文原因）。
+func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
+	if command == "" {
+		return "", errors.New("缺少 command 参数")
+	}
+	if !bastilleJailNames()[name] {
+		return "", fmt.Errorf("jail %s 不存在", name)
+	}
+	if !bastilleRunningSet()[name] {
+		return "", fmt.Errorf("jail %s 未运行，无法启动会话（请先调用 start）", name)
+	}
+	id := bastilleSessions.create()
+	if id == "" {
+		return "", fmt.Errorf("运行中会话已达上限（%d），请先清理已结束的会话", maxBastilleSessions)
+	}
+	fullCmd := command
+	if cwd != "" {
+		fullCmd = fmt.Sprintf("cd %s && %s", cwd, command)
+	}
+	cmd := exec.Command(bastilleBin, "cmd", name, "sh", "-c", fullCmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", fmt.Errorf("创建 stdin 管道失败: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("创建 stdout 管道失败: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("创建 stderr 管道失败: %w", err)
+	}
+	// 磁盘日志：<bastilleRoot>/run/<jail>/<session>.log（重启恢复用）
+	logDir := filepath.Join(bastilleRoot, "run", name)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return "", fmt.Errorf("创建会话日志目录失败: %w", err)
+	}
+	logPath := filepath.Join(logDir, id+".log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", fmt.Errorf("创建会话日志失败: %w", err)
+	}
+	sink := &sessionSink{ring: newSessionLog(), file: logFile}
+	sess := &bastilleSession{
+		id: id, jail: name, cmd: cmd, stdin: stdin, sink: sink, watch: watch,
+		running: true, exitCode: -1, done: make(chan struct{}), logPath: logPath,
+	}
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		_ = os.Remove(logPath)
+		return "", fmt.Errorf("启动会话进程失败: %w", err)
+	}
+	bastilleSessions.register(sess)
+	// 输出复制：stdout/stderr 都写入同一 sink（内部加锁，互不丢失）
+	copyStream := func(rd io.Reader) {
+		_, _ = io.Copy(sink, rd)
+	}
+	go copyStream(stdout)
+	go copyStream(stderr)
+	// 结束收尾：记录退出码；watch 看门狗停止 jail
+	go func() {
+		waitErr := cmd.Wait()
+		sess.mu.Lock()
+		sess.running = false
+		if waitErr != nil && cmd.ProcessState != nil {
+			sess.exitCode = cmd.ProcessState.ExitCode()
+		} else {
+			sess.exitCode = 0
+		}
+		sess.endedAt = time.Now()
+		sess.mu.Unlock()
+		close(sess.done)
+		if watch {
+			if err := bastilleAction(name, "stop", false); err != nil {
+				_, _ = sink.Write([]byte(fmt.Sprintf("\n[irix-node] 看门狗：进程退出后停止 jail 失败: %v\n", err)))
+			} else {
+				_, _ = sink.Write([]byte("\n[irix-node] 看门狗：进程已退出，jail 已停止\n"))
+			}
+		}
+	}()
+	return id, nil
+}
+
+// bastilleRunStatus 查询会话状态与增量日志。
+// 返回 {running, exitCode?, offset, log}；会话不在内存（节点重启）时回退读取
+// 磁盘日志（running=false，exitCode 省略）。
+func bastilleRunStatus(name, session string, tail int, since int64) (map[string]any, error) {
+	sess := bastilleSessions.get(session)
+	if sess == nil {
+		// 重启恢复：磁盘日志兜底
+		logPath := filepath.Join(bastilleRoot, "run", name, session+".log")
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return nil, fmt.Errorf("会话 %s 不存在（id 无效或已清理）", session)
+		}
+		log := string(data)
+		if tail > 0 {
+			log = lastNLines(log, tail)
+		}
+		return map[string]any{"running": false, "offset": len(data), "log": log}, nil
+	}
+	if sess.jail != name {
+		return nil, fmt.Errorf("会话 %s 不属于 jail %s", session, name)
+	}
+	sess.mu.Lock()
+	running := sess.running
+	exitCode := sess.exitCode
+	sess.mu.Unlock()
+	log, offset := sess.sink.ring.snapshot(since, tail)
+	data := map[string]any{"running": running, "offset": offset, "log": log}
+	if !running {
+		data["exitCode"] = exitCode
+	}
+	return data, nil
+}
+
+// bastilleRunStdin 向会话进程 stdin 写入输入（客户端自带换行，原样透传）。
+func bastilleRunStdin(name, session, input string) error {
+	sess := bastilleSessions.get(session)
+	if sess == nil {
+		return fmt.Errorf("会话 %s 不存在（id 无效或已清理）", session)
+	}
+	if sess.jail != name {
+		return fmt.Errorf("会话 %s 不属于 jail %s", session, name)
+	}
+	if !sess.isRunning() {
+		return fmt.Errorf("会话 %s 已结束，无法发送命令", session)
+	}
+	if _, err := sess.stdin.Write([]byte(input)); err != nil {
+		return fmt.Errorf("写入 stdin 失败: %w", err)
+	}
+	return nil
+}
+
+// bastilleRunStop 终止会话进程（SIGTERM → sessionStopTimeout 超时 SIGKILL）。
+// 会话已结束时幂等返回 nil。
+func bastilleRunStop(name, session string) error {
+	sess := bastilleSessions.get(session)
+	if sess == nil {
+		return fmt.Errorf("会话 %s 不存在（id 无效或已清理）", session)
+	}
+	if sess.jail != name {
+		return fmt.Errorf("会话 %s 不属于 jail %s", session, name)
+	}
+	if !sess.isRunning() {
+		return nil
+	}
+	if err := sess.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("发送 SIGTERM 失败: %w", err)
+	}
+	select {
+	case <-sess.done:
+		return nil
+	case <-time.After(sessionStopTimeout):
+		if err := sess.cmd.Process.Kill(); err != nil {
+			return fmt.Errorf("SIGTERM 超时后强杀失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// bastilleRunDelete 清理会话：终止进程（运行中则 SIGKILL）+ 删除磁盘日志。
+func bastilleRunDelete(name, session string) error {
+	sess := bastilleSessions.get(session)
+	if sess != nil {
+		if sess.jail != name {
+			return fmt.Errorf("会话 %s 不属于 jail %s", session, name)
+		}
+		if sess.isRunning() {
+			_ = sess.cmd.Process.Kill()
+		}
+		bastilleSessions.remove(session)
+	}
+	logPath := filepath.Join(bastilleRoot, "run", name, session+".log")
+	_ = os.Remove(logPath)
+	return nil
 }

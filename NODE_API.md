@@ -15,11 +15,10 @@
 
 | 项 | 约定 |
 |----|------|
-| 基础地址 | `http://<host>:<port>`（如 `http://127.0.0.1:12346` / `http://192.168.1.5:23333`） |
-| 认证 | `apikey` 查询参数（本地节点可为空）；请求头 `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
+| 基础地址 | `http://<host>:<port>`（如 `http://127.0.0.1:12346` / `http://192.168.1.5:23333`）；远程节点应启用 HTTPS |
+| 认证 | 请求头 `X-Api-Key: <key>`（**首选**，H-6：密钥不进 URL，避免进入代理/访问日志）；`apikey` 查询参数仅为 MCSM 面板兼容保留；请求头 `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
 | 请求体 | `application/json; charset=utf-8` |
 | 响应体 | 统一 `{ "status": 200, "data": <payload>, "time": <unix_ms> }`；`status != 200` 时 `data` 为错误消息字符串 |
-| 错误 | 错误响应 **HTTP 状态码与 `body.status` 一致**（如 400/403/500），供监控 / WAF / 负载均衡识别；成功恒为 200 |
 | 超时 | 应用侧默认 15s；连接失败 / 超时视为节点离线 |
 | 分页 | `page` / `page_size` 查询参数 |
 
@@ -87,13 +86,6 @@
 | `GET` | `/api/protected_instance/command` | `uuid`, `daemonId`, `command` | 向实例 stdin 发命令 |
 | `GET` | `/api/protected_instance/outputlog` | `uuid`, `daemonId`, `size?` | 读取实例输出日志 |
 
-> **cwd 限制**：创建 / 更新实例时 `cwd` 不得为文件系统 / 磁盘根目录
-> （`C:\`、`/` 等）、系统目录（Windows：`\Windows`、`\Program Files`、
-> `\ProgramData` 等；Unix：`/etc`、`/usr`、`/bin`、`/var/log` 等）或
-> **用户 Profile 目录**（Windows `\Users` 整树，含浏览器凭据 / `.ssh` 密钥 /
-> 启动目录等横向渗透高价值目标；仅豁免系统临时目录 `%TEMP%`），
-> 防止认证后把文件 API 作用域扩到整块磁盘或用户数据（安全审计 #4）。
-
 ---
 
 ## 4. 文件管理（实例级，迁移 / 远程文件管理器）
@@ -116,12 +108,8 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/download/{password}/{fileName}` | 凭下载票据直连下载（大文件走 Rust downloader 断点续传）。实例级票据绑定申请时的**单文件**；集群/快照票据为目录范围 |
-| `POST` | `/upload/{password}` | 凭上传票据直连上传（multipart，字段名 `file`） |
-
-> 下载与上传票据严格区分，互相不可复用；票据 10 分钟有效。下载/上传直连
-> URL 中的票据密码在审计日志中打码（`/download/***/...`），防日志可读者
-> 凭密码免密下载。
+| `GET` | `/download/{password}/{fileName}` | 凭票据直连下载（大文件走 Rust downloader 断点续传） |
+| `POST` | `/upload/{password}` | 凭票据直连上传（multipart，字段名 `file`） |
 
 ---
 
@@ -164,21 +152,17 @@ GET /api/container/info
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
 | `GET` | `/api/container/ps` | `all=1` | 容器列表，条目：`{id, name, image, status, state, ports: [..], createdAt, restartPolicy}` |
-| `POST` | `/api/container/create` | body: `{name, image, command?, workdir?, ports: [..], volumes: [..], env: {}, restartPolicy?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建容器（不启动） |
+| `POST` | `/api/container/create` | body: `{name, image, command?, ports: [..], volumes: [..], env: {}, restartPolicy?, memoryLimitMb?, cpus?}` | 创建容器（不启动） |
 | `POST` | `/api/container/{id}/start` `stop` `restart` `kill` | | 容器操作 |
 | `DELETE` | `/api/container/{id}` | `force=1` | 删除容器 |
 | `GET` | `/api/container/{id}/logs` | `tail=N` | 日志尾部 |
 | `POST` | `/api/container/{id}/exec` | body: `{command}` | 容器内执行命令 |
 | `GET` | `/api/container/{id}/stats` | | `{cpuPercent, memoryBytes, memoryLimitBytes, netRxBytes, netTxBytes}` |
-| `POST` | `/api/container/{id}/clone` | body: `{name}` | 克隆容器（commit+create 等效）→ `{id, name, image}` |
-| `POST` | `/api/container/{id}/limits` | body: `{memoryMb?, cpus?}` | 动态调整资源限制（docker update） |
-| `POST` | `/api/container/{id}/export` | | 导出容器文件系统为 tar → `{password, addr, fileName}` |
 | `GET` | `/api/image/list` | | 镜像列表，条目：`{id, tags: [..], sizeBytes, createdAt}` |
 | `POST` | `/api/image/pull` | body: `{name}` | 拉取镜像 |
 | `POST` | `/api/image/build` | body: `{dockerfile, name, tag}` | 构建镜像 → `{jobId}` |
 | `GET` | `/api/image/build-progress` | `jobId` | `{status: building\|done\|failed, log: [..], image: "name:tag"}` |
 | `DELETE` | `/api/image/{name}` | | 删除镜像 |
-| `POST` | `/api/image/import` | body: `{fileName, name}` | 从同步区 tar 导入为镜像 |
 | `GET` | `/api/volume/list` / `DELETE /api/volume/{name}` | | 卷列表 / 删除 |
 | `GET` | `/api/network/list` | | 网络列表，条目：`{name, driver, subnet?}` |
 
@@ -187,25 +171,27 @@ GET /api/container/info
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
 | `GET` | `/api/bastille/releases` | | bootstrap 的发行版列表，条目：`{name, version, sizeBytes?, createdAt?}` |
-| `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}`（后台任务） |
-| `POST` | `/api/bastille/setup` | body: `{mode: default\|firewall\|vnet\|bridge\|shared\|linux, extIf?, tunIf?, addr?}` | 容器软件初始化（网络 / Linux Jail 功能等，服务端统一附加 -y 避免交互阻塞）→ `{ok, detail?}` |
+| `POST` | `/api/bastille/bootstrap` | body: `{release}` | bootstrap 发行版 → `{jobId}` |
 | `GET` | `/api/bastille/jails` | | jail 列表，条目：`{name, release, status, state?, ports: [..], createdAt?}` |
-| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip, type: thin\|thick\|clone\|empty\|linux, vnet: none\|vnet\|bridge, interface?, volumes?: [{source, dest}], workdir?, memoryLimitMb?, cpus?, diskLimitMb?}` | 创建 jail。type：thin=默认 / thick=-T / clone=-C / empty=-E(仅 NAME) / linux=-L；vnet/bridge 需 interface 且 IP 须含子网掩码；linux 与 VNET 互斥。volumes 以 nullfs 挂载；workdir 设置 exec.start 工作目录；limits 为 bastille limits / ZFS 配额 → `{name, warnings}` |
-| `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` | | jail 操作 |
-| `POST` | `/api/bastille/jails/{name}/destroy` | `force=1` | 销毁 jail（`-y` 跳过确认；force=1 附加 `-a` 可摧毁运行中的） |
-| `POST` | `/api/bastille/jails/{name}/clone` | body: `{newName, ip?}` | 克隆 jail（`bastille clone TARGET NEW_NAME [IP]`） |
-| `POST` | `/api/bastille/jails/{name}/export` | | 导出 jail 为 txz 归档到 `bastille/backups/` → `{path}` |
-| `POST` | `/api/bastille/jails/import` | body: `{file, release?, force?}` | 从归档导入 jail（`bastille import [-f] FILE [RELEASE]`；RELEASE 为导入到指定发行版；-f 跳过校验和） |
+| `POST` | `/api/bastille/jails/create` | body: `{name, release, ip?, type: thin\|thick\|clone\|empty\|linux, vnet?, bridge?, mac?}` | 创建 jail |
+| `POST` | `/api/bastille/jails/{name}/start` `stop` `restart` `destroy` | | jail 操作 |
 | `GET` | `/api/bastille/jails/{name}/console` | `tail=N` | 日志尾部 |
-| `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令 |
-| `GET` | `/api/bastille/jails/{name}/config` | | jail.conf 内容 |
-| `GET` | `/api/bastille/jails/{name}/mounts` | | fstab 挂载列表 |
-| `POST` / `DELETE` | `/api/bastille/jails/{name}/mounts` | body: `{source, dest}` / `{dest}` | 挂载（nullfs）/ 卸载 |
-| `POST` | `/api/bastille/jails/{name}/limits` | body: `{memoryMb?, cpus?, diskMb?}` | 硬件资源限制（`bastille limits add memoryuse` / `bastille limits cpu 0..N-1` / ZFS 配额） |
+| `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令（data 为输出文本） |
+| `POST` | `/api/bastille/jails/{name}/pkg` | body: `{action, packages}` | 软件包管理（`bastille pkg`，安装 Java 环境等） |
+| `GET` | `/api/bastille/jails/{name}/mounts` | | 挂载列表（nullfs/procfs，见对接文档 §4.10） |
+| `POST` | `/api/bastille/jails/{name}/mounts` | body: `{src?, dst, fstype, options?}` | 添加挂载（nullfs→`bastille mount`；procfs→fstab+挂载） |
+| `DELETE` | `/api/bastille/jails/{name}/mounts` | `dst=` | 卸载并移除 fstab 条目 |
+| `POST` | `/api/bastille/jails/{name}/run` | body: `{command, cwd?, watch?}` | 后台运行会话（MC 服务端等长任务；`watch` 进程退出即停 jail）→ `{sessionId}` |
+| `GET` | `/api/bastille/jails/{name}/run/{session}` | `tail=N&since=<偏移>` | 会话状态 `{running, exitCode, offset, log}` |
+| `POST` | `/api/bastille/jails/{name}/run/{session}/stdin` | body: `{input}` | 会话 stdin（控制台命令） |
+| `POST` | `/api/bastille/jails/{name}/run/{session}/stop` | | 终止会话进程 |
+| `DELETE` | `/api/bastille/jails/{name}/run/{session}` | | 清理会话 |
+| `GET` | `/api/bastille/jails/{name}/config` | | jail.conf 配置（`bastille config`） |
+| `POST` | `/api/bastille/jails/{name}/config` | body: `{key, value}` | 设置配置项 |
+| `DELETE` | `/api/bastille/jails/{name}/config` | `key=` | 删除配置项 |
 | `GET` | `/api/bastille/templates` | | 模板列表（project/template 格式） |
 | `POST` | `/api/bastille/templates/apply` | body: `{jail, template, args: {KEY=VALUE}}` | 应用模板 |
-| `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发（`bastille rdr JAIL tcp\|udp HP JP`）；删除 = list → clear → 重放其余规则 |
-| `GET` | `/api/bastille/rdr` | `jail?` | 转发规则列表（可按 jail 过滤）→ `[{proto, hostPort, jailPort}]` |
+| `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发 / 删除转发 |
 
 **回退**：MCSM 面板无 `/api/container/info`，客户端自动回退到 §6 受限模式
 （镜像构建 + 容器/网络只读列表），UI 标注「MCSM 受限模式」。
@@ -230,11 +216,9 @@ GET /api/container/info
 
 | 能力 | irix-node | MCSM | 说明 |
 |------|-----------|------|------|
-| 本文档 §2–§4 全部端点 | ✅ | ✅ | 现有实现，双方均已支持（含 §2 磁盘/网络/version 字段、§4 上传票据 `upload_dir`） |
+| 本文档 §2–§4 全部端点 | ✅ | ✅ | 现有实现，双方均已支持 |
 | §5 用户管理 / §6 Docker | ❌ | ✅ | 仅 MCSM 面板提供 |
-| §6.1 容器环境（Docker / Bastille 全功能） | ✅ | ❌ | irix-node 已实现（CLI 包装：Linux 为 Docker、FreeBSD 为 Bastille），客户端全功能模式即生效 |
-| 节点级文件存储 / 递归快照 / 集群自组织 | ✅ 基础版 | ❌ | `docs/cluster-node-api.md` P0–P2 已实现基础版（P2 为内存态协调，未持久化） |
+| 节点级文件存储 / 递归快照 / 集群自组织 | 规划中 | ❌ | 见 `docs/cluster-node-api.md`（P0–P2） |
 
 > 结论：MCSM 节点是多机模式中的「阉割」节点 —— 可托管实例、可作为迁移目标（先建实例再上传），
-> 但无法参与节点间直传与自组织；`irix-node` 已补齐 `docs/cluster-node-api.md` 的 P0–P2（基础版），
-> 可实现节点间直传与基础自组织（心跳/事件/任务均为内存态，重启后需重新登记）。
+> 但无法参与节点间直传与自组织；`irix-node` 补齐 `docs/cluster-node-api.md` 的 P0–P2 后可实现真正的节点间直传 + 自组织。
