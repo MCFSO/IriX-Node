@@ -193,6 +193,9 @@ type Daemon struct {
 	LogMaxBytes int64       // 单实例日志文件轮转上限（字节）
 	AuditLog    *fileLogger // 审计日志落盘器（nil = 未启用 -audit-log=false）
 
+	jobs  *jobStore  // 容器长任务注册表（container.go）
+	tasks *taskStore // 通用异步任务表（JDK 安装 / 核心下载 / 备份恢复等）
+
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex
 	clusterMonitor   string                  // 监控节点 id（空 = 尚无监控者）
@@ -230,6 +233,7 @@ func NewDaemon(dataDir, apiKey string) *Daemon {
 		clusterPeers:  []map[string]any{},
 		clusterEvents: []map[string]any{},
 		transfers:     map[string]*transferJob{},
+		tasks:         newTaskStore(),
 	}
 }
 
