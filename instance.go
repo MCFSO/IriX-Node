@@ -86,6 +86,10 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/protected_instance/command", d.auth(d.handleInstanceCommand))
 	mux.HandleFunc("GET /api/protected_instance/outputlog", d.auth(d.handleInstanceOutputLog))
 
+	// 实例日志（docs/irix-node-local-parity.md §4.1.2）
+	mux.HandleFunc("GET /api/instance/logs", d.auth(d.handleInstanceLogs))
+	mux.HandleFunc("DELETE /api/instance/logs", d.auth(d.handleInstanceLogsClear))
+
 	// 文件管理
 	mux.HandleFunc("GET /api/files/list", d.auth(d.handleFileList))
 	mux.HandleFunc("PUT /api/files/", d.auth(d.handleFileReadWrite))

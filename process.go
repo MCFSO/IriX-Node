@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -160,7 +161,10 @@ type Process struct {
 	cmd      *exec.Cmd
 	Log      *LogBuffer
 	Stdin    *stdinPipe
-	log      *fileLogger // 异步落盘（可能为 nil）
+	log      *fileLogger   // 异步落盘（可能为 nil）
+	lines    *logLines     // 带时间戳的行缓冲（断线补发）
+	splitOut *lineSplitter // stdout 行拆分器
+	splitErr *lineSplitter // stderr 行拆分器
 	started  time.Time
 	exitCode int
 	done     chan struct{}
@@ -168,9 +172,131 @@ type Process struct {
 
 // logConfig 实例日志落盘配置；Dir 为空时表示不落盘。
 type logConfig struct {
-	dir     string // 日志目录（如 {data}/logs）
-	name    string // 日志文件名（如 {uuid}.log，用 uuid 避免不同实例 cwd 同名冲突）
-	maxSize int64  // 单文件轮转上限（字节），<=0 取默认
+	dir      string        // 日志目录（如 {data}/logs）
+	name     string        // 日志文件名（如 {uuid}.log，用 uuid 避免不同实例 cwd 同名冲突）
+	maxSize  int64         // 单文件轮转上限（字节），<=0 取默认
+	keep     int           // 轮转保留份数（.1 … .keep），<=0 取 1
+	interval time.Duration // 时间轮转间隔（0 = 不启用）
+}
+
+// timedLine 带时间戳的一行输出（供断线补发，见 /api/instance/logs since 参数）。
+type timedLine struct {
+	ts   int64  // 写入时间（unix 毫秒）
+	text string // 单行文本（不含换行，保留 ANSI）
+}
+
+// logLines 带时间戳的环形行缓冲：保留最近 max 行（断线重连补发用）。
+type logLines struct {
+	mu    sync.Mutex
+	lines []timedLine
+	max   int
+}
+
+// newLogLines 创建行缓冲。
+func newLogLines(max int) *logLines {
+	if max <= 0 {
+		max = 1000
+	}
+	return &logLines{max: max}
+}
+
+// add 追加一行（带当前时间戳），超出上限丢弃最旧。
+func (l *logLines) add(text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.lines) >= l.max {
+		l.lines = append(l.lines[:0], l.lines[1:]...)
+	}
+	l.lines = append(l.lines, timedLine{ts: time.Now().UnixMilli(), text: text})
+}
+
+// since 返回时间戳晚于 ms 的所有行（按时间顺序，补 \n）。
+func (l *logLines) since(ms int64) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var sb strings.Builder
+	for _, ln := range l.lines {
+		if ln.ts > ms {
+			sb.WriteString(ln.text)
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// tail 返回最后 n 行（补 \n）。
+func (l *logLines) tail(n int) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n <= 0 || n > len(l.lines) {
+		n = len(l.lines)
+	}
+	var sb strings.Builder
+	for _, ln := range l.lines[len(l.lines)-n:] {
+		sb.WriteString(ln.text)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// clear 清空缓冲。
+func (l *logLines) clear() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = nil
+}
+
+// maxLogLineBytes 单行进入行缓冲的最大长度（超长行截断，防内存放大）。
+const maxLogLineBytes = 8 << 10
+
+// lineSplitter 将字节流按行拆分后回调；跨 Write 保留残段，直到 flush。
+// 同一实例的 stdout/stderr 各持一个实例；对并发写自带锁。
+type lineSplitter struct {
+	mu    sync.Mutex
+	carry []byte
+	emit  func(text string)
+}
+
+// Write 实现 io.Writer：拆出完整行（去行尾 \r）回调 emit。
+func (s *lineSplitter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data := append(s.carry, p...)
+	s.carry = s.carry[:0]
+	for {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			break
+		}
+		line := data[:i]
+		if len(line) > 0 {
+			text := string(line)
+			if strings.HasSuffix(text, "\r") {
+				text = text[:len(text)-1] // 去 CRLF 的行尾 \r，保留 ANSI 其余原样
+			}
+			if len(text) > maxLogLineBytes {
+				text = text[len(text)-maxLogLineBytes:]
+			}
+			s.emit(text)
+		}
+		data = data[i+1:]
+	}
+	s.carry = append(s.carry[:0], data...)
+	return len(p), nil
+}
+
+// flush 把残段作为最后一行发出（进程退出时调用）。
+func (s *lineSplitter) flush() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.carry) > 0 {
+		text := string(s.carry)
+		if len(text) > maxLogLineBytes {
+			text = text[len(text)-maxLogLineBytes:]
+		}
+		s.carry = nil
+		s.emit(text)
+	}
 }
 
 // startProcess 启动进程，cwd 必须存在。
@@ -228,19 +354,25 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		Log:     logBuf,
 		Stdin:   &stdinPipe{pipe: stdin},
 		log:     fl,
+		lines:   newLogLines(1000),
 		started: time.Now(),
 		done:    make(chan struct{}),
 	}
+	// 行拆分器：stdout/stderr 各自按行拆分后进入带时间戳行缓冲
+	// （供 /api/instance/logs 的 since 参数断线补发）
+	proc.splitOut = &lineSplitter{emit: proc.emitLine}
+	proc.splitErr = &lineSplitter{emit: proc.emitLine}
 
-	// 双 io.Copy：输出同时进内存环形缓冲与异步落盘（fl 为 nil 时仅内存）。
-	// copyDone 计数两个复制 goroutine 的结束，供退出时等待日志完整落盘。
+	// 双 io.Copy：输出同时进内存环形缓冲与异步落盘（fl 为 nil 时仅内存），
+	// 并逐行进入行缓冲。copyDone 计数两个复制 goroutine 的结束，
+	// 供退出时等待日志完整落盘。
 	copyDone := make(chan struct{}, 2)
 	if fl != nil {
-		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl), stdout); copyDone <- struct{}{} }()
-		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl), stderr); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl, proc.splitOut), stdout); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, fl, proc.splitErr), stderr); copyDone <- struct{}{} }()
 	} else {
-		go func() { _, _ = io.Copy(logBuf, stdout); copyDone <- struct{}{} }()
-		go func() { _, _ = io.Copy(logBuf, stderr); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, proc.splitOut), stdout); copyDone <- struct{}{} }()
+		go func() { _, _ = io.Copy(io.MultiWriter(logBuf, proc.splitErr), stderr); copyDone <- struct{}{} }()
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -276,6 +408,8 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		}
 	copiesDone:
 		timer.Stop()
+		proc.splitOut.flush() // 残段作为最后一行进入行缓冲
+		proc.splitErr.flush()
 		if fl != nil {
 			fl.Close() // 排空并落盘剩余日志
 		}
@@ -283,6 +417,14 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 	}()
 
 	return proc, nil
+}
+
+// emitLine 记录一行输出（加时间戳进行缓冲）。
+// 当前仅行缓冲消费；F3 WebSocket 控制台将在此追加实时广播。
+func (p *Process) emitLine(text string) {
+	if p.lines != nil {
+		p.lines.add(text)
+	}
 }
 
 // IsRunning 进程是否仍在运行。

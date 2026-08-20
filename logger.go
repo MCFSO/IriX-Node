@@ -76,19 +76,24 @@ var alog = newAsyncLogger(1024)
 // Write 实现 io.Writer：立即拷贝数据并投递到有界队列，满则丢弃（计数），
 // 永远立即返回成功——进程 stdout 管道背压（io.Copy 阻塞）会阻塞游戏
 // 服务器进程本身，落盘必须做到「追不上就丢」，绝不让磁盘拖住进程。
-// 后台单 goroutine 消费队列，缓冲写入 {path}，超过 maxSize 轮转为 {path}.1。
+// 后台单 goroutine 消费队列，缓冲写入 {path}，超过 maxSize 或超过
+// interval 时间轮转为 {path}.1 … {path}.{keep}（最多保留 keep 份）。
 type fileLogger struct {
 	ch   chan []byte // 待落盘队列（有界）
 	stop chan struct{}
 	done chan struct{}
+	clr  chan chan error // 清空指令（响应通道；消费 goroutine 处理）
 
-	path    string // 当前日志文件路径
-	maxSize int64  // 单文件轮转上限（字节）
+	path     string        // 当前日志文件路径
+	maxSize  int64         // 单文件轮转上限（字节）
+	keep     int           // 轮转保留份数（.1 … .keep），默认 1
+	interval time.Duration // 时间轮转间隔（0 = 不启用）
 
 	// 以下字段仅由消费 goroutine 访问
 	file   *os.File
 	buf    *bufio.Writer
 	size   int64
+	opened time.Time  // 当前文件打开时间（时间轮转依据）
 	lastOp *time.Time // 上次打开/写入失败的冷却时间
 
 	closeOnce sync.Once
@@ -97,16 +102,29 @@ type fileLogger struct {
 
 // newFileLogger 创建落盘器并启动消费 goroutine。
 // dir 为日志目录，name 为文件名（如 {uuid}.log）；maxSize<=0 时取默认 64MB。
+// 轮转保留 1 份（兼容既有调用；实例日志请用 newFileLoggerN）。
 func newFileLogger(dir, name string, maxSize int64) *fileLogger {
+	return newFileLoggerN(dir, name, maxSize, 1, 0)
+}
+
+// newFileLoggerN 创建落盘器：keep 为轮转保留份数（.1 … .keep，≤0 取 1），
+// interval 为时间轮转间隔（0 表示仅按大小轮转）。
+func newFileLoggerN(dir, name string, maxSize int64, keep int, interval time.Duration) *fileLogger {
 	if maxSize <= 0 {
 		maxSize = 64 << 20
 	}
+	if keep <= 0 {
+		keep = 1
+	}
 	f := &fileLogger{
-		ch:      make(chan []byte, 512),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		path:    filepath.Join(dir, name),
-		maxSize: maxSize,
+		ch:       make(chan []byte, 512),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		clr:      make(chan chan error),
+		path:     filepath.Join(dir, name),
+		maxSize:  maxSize,
+		keep:     keep,
+		interval: interval,
 	}
 	go f.run()
 	return f
@@ -137,19 +155,24 @@ func (f *fileLogger) Close() {
 	})
 }
 
-// run 消费主循环：正常消费逐段写盘；收到 stop 后排空剩余队列再 flush 关闭。
+// run 消费主循环：正常消费逐段写盘；收到 stop 后排空剩余队列再 flush 关闭；
+// 收到 clear 指令时清空当前文件与全部轮转文件。
 func (f *fileLogger) run() {
 	defer close(f.done)
 	for {
 		select {
 		case p := <-f.ch:
 			f.writeAll(p)
+		case resp := <-f.clr:
+			f.clearWithDrain(resp)
 		case <-f.stop:
 			// 排空剩余队列后落盘退出（磁盘慢时逐段处理，内存恒定）
 			for {
 				select {
 				case p := <-f.ch:
 					f.writeAll(p)
+				case resp := <-f.clr:
+					f.doClear(resp)
 				default:
 					f.flushClose()
 					return
@@ -174,7 +197,18 @@ func (f *fileLogger) writeAll(p []byte) {
 			return
 		}
 	}
+	// 大小轮转（与时间轮转互斥，一次写段至多轮转一次）
 	if f.size+int64(len(p)) > f.maxSize && f.size > 0 {
+		if err := f.rotate(); err != nil {
+			now := time.Now()
+			f.lastOp = &now
+			f.drop.Add(int64(len(p)))
+			return
+		}
+	}
+	// 时间轮转：文件打开超过 interval（如 7 天）且已有内容时强制轮转，
+	// 与本地 Rust logger 的「每 7 天轮转」对齐
+	if f.interval > 0 && f.size > 0 && time.Since(f.opened) > f.interval {
 		if err := f.rotate(); err != nil {
 			now := time.Now()
 			f.lastOp = &now
@@ -206,23 +240,89 @@ func (f *fileLogger) open() error {
 	f.file = file
 	f.buf = bufio.NewWriterSize(file, 16<<10)
 	f.size = 0
+	f.opened = time.Now()
 	f.lastOp = nil
 	return nil
 }
 
-// rotate 轮转：当前文件落盘后改为 {path}.1（旧的 .1 直接删除），新建当前文件。
+// rotate 轮转：当前文件落盘后沿 .1 → .2 → … → .keep 依次后移
+// （最旧的 .keep 直接删除），当前文件变为新的 .1，再新建当前文件。
 func (f *fileLogger) rotate() error {
 	if f.buf != nil {
 		_ = f.buf.Flush()
 	}
 	_ = f.file.Close()
 	f.file, f.buf = nil, nil
+	if f.keep > 1 {
+		_ = os.Remove(f.path + fmt.Sprintf(".%d", f.keep))
+		for i := f.keep - 1; i >= 1; i-- {
+			old := f.path + fmt.Sprintf(".%d", i)
+			if _, err := os.Stat(old); err == nil {
+				if err := os.Rename(old, f.path+fmt.Sprintf(".%d", i+1)); err != nil {
+					_ = os.Remove(old)
+				}
+			}
+		}
+	}
 	_ = os.Remove(f.path + ".1")
 	if err := os.Rename(f.path, f.path+".1"); err != nil && !os.IsNotExist(err) {
 		// rename 失败（如被占用）：直接丢弃旧文件重新开始
 		_ = os.Remove(f.path)
 	}
 	return f.open()
+}
+
+// Clear 清空日志：删除当前文件与全部轮转文件（由消费 goroutine 执行，
+// 避免与写文件句柄冲突；下次写入时自动重建空文件）。
+// 已关闭的日志器返回错误。
+func (f *fileLogger) Clear() error {
+	resp := make(chan error, 1)
+	select {
+	case f.clr <- resp:
+		select {
+		case err := <-resp:
+			return err
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("清空日志超时")
+		}
+	case <-f.stop:
+		return fmt.Errorf("日志器已关闭")
+	}
+}
+
+// clearWithDrain 执行清空：先排空当前队列（Clear 调用前已投递的数据一并
+// 清除——select 无顺序保证，不排空则可能 Clear 先执行、旧数据后落盘），
+// 再删除当前与轮转文件（消费 goroutine 内调用）。
+func (f *fileLogger) clearWithDrain(resp chan<- error) {
+	for {
+		select {
+		case p := <-f.ch:
+			f.writeAll(p)
+		default:
+			f.doClear(resp)
+			return
+		}
+	}
+}
+
+// doClear 执行清空（消费 goroutine 内调用）。
+func (f *fileLogger) doClear(resp chan<- error) {
+	if f.buf != nil {
+		_ = f.buf.Flush()
+	}
+	if f.file != nil {
+		_ = f.file.Close()
+		f.file, f.buf = nil, nil
+	}
+	f.size = 0
+	err := os.Remove(f.path)
+	if os.IsNotExist(err) {
+		err = nil // 文件本就不存在视为清空成功
+	}
+	for i := 1; i <= f.keep; i++ {
+		_ = os.Remove(f.path + fmt.Sprintf(".%d", i))
+	}
+	resp <- err
 }
 
 // flushClose 排空写缓冲并关闭文件（消费 goroutine 退出前调用）。

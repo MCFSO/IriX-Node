@@ -238,11 +238,17 @@ func NewDaemon(dataDir, apiKey string) *Daemon {
 }
 
 // logConfig 返回实例日志落盘配置；LogDir 为空时返回 nil（不落盘）。
+// 与本地 Rust logger 对齐：轮转保留 5 份（.1 … .5），每 7 天或超上限轮转。
 func (d *Daemon) logConfig() *logConfig {
 	if d.LogDir == "" {
 		return nil
 	}
-	return &logConfig{dir: d.LogDir, maxSize: d.LogMaxBytes}
+	return &logConfig{
+		dir:      d.LogDir,
+		maxSize:  d.LogMaxBytes,
+		keep:     5,
+		interval: 7 * 24 * time.Hour,
+	}
 }
 
 // instanceFile 实例配置持久化文件路径。
