@@ -99,6 +99,14 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 插件/Mod 元数据（docs/irix-node-local-parity.md §4.4）
 	mux.HandleFunc("GET /api/instance/plugins", d.auth(d.handleInstancePlugins))
 
+	// 实例备份/恢复（docs/irix-node-local-parity.md §4.5，任务化）
+	mux.HandleFunc("POST /api/instance/snapshot", d.auth(d.handleInstanceSnapshot))
+	mux.HandleFunc("GET /api/instance/snapshot-progress", d.auth(d.writeSnapshotStatus))
+	mux.HandleFunc("POST /api/instance/restore", d.auth(d.handleInstanceRestore))
+	mux.HandleFunc("GET /api/instance/backups", d.auth(d.handleBackupsList))
+	mux.HandleFunc("DELETE /api/instance/backups", d.auth(d.handleBackupsDelete))
+	mux.HandleFunc("POST /api/instance/backups/download", d.auth(d.handleBackupDownloadTicket))
+
 	// 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）
 	mux.HandleFunc("GET /api/instance/console/ws", d.auth(d.handleConsoleWS))
 

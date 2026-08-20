@@ -236,7 +236,8 @@ func TestInstanceSyncList(t *testing.T) {
 	}
 }
 
-// TestInstanceSnapshotRestore P1 快照/恢复端到端：快照→下载→恢复到另一实例。
+// TestInstanceSnapshotRestore P1 快照/恢复端到端（任务化）：
+// 快照任务 → 进度轮询 → 备份下载票据 → 下载 → 恢复到另一实例。
 func TestInstanceSnapshotRestore(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srcDir := t.TempDir()
@@ -252,37 +253,97 @@ func TestInstanceSnapshotRestore(t *testing.T) {
 	port, _ := strconv.Atoi(u.Port())
 	d.Port = port
 
-	// 快照
+	// 快照（任务化）→ 轮询进度
 	code, body := apiPost(t, srv.URL+"/api/instance/snapshot?apikey=test-key",
 		map[string]any{"uuid": src.InstanceUuid, "daemonId": d.UUID})
 	if code != http.StatusOK {
 		t.Fatalf("snapshot 失败: %d %s", code, body)
 	}
 	snap := decodeData(t, body)
-	pw, _ := snap["password"].(string)
-	addr, _ := snap["addr"].(string)
-	fileName, _ := snap["fileName"].(string)
-	if pw == "" || addr == "" || fileName == "" {
-		t.Fatalf("快照响应不完整: %v", snap)
+	jobID, _ := snap["jobId"].(string)
+	if jobID == "" {
+		t.Fatalf("快照响应缺少 jobId: %v", snap)
 	}
-	// 下载归档
-	code, zipBody := doReq(t, "http://"+addr+"/download/"+pw+"/"+fileName)
+	deadline := time.Now().Add(30 * time.Second)
+	var archivePath string
+	for time.Now().Before(deadline) {
+		code, body = doReq(t, srv.URL+"/api/instance/snapshot-progress?jobId="+jobID+"&apikey=test-key")
+		if code != http.StatusOK {
+			t.Fatalf("进度查询失败: %d %s", code, body)
+		}
+		prog := decodeData(t, body)
+		if prog["status"] == "done" {
+			archivePath, _ = prog["archivePath"].(string)
+			break
+		}
+		if prog["status"] == "failed" {
+			t.Fatalf("快照失败: %v", prog)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if archivePath == "" {
+		t.Fatalf("快照未在超时内完成")
+	}
+
+	// 申请备份下载票据 → 下载归档
+	code, body = apiPost(t, srv.URL+"/api/instance/backups/download?apikey=test-key",
+		map[string]any{"path": archivePath, "uuid": src.InstanceUuid})
+	if code != http.StatusOK {
+		t.Fatalf("备份票据失败: %d %s", code, body)
+	}
+	tick := decodeData(t, body)
+	pw, _ := tick["password"].(string)
+	addr, _ := tick["addr"].(string)
+	if pw == "" || addr == "" {
+		t.Fatalf("票据响应不完整: %v", tick)
+	}
+	code, zipBody := doReq(t, "http://"+addr+"/download/"+pw+"/"+filepath.Base(archivePath))
 	if code != http.StatusOK {
 		t.Fatalf("下载快照失败: %d %s", code, zipBody)
 	}
-	// 目标实例：先把归档放入其同步区（模拟「目标节点收到归档」）
+
+	// 目标实例：把归档放入其备份区（模拟「目标节点收到归档」）
 	dstDir := t.TempDir()
 	dst := sampleInst(2, dstDir)
 	d.Instances = append(d.Instances, dst)
-	stage := filepath.Join(d.clusterRoot(), "i-incoming.zip")
+	dstBackupDir := d.backupsDirOf(dst.InstanceUuid)
+	if err := os.MkdirAll(dstBackupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(dstBackupDir, "incoming.zip")
 	if err := os.WriteFile(stage, zipBody, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// restore
+	// restore（任务化）→ 轮询进度
 	code, body = apiPost(t, srv.URL+"/api/instance/restore?apikey=test-key",
-		map[string]any{"uuid": dst.InstanceUuid, "daemonId": d.UUID, "fileName": "/i-incoming.zip"})
+		map[string]any{"uuid": dst.InstanceUuid, "daemonId": d.UUID, "archivePath": stage})
 	if code != http.StatusOK {
 		t.Fatalf("restore 失败: %d %s", code, body)
+	}
+	snap = decodeData(t, body)
+	jobID, _ = snap["jobId"].(string)
+	if jobID == "" {
+		t.Fatalf("restore 响应缺少 jobId: %v", snap)
+	}
+	deadline = time.Now().Add(30 * time.Second)
+	restored := false
+	for time.Now().Before(deadline) {
+		code, body = doReq(t, srv.URL+"/api/instance/snapshot-progress?jobId="+jobID+"&apikey=test-key")
+		if code != http.StatusOK {
+			t.Fatalf("进度查询失败: %d %s", code, body)
+		}
+		prog := decodeData(t, body)
+		if prog["status"] == "done" {
+			restored = true
+			break
+		}
+		if prog["status"] == "failed" {
+			t.Fatalf("恢复失败: %v", prog)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !restored {
+		t.Fatalf("恢复未在超时内完成")
 	}
 	got, err := os.ReadFile(filepath.Join(dstDir, "world.dat"))
 	if err != nil || string(got) != "snapshot-content" {

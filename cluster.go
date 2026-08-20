@@ -23,7 +23,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,8 +153,9 @@ func (d *Daemon) registerClusterRoutes(mux *http.ServeMux) {
 	// P1 增量同步原语
 	mux.HandleFunc("GET /api/cluster/sync/list", d.auth(d.handleClusterSyncList))
 	mux.HandleFunc("GET /api/instance/sync/list", d.auth(d.handleInstanceSyncList))
-	mux.HandleFunc("POST /api/instance/snapshot", d.auth(d.handleInstanceSnapshot))
-	mux.HandleFunc("POST /api/instance/restore", d.auth(d.handleInstanceRestore))
+	// 注意：POST /api/instance/snapshot|restore 已由 backup.go 任务化实现
+	// （docs/irix-node-local-parity.md §4.5），集群迁移经 runTransfer 走
+	// 「任务化快照 → 备份下载票据 → 直连下载」流程，此处不再重复注册。
 
 	// P2 集群协调
 	mux.HandleFunc("GET /api/cluster/status", d.auth(d.handleClusterStatus))
@@ -331,75 +331,6 @@ func writeSyncList(w http.ResponseWriter, root string) {
 		"total": len(entries),
 		"root":  "/",
 	})
-}
-
-// handleInstanceSnapshot 把实例工作目录打成 zip 存入同步区，返回下载票据。
-// POST /api/instance/snapshot body: {uuid, daemonId}
-// 响应: {password, addr, fileName}（fileName 相对同步区根，如 ".snapshots/xxx.zip"）
-func (d *Daemon) handleInstanceSnapshot(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		UUID     string `json:"uuid"`
-		DaemonID string `json:"daemonId"`
-	}
-	if err := parseJSONBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
-		return
-	}
-	cwd, err := d.CwdOf(body.UUID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	snapDir := filepath.Join(d.clusterRoot(), ".snapshots")
-	zipName := body.UUID + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".zip"
-	zipPath := filepath.Join(snapDir, zipName)
-	if err := zipDir(cwd, zipPath); err != nil {
-		writeError(w, http.StatusInternalServerError, "快照失败: "+err.Error())
-		return
-	}
-	password := tickets.CreateDownload("snapshot", d.clusterRoot(), "")
-	if password == "" {
-		writeError(w, http.StatusServiceUnavailable, "下载票据已满，请稍后重试")
-		return
-	}
-	writeOK(w, map[string]any{
-		"password": password,
-		"addr":     d.publicAddr(),
-		"fileName": ".snapshots/" + zipName,
-	})
-}
-
-// handleInstanceRestore 从同步区归档解压到实例工作目录。
-// POST /api/instance/restore body: {uuid, daemonId, fileName}
-func (d *Daemon) handleInstanceRestore(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		UUID     string `json:"uuid"`
-		DaemonID string `json:"daemonId"`
-		FileName string `json:"fileName"`
-	}
-	if err := parseJSONBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
-		return
-	}
-	if body.FileName == "" {
-		writeError(w, http.StatusBadRequest, "缺少 fileName 参数")
-		return
-	}
-	cwd, err := d.CwdOf(body.UUID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	zipPath, err := d.clusterPath(body.FileName)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := unzip(zipPath, cwd); err != nil {
-		writeError(w, http.StatusInternalServerError, "恢复失败: "+err.Error())
-		return
-	}
-	writeOK(w, true)
 }
 
 // handleClusterStatus 集群状态。
@@ -739,6 +670,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 	if apikey != "" {
 		auth = "?apikey=" + url.QueryEscape(apikey)
 	}
+	// 1. 申请远端实例快照任务（任务化，docs/irix-node-local-parity.md §4.5）
 	snap, err := postJSON(client, base+"/api/instance/snapshot"+auth, map[string]any{
 		"uuid": uuid, "daemonId": daemonID,
 	})
@@ -746,11 +678,60 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 		fail(fmt.Errorf("申请远端快照失败: %w", err))
 		return
 	}
-	password, _ := snap["password"].(string)
-	fileName, _ := snap["fileName"].(string)
-	snapAddr, _ := snap["addr"].(string)
-	if password == "" || fileName == "" {
-		fail(fmt.Errorf("远端快照响应缺少 password/fileName: %v", snap))
+	snapJobID, _ := snap["jobId"].(string)
+	if snapJobID == "" {
+		fail(fmt.Errorf("远端快照响应缺少 jobId: %v", snap))
+		return
+	}
+	// 轮询快照进度直到完成（大世界备份可能耗时，上限 15 分钟）
+	var archivePath string
+	pollDeadline := time.Now().Add(15 * time.Minute)
+	progressURL := base + "/api/instance/snapshot-progress?jobId=" + url.QueryEscape(snapJobID)
+	if apikey != "" {
+		progressURL += "&apikey=" + url.QueryEscape(apikey) // 已有查询参数，用 & 拼接
+	}
+	for {
+		prog, pErr := getJSON(client, progressURL)
+		if pErr != nil {
+			fail(fmt.Errorf("查询快照进度失败: %w", pErr))
+			return
+		}
+		switch prog["status"] {
+		case "done":
+			archivePath, _ = prog["archivePath"].(string)
+			if archivePath == "" {
+				archivePath, _ = prog["path"].(string) // 兼容旧字段名
+			}
+			if archivePath == "" {
+				fail(fmt.Errorf("快照完成但缺少归档路径: %v", prog))
+				return
+			}
+		case "failed":
+			msg, _ := prog["message"].(string)
+			fail(fmt.Errorf("远端快照失败: %s", msg))
+			return
+		default:
+			if time.Now().After(pollDeadline) {
+				fail(fmt.Errorf("远端快照超时（15 分钟）"))
+				return
+			}
+			time.Sleep(time.Second)
+			continue
+		}
+		break
+	} // 2. 申请备份下载票据（绑定该归档文件）
+	tick, err := postJSON(client, base+"/api/instance/backups/download"+auth, map[string]any{
+		"path": archivePath,
+		"uuid": uuid,
+	})
+	if err != nil {
+		fail(fmt.Errorf("申请备份下载票据失败: %w", err))
+		return
+	}
+	password, _ := tick["password"].(string)
+	snapAddr, _ := tick["addr"].(string)
+	if password == "" {
+		fail(fmt.Errorf("远端票据响应缺少 password: %v", tick))
 		return
 	}
 	if snapAddr == "" {
@@ -763,13 +744,13 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 		fail(fmt.Errorf("下载地址被拒绝: %w", err))
 		return
 	}
-	// 2. 直连下载归档到本地临时文件
+	// 3. 直连下载归档到本地临时文件
 	tmpZip := filepath.Join(d.clusterRoot(), ".transfer", jobID+".zip")
 	if err := os.MkdirAll(filepath.Dir(tmpZip), 0o755); err != nil {
 		fail(err)
 		return
 	}
-	dlURL := snapAddr + "/download/" + url.PathEscape(password) + "/" + strings.TrimPrefix(fileName, "/")
+	dlURL := snapAddr + "/download/" + url.PathEscape(password) + "/" + url.PathEscape(filepath.Base(archivePath))
 	resp, err := client.Get(dlURL)
 	if err != nil {
 		fail(fmt.Errorf("下载归档失败: %w", err))
@@ -791,7 +772,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 		fail(fmt.Errorf("写入归档失败: %w", err))
 		return
 	}
-	// 3. 解压到目标同步区目录
+	// 4. 解压到目标同步区目录
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		fail(err)
 		return
@@ -819,6 +800,20 @@ func postJSON(client *http.Client, url string, body any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
+	return decodeJSONResponse(resp)
+}
+
+// getJSON 发送 GET 请求并解析 MCSM 风格响应 {status, data}。
+func getJSON(client *http.Client, url string) (map[string]any, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSONResponse(resp)
+}
+
+// decodeJSONResponse 解析 MCSM 风格响应 {status, data}，非 200 报错。
+func decodeJSONResponse(resp *http.Response) (map[string]any, error) {
 	defer resp.Body.Close()
 	var out struct {
 		Status int             `json:"status"`
