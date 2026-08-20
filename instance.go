@@ -93,6 +93,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/instance/logs", d.auth(d.handleInstanceLogs))
 	mux.HandleFunc("DELETE /api/instance/logs", d.auth(d.handleInstanceLogsClear))
 
+	// 实例级指标（docs/irix-node-local-parity.md §4.3）
+	mux.HandleFunc("GET /api/instance/stats", d.auth(d.handleInstanceStats))
+
 	// 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）
 	mux.HandleFunc("GET /api/instance/console/ws", d.auth(d.handleConsoleWS))
 

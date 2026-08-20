@@ -171,6 +171,11 @@ type Process struct {
 
 	subMu sync.Mutex
 	subs  map[chan string]struct{} // 输出行订阅者（WebSocket 控制台）
+
+	statsMu    sync.Mutex      // 保护 cpuLast/cpuPercent/srvStats
+	cpuLast    *cpuSamplePoint // 上次 CPU 采样点（nil = 未采样）
+	cpuPercent float64         // 最近一次计算出的 CPU 使用率
+	srvStats   instanceStats   // 从输出解析的玩家/TPS 指标
 }
 
 // logConfig 实例日志落盘配置；Dir 为空时表示不落盘。
@@ -353,13 +358,14 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		}
 	}
 	proc := &Process{
-		cmd:     cmd,
-		Log:     logBuf,
-		Stdin:   &stdinPipe{pipe: stdin},
-		log:     fl,
-		lines:   newLogLines(1000),
-		started: time.Now(),
-		done:    make(chan struct{}),
+		cmd:      cmd,
+		Log:      logBuf,
+		Stdin:    &stdinPipe{pipe: stdin},
+		log:      fl,
+		lines:    newLogLines(1000),
+		srvStats: instanceStats{players: -1, maxPlayers: -1, tps: -1}, // 未知状态
+		started:  time.Now(),
+		done:     make(chan struct{}),
 	}
 	// 行拆分器：stdout/stderr 各自按行拆分后进入带时间戳行缓冲
 	// （供 /api/instance/logs 的 since 参数断线补发）
@@ -456,12 +462,13 @@ func (p *Process) broadcast(line string) {
 	p.subMu.Unlock()
 }
 
-// emitLine 记录一行输出：进入带时间戳行缓冲（断线补发）并广播给订阅者
-// （WebSocket 实时控制台）。
+// emitLine 记录一行输出：进入带时间戳行缓冲（断线补发）、解析玩家/TPS
+// 指标，并广播给订阅者（WebSocket 实时控制台）。
 func (p *Process) emitLine(text string) {
 	if p.lines != nil {
 		p.lines.add(text)
 	}
+	p.parseServerLine(text)
 	p.broadcast(text)
 }
 
