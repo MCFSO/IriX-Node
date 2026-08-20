@@ -119,6 +119,7 @@ func main() {
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
+	d.frpLoad() // 加载 FRP 隧道列表（进程态重置为停止，由用户手动启动）
 	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）
 	for _, inst := range d.Instances {
 		if inst.Config.EventTask.AutoStart {
@@ -193,6 +194,7 @@ func main() {
 		}
 		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
 		d.StopAll(30 * time.Second)
+		d.frpStopAll() // 停止全部 FRP 隧道进程
 		close(stopped)
 	}()
 

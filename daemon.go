@@ -198,6 +198,9 @@ type Daemon struct {
 
 	trashMu sync.Mutex // 回收站元数据读写互斥（{data}/trash/<uuid>.json）
 
+	frpMu      sync.Mutex   // FRP 隧道列表与进程状态互斥
+	frpTunnels []*frpTunnel // 隧道列表（持久化 {data}/frp/tunnels.json）
+
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex
 	clusterMonitor   string                  // 监控节点 id（空 = 尚无监控者）

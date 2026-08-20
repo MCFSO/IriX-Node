@@ -138,6 +138,15 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/files/trash/restore", d.auth(d.handleTrashRestore))
 	mux.HandleFunc("POST /api/files/trash/empty", d.auth(d.handleTrashEmpty))
 
+	// 节点端内网穿透 FRP（docs/irix-node-local-parity.md §4.7）
+	mux.HandleFunc("GET /api/frp/status", d.auth(d.handleFRPStatus))
+	mux.HandleFunc("POST /api/frp/tunnels", d.auth(d.handleFRPCreate))
+	mux.HandleFunc("POST /api/frp/tunnels/{id}/start", d.auth(d.handleFRPStart))
+	mux.HandleFunc("POST /api/frp/tunnels/{id}/stop", d.auth(d.handleFRPStop))
+	mux.HandleFunc("DELETE /api/frp/tunnels/{id}", d.auth(d.handleFRPDelete))
+	mux.HandleFunc("GET /api/frp/tunnels/{id}/logs", d.auth(d.handleFRPLogs))
+	mux.HandleFunc("POST /api/frp/binary", d.auth(d.handleFRPUploadBinary))
+
 	// 下载/上传直连通道
 	mux.HandleFunc("GET /download/", d.handleDirectDownload)
 	mux.HandleFunc("POST /upload/", d.handleDirectUpload)
