@@ -93,6 +93,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）
 	mux.HandleFunc("GET /api/instance/console/ws", d.auth(d.handleConsoleWS))
 
+	// 核心下载（docs/irix-node-local-parity.md §4.2.3，任务化）
+	mux.HandleFunc("POST /api/instance/download-core", d.auth(d.handleDownloadCore))
+	mux.HandleFunc("GET /api/instance/download-core-progress", d.auth(d.writeTaskStatus))
 	// Java 运行时（docs/irix-node-local-parity.md §4.2.1）
 	mux.HandleFunc("GET /api/runtime/java", d.auth(d.handleRuntimeJava))
 	// JDK 安装/卸载（docs/irix-node-local-parity.md §4.2.2，任务化）
