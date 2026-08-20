@@ -78,6 +78,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/instance", d.auth(d.handleInstanceUpdate))
 	mux.HandleFunc("DELETE /api/instance", d.auth(d.handleInstanceDelete))
 
+	// 导入目录创建实例（docs/irix-node-local-parity.md §4.2.4）
+	mux.HandleFunc("POST /api/instance/import", d.auth(d.handleInstanceImport))
+
 	// 实例操作
 	mux.HandleFunc("GET /api/protected_instance/open", d.auth(d.handleInstanceStart))
 	mux.HandleFunc("GET /api/protected_instance/stop", d.auth(d.handleInstanceStop))
