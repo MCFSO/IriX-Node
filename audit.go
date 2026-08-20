@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -84,6 +85,16 @@ func (w *auditResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack 透传底层 Hijacker（WebSocket 升级需要；hijack 后审计仅记录请求头
+// 与 101 状态码，后续帧不在审计范围内——与控制台业务一致）。
+func (w *auditResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("底层 ResponseWriter 不支持 Hijack")
+	}
+	return hj.Hijack()
 }
 
 // clientIP 提取请求来源 IP（不解析代理头：直连通道同样需审计真实来源）。

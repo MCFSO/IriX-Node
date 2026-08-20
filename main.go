@@ -224,7 +224,9 @@ func limitAPIBody(next http.Handler) http.Handler {
 }
 
 // Version 守护进程版本号。
-const Version = "1.0.0"
+// 1.1.0：新增实时控制台 WebSocket、实例日志持久化查询、Java 检测/安装、
+// 核心下载、导入目录（docs/irix-node-local-parity.md M1）。
+const Version = "1.1.0"
 
 // resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
 // 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量

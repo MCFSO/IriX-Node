@@ -168,6 +168,9 @@ type Process struct {
 	started  time.Time
 	exitCode int
 	done     chan struct{}
+
+	subMu sync.Mutex
+	subs  map[chan string]struct{} // 输出行订阅者（WebSocket 控制台）
 }
 
 // logConfig 实例日志落盘配置；Dir 为空时表示不落盘。
@@ -419,12 +422,47 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 	return proc, nil
 }
 
-// emitLine 记录一行输出（加时间戳进行缓冲）。
-// 当前仅行缓冲消费；F3 WebSocket 控制台将在此追加实时广播。
+// Subscribe 订阅进程输出行（每行一条，保留 ANSI）。
+// 返回有界接收 channel（慢订阅者丢行、不阻塞进程输出）与取消函数；
+// 进程退出后不再有新行，由调用方通过 done 通道感知并取消。
+func (p *Process) Subscribe() (<-chan string, func()) {
+	ch := make(chan string, 1024)
+	p.subMu.Lock()
+	if p.subs == nil {
+		p.subs = map[chan string]struct{}{}
+	}
+	p.subs[ch] = struct{}{}
+	p.subMu.Unlock()
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			p.subMu.Lock()
+			delete(p.subs, ch)
+			p.subMu.Unlock()
+		})
+	}
+	return ch, cancel
+}
+
+// broadcast 向全部订阅者广播一行（非阻塞：channel 满即丢，绝不拖慢进程输出）。
+func (p *Process) broadcast(line string) {
+	p.subMu.Lock()
+	for ch := range p.subs {
+		select {
+		case ch <- line:
+		default:
+		}
+	}
+	p.subMu.Unlock()
+}
+
+// emitLine 记录一行输出：进入带时间戳行缓冲（断线补发）并广播给订阅者
+// （WebSocket 实时控制台）。
 func (p *Process) emitLine(text string) {
 	if p.lines != nil {
 		p.lines.add(text)
 	}
+	p.broadcast(text)
 }
 
 // IsRunning 进程是否仍在运行。
