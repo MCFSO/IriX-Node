@@ -96,6 +96,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 实例级指标（docs/irix-node-local-parity.md §4.3）
 	mux.HandleFunc("GET /api/instance/stats", d.auth(d.handleInstanceStats))
 
+	// 插件/Mod 元数据（docs/irix-node-local-parity.md §4.4）
+	mux.HandleFunc("GET /api/instance/plugins", d.auth(d.handleInstancePlugins))
+
 	// 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）
 	mux.HandleFunc("GET /api/instance/console/ws", d.auth(d.handleConsoleWS))
 
