@@ -121,6 +121,9 @@ type Instance struct {
 	// 自动重启防抖（受 mu 保护）：10 秒窗口内最多自动重启 3 次，防止崩溃循环。
 	arWindowStart time.Time
 	arAttempts    int
+
+	metricsMu sync.Mutex     // 指标采样环形缓冲互斥
+	metrics   []metricSample // 最近 60 条采样（15 秒 × 60 = 15 分钟）
 }
 
 // NewInstance 由配置创建实例对象。
@@ -200,6 +203,8 @@ type Daemon struct {
 
 	frpMu      sync.Mutex   // FRP 隧道列表与进程状态互斥
 	frpTunnels []*frpTunnel // 隧道列表（持久化 {data}/frp/tunnels.json）
+
+	metricsOnce sync.Once // 实例指标采样循环惰性启动
 
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex

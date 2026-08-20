@@ -147,6 +147,10 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/frp/tunnels/{id}/logs", d.auth(d.handleFRPLogs))
 	mux.HandleFunc("POST /api/frp/binary", d.auth(d.handleFRPUploadBinary))
 
+	// AI 日志查询与监控历史（docs/irix-node-local-parity.md §4.8）
+	mux.HandleFunc("GET /api/instance/logs/query", d.auth(d.handleLogsQuery))
+	mux.HandleFunc("GET /api/instance/metrics", d.auth(d.handleInstanceMetrics))
+
 	// 下载/上传直连通道
 	mux.HandleFunc("GET /download/", d.handleDirectDownload)
 	mux.HandleFunc("POST /upload/", d.handleDirectUpload)

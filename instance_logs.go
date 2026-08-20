@@ -56,14 +56,16 @@ func splitLogLines(data []byte) []string {
 
 // readLogTail 从日志文件集合尾部倒读最后 n 行（按时间从旧到新拼接）；
 // n <= 0 表示读取全部。文件缺失/不可读自动跳过。
+// 实现：逐文件从新到旧收集尾部行（chunk 内部保持时间顺序），
+// 最后只反转文件级顺序（新文件在前 → 旧文件在前）。
 func readLogTail(paths []string, n int) (string, error) {
 	if len(paths) == 0 {
 		return "", nil
 	}
-	// 从新到旧逐文件收集尾部行（倒序累积），最后整体反转回时间顺序
-	var collected []string
+	var chunks [][]string
+	need := n
 	for i := len(paths) - 1; i >= 0; i-- {
-		if n > 0 && len(collected) >= n {
+		if n > 0 && need <= 0 {
 			break
 		}
 		data, err := os.ReadFile(paths[i])
@@ -74,20 +76,23 @@ func readLogTail(paths []string, n int) (string, error) {
 		if len(lines) == 0 {
 			continue
 		}
-		need := n - len(collected)
-		if n <= 0 || len(lines) < need {
-			need = len(lines)
+		take := need
+		if n <= 0 || len(lines) < take {
+			take = len(lines)
 		}
-		collected = append(collected, lines[len(lines)-need:]...)
+		chunks = append(chunks, lines[len(lines)-take:])
+		if n > 0 {
+			need -= take
+		}
 	}
-	// 反转：collected 现在为「新 → 旧」，反转后为「旧 → 新」
-	for i, j := 0, len(collected)-1; i < j; i, j = i+1, j-1 {
-		collected[i], collected[j] = collected[j], collected[i]
+	var out []string
+	for i := len(chunks) - 1; i >= 0; i-- {
+		out = append(out, chunks[i]...)
 	}
-	if len(collected) == 0 {
+	if len(out) == 0 {
 		return "", nil
 	}
-	return strings.Join(collected, "\n") + "\n", nil
+	return strings.Join(out, "\n") + "\n", nil
 }
 
 // readLogSince 读取修改时间晚于 since（unix 毫秒）的日志文件内容，
