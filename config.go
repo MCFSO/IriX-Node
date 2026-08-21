@@ -1,13 +1,16 @@
 // 配置文件（config.json）支持：所有启动参数均可写入配置文件统一管理，
 // 优先级为：命令行显式参数 > 配置文件 > 环境变量（仅 bind）> 内置默认值。
-// 文件不存在时静默跳过，行为与纯命令行启动完全一致（向后兼容）。
+// 文件不存在时首次启动自动生成一份示例配置（ensureConfigFile，生成失败仅告警），
+// 之后照常加载；行为与纯命令行启动完全一致（向后兼容）。
 
 package main
 
 import (
+	_ "embed" // 仅用于内嵌 config.example.json（[]byte 嵌入需空导入，见 embed 包文档）
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -27,6 +30,28 @@ type Config struct {
 	AuditLogMax       *int   `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
 	LoadTune          *bool  `json:"loadTune"`          // 负载自适应调谐开关
 	TransferAllowCIDR string `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
+}
+
+//go:embed config.example.json
+var exampleConfigJSON []byte
+
+// ensureConfigFile 首次启动时若配置文件不存在，自动落一份示例配置
+// （内容与 config.example.json 一致，含字段注释；加载时 _comment 字段会被忽略）。
+// 返回是否新建了文件；创建失败返回错误（调用方仅告警，不阻断启动）。
+func ensureConfigFile(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return false, nil // 已存在，绝不覆盖用户配置
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, exampleConfigJSON, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // loadConfigFile 从 path 加载配置文件。

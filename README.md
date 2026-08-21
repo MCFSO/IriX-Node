@@ -19,7 +19,7 @@ go build -o irix-node .
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `-config` | 配置文件路径（JSON，不存在则忽略）；全部启动参数均可写入配置文件，字段见 `config.example.json` | `config.json` |
+| `-config` | 配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件，字段见 `config.example.json` | `config.json` |
 | `-bind` | 监听地址（IP 或主机名，如 `127.0.0.1` / `0.0.0.0` / `192.168.1.5` / `::`）；留空时依次读配置文件 `bind`、`IRIX_NODE_BIND_ALL` 环境变量（=1 则 `0.0.0.0`） | `127.0.0.1` |
 | `-port` | HTTP 监听端口（1-65535） | `12346` |
 | `-data` | 数据目录（实例配置 instances.json 与配对码 auth.hash 存放于此） | 当前目录 |
@@ -31,7 +31,9 @@ go build -o irix-node .
 ### 配置文件
 
 全部启动参数均可写入 JSON 配置文件（默认 `./config.json`，可用 `-config` 指定路径，
-字段说明见 `config.example.json`）。优先级：**命令行显式参数 > 配置文件 > 默认值**；
+字段说明见 `config.example.json`）。**首次启动时若配置文件不存在，会自动落一份示例配置**
+（内容与 `config.example.json` 一致，含字段注释；生成失败仅告警，不阻断启动）。
+优先级：**命令行显式参数 > 配置文件 > 默认值**；
 未写的字段回退默认值。监听地址（`bind`）也支持配置文件，留空时仍读 `IRIX_NODE_BIND_ALL`
 环境变量。
 

@@ -27,7 +27,7 @@ import (
 
 func main() {
 	var (
-		configPath    = flag.String("config", "config.json", "配置文件路径（JSON，不存在则忽略）；全部启动参数均可写入配置文件（字段见 config.example.json），命令行显式参数优先级高于配置文件")
+		configPath    = flag.String("config", "config.json", "配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件（字段见 config.example.json），命令行显式参数优先级高于配置文件")
 		port          = flag.Int("port", 12346, "监听端口（1-65535）")
 		bindHost      = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时依次读配置文件 bind、IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
 		dataDir       = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
@@ -43,7 +43,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
 		fmt.Fprintf(os.Stderr, "用法: irix-node [选项]\n\n")
 		fmt.Fprintf(os.Stderr, "所有参数均可写入配置文件（默认 ./config.json，可用 -config 指定路径，\n")
-		fmt.Fprintf(os.Stderr, "字段说明见 config.example.json）；优先级：命令行显式参数 > 配置文件 > 默认值。\n\n")
+		fmt.Fprintf(os.Stderr, "首次启动无配置文件时自动生成示例配置；字段说明见 config.example.json）。\n")
+		fmt.Fprintf(os.Stderr, "优先级：命令行显式参数 > 配置文件 > 默认值。\n\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
@@ -61,6 +62,13 @@ func main() {
 	// 命令行显式设置的参数名集合：这些参数不被配置文件覆盖
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// 首次启动无配置文件时自动生成示例配置（生成失败仅告警，不阻断启动）
+	if created, err := ensureConfigFile(*configPath); err != nil {
+		log.Printf("警告: 自动生成配置文件 %s 失败: %v（将继续按命令行参数与默认值启动）", *configPath, err)
+	} else if created {
+		log.Printf("未检测到配置文件 %s，已自动生成示例配置（字段说明见文件内注释，按需修改后重启生效）", *configPath)
+	}
 
 	// 加载配置文件并合并启动选项（不存在则静默跳过，与纯命令行启动一致）
 	cfg, cfgLoaded, err := loadConfigFile(*configPath)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,6 +99,60 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	if cfg.Port != 0 || cfg.Bind != "" || cfg.InstanceLog != nil {
 		t.Fatalf("空对象应全部为未设置: %+v", cfg)
+	}
+}
+
+// TestEnsureConfigFile 首次启动自动生成示例配置：生成、可加载、不覆盖已有、失败路径。
+func TestEnsureConfigFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// 内嵌的示例配置本身必须是合法 JSON（_comment 等未知字段在加载时被忽略）
+	if !json.Valid(exampleConfigJSON) {
+		t.Fatal("内嵌的示例配置不是合法 JSON")
+	}
+
+	// 不存在的路径（父目录也不存在）：自动生成，且生成后可被正常加载解析
+	p := filepath.Join(dir, "cfg", "config.json")
+	created, err := ensureConfigFile(p)
+	if err != nil {
+		t.Fatalf("自动生成失败: %v", err)
+	}
+	if !created {
+		t.Fatal("文件不存在时应返回 created=true")
+	}
+	cfg, loaded, err := loadConfigFile(p)
+	if err != nil || !loaded {
+		t.Fatalf("生成的配置文件应可正常加载: %v", err)
+	}
+	if cfg.Port != 12346 || cfg.Bind != "127.0.0.1" || cfg.InstanceLog == nil || !*cfg.InstanceLog {
+		t.Fatalf("生成的示例配置解析异常: %+v", cfg)
+	}
+
+	// 已存在：绝不覆盖，返回 created=false
+	if err := os.WriteFile(p, []byte(`{"port": 9999}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err = ensureConfigFile(p)
+	if err != nil || created {
+		t.Fatalf("已存在的配置不应被覆盖: created=%v err=%v", created, err)
+	}
+	cfg, _, _ = loadConfigFile(p)
+	if cfg.Port != 9999 {
+		t.Fatalf("已有配置被改动: %+v", cfg)
+	}
+
+	// 空路径：直接跳过，无副作用
+	if created, err := ensureConfigFile(""); err != nil || created {
+		t.Fatalf("空路径应跳过: created=%v err=%v", created, err)
+	}
+
+	// 路径不可写（父路径是普通文件）：返回错误，不 panic
+	blocked := filepath.Join(dir, "afile", "config.json")
+	if err := os.WriteFile(filepath.Join(dir, "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureConfigFile(blocked); err == nil {
+		t.Fatal("父路径为普通文件时应返回错误")
 	}
 }
 
