@@ -160,6 +160,12 @@ func main() {
 	d.BindHost = bind
 	addr := net.JoinHostPort(bind, strconv.Itoa(opts.Port))
 
+	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("HTTP 服务启动失败: %v", err)
+	}
+
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 
@@ -188,6 +194,10 @@ func main() {
 		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 
+	// 忽略 SIGHUP：SSH/终端前台启动的节点在会话断开时不应被杀
+	// （否则端口静默关闭，客户端表现为「网络错误」且服务器无任何日志）。
+	// systemd/rc.d 等服务管理器不会发送 SIGHUP，忽略它不影响优雅关停。
+	signal.Ignore(syscall.SIGHUP)
 	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程
 	stopped := make(chan struct{})
 	signals := make(chan os.Signal, 1)
@@ -206,7 +216,7 @@ func main() {
 		close(stopped)
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(&connLogListener{Listener: ln, d: d}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}
 	<-stopped
@@ -216,6 +226,28 @@ func main() {
 		d.AuditLog.Close()
 	}
 	alog.Close()
+}
+
+// connLogListener 包装 net.Listener：记录每次接受到的连接来源与 Accept 错误。
+// 审计中间件只覆盖到达 HTTP 层的请求；连接层失败（SYN 未到达节点、被防火墙
+// 丢弃、半开等）在日志中天然不可见，排查「客户端网络错误」时全靠猜。
+// 包装后「客户端是否连到节点」在审计日志中一眼可见。
+type connLogListener struct {
+	net.Listener
+	d *Daemon
+}
+
+// Accept 接受连接并记录来源；Accept 出错时记录非关闭类错误（如句柄耗尽）。
+func (l *connLogListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		if !errors.Is(err, net.ErrClosed) {
+			l.d.auditLogf("接受连接失败: %v", err)
+		}
+		return nil, err
+	}
+	l.d.auditLogf("接受到来自 %s 的连接", c.RemoteAddr())
+	return c, err
 }
 
 // maxAPIBodyBytes API 请求体上限（不含 /upload/ 直连通道）。
