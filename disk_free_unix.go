@@ -1,7 +1,8 @@
-//go:build !windows
+//go:build linux || darwin || freebsd
 
-// disk_free_other.go — Unix 磁盘余量探测（syscall.Statfs，标准库）。
-// 平台不支持 Statfs 时（如部分 BSD 变体）返回 ok=false，迁移仅告警。
+// disk_free_unix.go — Unix 磁盘余量探测（syscall.Statfs，标准库）。
+// 这些平台的 Statfs_t 字段名为 Bsize/Bavail（OpenBSD 用 F_ 前缀，见
+// disk_free_openbsd.go）。探测失败或字段异常时返回 ok=false，迁移仅告警。
 
 package main
 

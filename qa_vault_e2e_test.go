@@ -220,7 +220,7 @@ func TestVaultRealServerE2E(t *testing.T) {
 	}
 	code, resp = e2eReq(t, "POST", "/api/vault/unlock", map[string]any{
 		"user": "admin", "password": "Passw0rd1234",
-		"totp": totpCode(secret, time.Now(), totpDigits, totpPeriod),
+		"totp":        totpCode(secret, time.Now(), totpDigits, totpPeriod),
 		"challengeId": e2eStr(resp, "challengeId"),
 		"signature":   base64.RawStdEncoding.EncodeToString(sig),
 	}, "")
@@ -256,8 +256,9 @@ func TestVaultRealServerE2E(t *testing.T) {
 
 // TestVaultRealServerE2EM4 真实进程 M4 E2E（vaultFiles 物化生命周期）。
 // 用法：VAULT_E2E=m4（全新数据目录启动节点）：
-//   .\irix-node.exe -tls-mode auto -vault -apikey e2e-key -port 19997 -data <dir> ...
-//   $env:VAULT_E2E='m4'; go test -run TestVaultRealServerE2EM4 -count=1 -v .
+//
+//	.\irix-node.exe -tls-mode auto -vault -apikey e2e-key -port 19997 -data <dir> ...
+//	$env:VAULT_E2E='m4'; go test -run TestVaultRealServerE2EM4 -count=1 -v .
 func TestVaultRealServerE2EM4(t *testing.T) {
 	if os.Getenv("VAULT_E2E") != "m4" {
 		t.Skip("未设置 VAULT_E2E=m4（真实进程 M4 E2E 需手动启动节点）")
@@ -322,7 +323,7 @@ func TestVaultRealServerE2EM4(t *testing.T) {
 	}
 	code, resp = e2eReq(t, "POST", "/api/vault/unlock", map[string]any{
 		"user": "admin", "password": "Passw0rd1234",
-		"totp": totpCode(secret, time.Now(), totpDigits, totpPeriod),
+		"totp":        totpCode(secret, time.Now(), totpDigits, totpPeriod),
 		"challengeId": e2eStr(resp, "challengeId"),
 		"signature":   base64.RawStdEncoding.EncodeToString(sig),
 	}, "")

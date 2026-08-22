@@ -35,18 +35,18 @@ type TLSConfig struct {
 //     默认 12 位 / 90 天过期 / 到期不强制（forceExpire=true 时解锁必须同请求改密）；
 //   - bindSessionIP：会话令牌绑定来源 IP，默认关。
 type VaultConfig struct {
-	Enabled            *bool `json:"enabled"`            // 加密保险库开关
-	IdleTimeoutMinutes *int  `json:"idleTimeoutMinutes"` // 会话空闲超时（分钟）
-	MaxAttempts        *int  `json:"maxAttempts"`        // 失败限速阈值
-	LockoutMinutes     *int  `json:"lockoutMinutes"`     // 锁定时长（分钟）
-	PBKDF2Iterations   *int  `json:"pbkdf2Iterations"`   // PBKDF2 迭代次数
-	PasswordMinLength  *int  `json:"passwordMinLength"`  // 密码最小长度
-	PasswordExpireDays *int  `json:"passwordExpireDays"` // 密码有效期（天，0=不过期）
-	ForceExpire        *bool `json:"forceExpire"`        // 到期强制改密（解锁同请求）
-	BindSessionIP      *bool `json:"bindSessionIP"`      // 会话绑定来源 IP
-	BlockSizeKB        *int  `json:"blockSizeKB"`        // 密文对象块大小（KB，默认 1024）
-	ScrubOnDelete      *bool `json:"scrubOnDelete"`      // 回收/删除前覆盖明文（best-effort）
-	DefaultFilesMode   string `json:"defaultFilesMode"`  // 新实例文件区默认模式：plaintext | materialize
+	Enabled            *bool  `json:"enabled"`            // 加密保险库开关
+	IdleTimeoutMinutes *int   `json:"idleTimeoutMinutes"` // 会话空闲超时（分钟）
+	MaxAttempts        *int   `json:"maxAttempts"`        // 失败限速阈值
+	LockoutMinutes     *int   `json:"lockoutMinutes"`     // 锁定时长（分钟）
+	PBKDF2Iterations   *int   `json:"pbkdf2Iterations"`   // PBKDF2 迭代次数
+	PasswordMinLength  *int   `json:"passwordMinLength"`  // 密码最小长度
+	PasswordExpireDays *int   `json:"passwordExpireDays"` // 密码有效期（天，0=不过期）
+	ForceExpire        *bool  `json:"forceExpire"`        // 到期强制改密（解锁同请求）
+	BindSessionIP      *bool  `json:"bindSessionIP"`      // 会话绑定来源 IP
+	BlockSizeKB        *int   `json:"blockSizeKB"`        // 密文对象块大小（KB，默认 1024）
+	ScrubOnDelete      *bool  `json:"scrubOnDelete"`      // 回收/删除前覆盖明文（best-effort）
+	DefaultFilesMode   string `json:"defaultFilesMode"`   // 新实例文件区默认模式：plaintext | materialize
 }
 
 // Config config.json 配置文件结构。
@@ -55,18 +55,18 @@ type VaultConfig struct {
 // 字符串字段零值（""）与「未设置」语义天然一致（bind 回退环境变量/默认值、
 // apiKey 空 = 配对码机制、data 空 = 当前目录），无需指针。
 type Config struct {
-	Bind              string      `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
-	Port              int         `json:"port"`              // 监听端口（1-65535；0 = 未设置）
-	Data              string      `json:"data"`              // 数据目录（空 = 当前目录）
-	APIKey            string      `json:"apiKey"`            // 固定 API 密钥（空 = 启用配对码机制）
-	InstanceLog       *bool       `json:"instanceLog"`       // 实例日志落盘开关
-	InstanceLogMax    *int        `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
-	AuditLog          *bool       `json:"auditLog"`          // 审计日志落盘开关
-	AuditLogMax       *int        `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
-	LoadTune          *bool       `json:"loadTune"`          // 负载自适应调谐开关
-	TransferAllowCIDR string      `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
-	TLS               *TLSConfig  `json:"tls"`               // TLS 传输加密（nil = 未配置）
-	Vault             *VaultConfig `json:"vault"`            // 加密保险库（nil = 未配置）
+	Bind              string       `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
+	Port              int          `json:"port"`              // 监听端口（1-65535；0 = 未设置）
+	Data              string       `json:"data"`              // 数据目录（空 = 当前目录）
+	APIKey            string       `json:"apiKey"`            // 固定 API 密钥（空 = 启用配对码机制）
+	InstanceLog       *bool        `json:"instanceLog"`       // 实例日志落盘开关
+	InstanceLogMax    *int         `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
+	AuditLog          *bool        `json:"auditLog"`          // 审计日志落盘开关
+	AuditLogMax       *int         `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
+	LoadTune          *bool        `json:"loadTune"`          // 负载自适应调谐开关
+	TransferAllowCIDR string       `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
+	TLS               *TLSConfig   `json:"tls"`               // TLS 传输加密（nil = 未配置）
+	Vault             *VaultConfig `json:"vault"`             // 加密保险库（nil = 未配置）
 }
 
 //go:embed config.example.json
