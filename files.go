@@ -7,6 +7,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,16 +39,63 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	items, total, abs, err := listDir(cwd, queryParam(r, "target"),
-		atoiDefault(queryParam(r, "page"), 1), atoiDefault(queryParam(r, "page_size"), 100))
+	page := atoiDefault(queryParam(r, "page"), 1)
+	pageSize := atoiDefault(queryParam(r, "page_size"), 100)
+	target := queryParam(r, "target")
+	// vaultFiles 停止态：加密层列表（D8/D9）
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			abs, err := NormalizePath(cwd, target)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			logical := d.vaultAbsToLogical(w, uuid, cwd, abs)
+			if logical == "" {
+				return
+			}
+			items, err := d.vault.store.listDir(d.vault, logical)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			start := (page - 1) * pageSize
+			if start < 0 {
+				start = 0
+			}
+			end := start + pageSize
+			if end > len(items) {
+				end = len(items)
+			}
+			if start > len(items) {
+				start = len(items)
+			}
+			absPath := strings.ReplaceAll(strings.TrimPrefix(abs, cwd), "\\", "/")
+			if absPath == "" {
+				absPath = "/"
+			}
+			writeOK(w, map[string]any{
+				"items":        items[start:end],
+				"page":         page - 1,
+				"pageSize":     pageSize,
+				"total":        len(items),
+				"absolutePath": absPath,
+			})
+			return
+		}
+	}
+	items, total, abs, err := listDir(cwd, target, page, pageSize)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeOK(w, map[string]any{
 		"items":        items,
-		"page":         atoiDefault(queryParam(r, "page"), 1) - 1,
-		"pageSize":     atoiDefault(queryParam(r, "page_size"), 100),
+		"page":         page - 1,
+		"pageSize":     pageSize,
 		"total":        total,
 		"absolutePath": abs,
 	})
@@ -158,6 +206,48 @@ func (d *Daemon) handleFileReadWrite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// vaultFiles 停止态：加密层读写（D8/D9）
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			logical := d.vaultAbsToLogical(w, uuid, cwd, path)
+			if logical == "" {
+				return
+			}
+			if body.Text != nil {
+				if err := d.vault.store.writeFile(d.vault, logical, []byte(*body.Text)); err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+				writeOK(w, true)
+				return
+			}
+			e := d.vault.store.stat(logical)
+			if e == nil {
+				writeError(w, http.StatusBadRequest, "读取文件失败: 文件不存在")
+				return
+			}
+			if e.Size < 0 {
+				writeError(w, http.StatusBadRequest, "目标为目录，无法按文本读取")
+				return
+			}
+			if e.Size > maxTextReadBytes {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf(
+					"文件过大（%s），文本读取上限为 %s，请改用下载接口",
+					FormatSize(e.Size), FormatSize(maxTextReadBytes)))
+				return
+			}
+			data, err := d.vault.store.readFile(d.vault, logical)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "读取文件失败: "+err.Error())
+				return
+			}
+			writeOK(w, string(data))
+			return
+		}
+	}
 
 	if body.Text != nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -217,6 +307,23 @@ func (d *Daemon) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// vaultFiles 停止态：加密层删除
+		if inst := d.Find(uuid); inst != nil {
+			if mode, merr := d.vaultFilesMode(inst); merr != nil {
+				writeError(w, http.StatusBadRequest, merr.Error())
+				return
+			} else if mode == 1 {
+				logical := d.vaultAbsToLogical(w, uuid, cwd, path)
+				if logical == "" {
+					return
+				}
+				if err := d.vault.store.remove(d.vault, logical); err != nil {
+					writeError(w, http.StatusInternalServerError, "删除失败: "+err.Error())
+					return
+				}
+				continue
+			}
+		}
 		if err := os.RemoveAll(path); err != nil {
 			writeError(w, http.StatusInternalServerError, "删除失败: "+err.Error())
 			return
@@ -229,7 +336,7 @@ func (d *Daemon) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 // handleFileMove 移动或重命名。
 // PUT /api/files/move?daemonId&uuid  body: {targets: [[src, dst], ...]}
 func (d *Daemon) handleFileMove(w http.ResponseWriter, r *http.Request) {
-	cwd, _, ok := d.fileScope(w, r)
+	cwd, uuid, ok := d.fileScope(w, r)
 	if !ok {
 		return
 	}
@@ -253,6 +360,24 @@ func (d *Daemon) handleFileMove(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// vaultFiles 停止态：加密层移动（D14：仅索引迁移）
+		if inst := d.Find(uuid); inst != nil {
+			if mode, merr := d.vaultFilesMode(inst); merr != nil {
+				writeError(w, http.StatusBadRequest, merr.Error())
+				return
+			} else if mode == 1 {
+				lsrc := d.vaultAbsToLogical(w, uuid, cwd, src)
+				ldst := d.vaultAbsToLogical(w, uuid, cwd, dst)
+				if lsrc == "" || ldst == "" {
+					return
+				}
+				if err := d.vault.store.move(lsrc, ldst); err != nil {
+					writeError(w, http.StatusInternalServerError, "移动失败: "+err.Error())
+					return
+				}
+				continue
+			}
 		}
 		if err := os.Rename(src, dst); err != nil {
 			writeError(w, http.StatusInternalServerError, "移动失败: "+err.Error())
@@ -265,7 +390,7 @@ func (d *Daemon) handleFileMove(w http.ResponseWriter, r *http.Request) {
 // handleFileCopy 复制文件/目录。
 // POST /api/files/copy?daemonId&uuid  body: {targets: [[src, dst], ...]}
 func (d *Daemon) handleFileCopy(w http.ResponseWriter, r *http.Request) {
-	cwd, _, ok := d.fileScope(w, r)
+	cwd, uuid, ok := d.fileScope(w, r)
 	if !ok {
 		return
 	}
@@ -289,6 +414,24 @@ func (d *Daemon) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		// vaultFiles 停止态：加密层复制（D14：新对象 + 新 DEK）
+		if inst := d.Find(uuid); inst != nil {
+			if mode, merr := d.vaultFilesMode(inst); merr != nil {
+				writeError(w, http.StatusBadRequest, merr.Error())
+				return
+			} else if mode == 1 {
+				lsrc := d.vaultAbsToLogical(w, uuid, cwd, src)
+				ldst := d.vaultAbsToLogical(w, uuid, cwd, dst)
+				if lsrc == "" || ldst == "" {
+					return
+				}
+				if err := d.vault.store.copy(d.vault, lsrc, ldst); err != nil {
+					writeError(w, http.StatusInternalServerError, "复制失败: "+err.Error())
+					return
+				}
+				continue
+			}
 		}
 		if err := copyPath(src, dst); err != nil {
 			writeError(w, http.StatusInternalServerError, "复制失败: "+err.Error())
@@ -302,9 +445,20 @@ func (d *Daemon) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 // POST /api/files/compress?daemonId&uuid
 // body: {type: 1=压缩, 2=解压, code: "utf-8", source: 压缩包路径, targets: 目标文件列表 或 解压目录}
 func (d *Daemon) handleFileCompress(w http.ResponseWriter, r *http.Request) {
-	cwd, _, ok := d.fileScope(w, r)
+	cwd, uuid, ok := d.fileScope(w, r)
 	if !ok {
 		return
+	}
+	// vaultFiles 停止态：压缩/解压需要明文整树，暂不支持（M4 范围边界）
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			writeError(w, http.StatusBadRequest,
+				"该实例文件区已加密且未运行，压缩/解压暂不支持（请先启动实例，或改用文件读写接口）")
+			return
+		}
 	}
 	var body struct {
 		Type    int      `json:"type"`
@@ -357,7 +511,7 @@ func (d *Daemon) handleFileCompress(w http.ResponseWriter, r *http.Request) {
 // handleFileMkdir 创建文件夹。
 // POST /api/files/mkdir?daemonId&uuid  body: {target}
 func (d *Daemon) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
-	cwd, _, ok := d.fileScope(w, r)
+	cwd, uuid, ok := d.fileScope(w, r)
 	if !ok {
 		return
 	}
@@ -372,6 +526,24 @@ func (d *Daemon) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// vaultFiles 停止态：加密层建目录
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			logical := d.vaultAbsToLogical(w, uuid, cwd, path)
+			if logical == "" {
+				return
+			}
+			if err := d.vault.store.mkdir(logical); err != nil {
+				writeError(w, http.StatusInternalServerError, "创建失败: "+err.Error())
+				return
+			}
+			writeOK(w, true)
+			return
+		}
 	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建失败: "+err.Error())
@@ -383,7 +555,7 @@ func (d *Daemon) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
 // handleFileTouch 新建空文件。
 // POST /api/files/touch?daemonId&uuid  body: {target}
 func (d *Daemon) handleFileTouch(w http.ResponseWriter, r *http.Request) {
-	cwd, _, ok := d.fileScope(w, r)
+	cwd, uuid, ok := d.fileScope(w, r)
 	if !ok {
 		return
 	}
@@ -398,6 +570,24 @@ func (d *Daemon) handleFileTouch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// vaultFiles 停止态：加密层建空文件
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			logical := d.vaultAbsToLogical(w, uuid, cwd, path)
+			if logical == "" {
+				return
+			}
+			if err := d.vault.store.touch(d.vault, logical); err != nil {
+				writeError(w, http.StatusInternalServerError, "创建失败: "+err.Error())
+				return
+			}
+			writeOK(w, true)
+			return
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -421,6 +611,64 @@ func (d *Daemon) fileScope(w http.ResponseWriter, r *http.Request) (string, stri
 		return "", "", false
 	}
 	return cwd, uuid, true
+}
+
+// vaultFilesMode 判断实例文件区操作路径（docs/vault-design.md D8/D9）：
+//   - 0：明文（实例非 vaultFiles / 运行中（物化窗口）/ vault 未启用）；
+//   - 1：加密层（vaultFiles 且已停止且已解锁且未迁移中）。
+//
+// 返回错误时数据面不可用（锁定/迁移中/停止中）。
+func (d *Daemon) vaultFilesMode(inst *Instance) (int, error) {
+	if inst == nil || !inst.Config.VaultFiles {
+		return 0, nil
+	}
+	v := d.vault
+	if v == nil || !v.enabled {
+		return 0, nil
+	}
+	inst.mu.Lock()
+	status := inst.Status
+	inst.mu.Unlock()
+	if status == StatusRunning || status == StatusStarting {
+		return 0, nil // 运行期：明文物化窗口
+	}
+	if status == StatusStopping {
+		return 0, errors.New("实例正在停止，请稍后再试")
+	}
+	if !v.unlockedSafe() {
+		return 0, lockedErr()
+	}
+	v.mu.RLock()
+	migrating := v.migrating
+	v.mu.RUnlock()
+	if migrating {
+		return 0, errors.New("vault migrating")
+	}
+	return 1, nil
+}
+
+// vaultLogical 绝对路径 → 逻辑路径（须已 NormalizePath 校验）。
+// 根目录（cwd 本身）映射为 "/uuid"（不带尾斜杠）。
+func vaultLogical(uuid, cwd, abs string) (string, error) {
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil {
+		return "", err
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		return "/" + uuid, nil
+	}
+	return logicalPath(uuid, rel), nil
+}
+
+// vaultAbsToLogical 绝对路径 → 逻辑路径（返回错误时写入响应并返回空串）。
+func (d *Daemon) vaultAbsToLogical(w http.ResponseWriter, uuid, cwd, abs string) string {
+	logical, err := vaultLogical(uuid, cwd, abs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return ""
+	}
+	return logical
 }
 
 // copyPath 递归复制文件或目录。

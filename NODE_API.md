@@ -222,3 +222,50 @@ GET /api/container/info
 
 > 结论：MCSM 节点是多机模式中的「阉割」节点 —— 可托管实例、可作为迁移目标（先建实例再上传），
 > 但无法参与节点间直传与自组织；`irix-node` 补齐 `docs/cluster-node-api.md` 的 P0–P2 后可实现真正的节点间直传 + 自组织。
+
+---
+
+## 9. 加密保险库 Vault（irix-node 全功能）
+
+可选功能（`-vault` 开启，强制要求 TLS）。完整设计见 `docs/vault-design.md`；
+客户端对接要点：**证书在客户端解析**（P12/GPG → 标准 PEM），私钥永不上送，
+解锁时对挑战签名（RSA PKCS#1 v1.5 + SHA-256 / ECDSA ASN.1 DER，签名消息 =
+前缀 + 挑战字符串，base64 无填充）。
+
+### 9.1 会话与状态
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/vault/status` | `{enabled, initialized, locked, user?, expiresIn?, passwordExpired?}` |
+| `POST /api/vault/challenge` | `{purpose: "unlock"\|"cert-bind"}` → `{challengeId, challenge}`；一次性，5 分钟有效 |
+| `POST /api/vault/unlock` | `{user, password, totp, challengeId, signature, newPassword?}` → `{sessionToken, expiresIn}` |
+| `POST /api/vault/lock` | 立即锁定（需 `X-Vault-Token` 头） |
+| `POST /api/vault/recovery` | `{recoveryToken, user?}` → 5 分钟恢复会话（改密/重绑 TOTP/换绑证书） |
+
+### 9.2 初始化与用户
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/vault/init` | `{user, password}` → `{initToken, totpSecret, otpauthURI, recoveryToken}`（仅未初始化时；recoveryToken 仅显示一次） |
+| `POST /api/vault/totp/verify` | `{code}`（`X-Vault-Token: initToken` 或恢复/解锁会话） |
+| `POST /api/vault/totp/reset` | 重绑 TOTP（恢复/解锁会话） |
+| `POST /api/vault/cert` | `{certPem, challengeId, signature}`（initToken / 解锁 / 恢复会话；SPKI 指纹绑定） |
+| `POST /api/vault/password` | `{oldPassword?, newPassword}`（解锁会话需旧密码；恢复会话免） |
+| `POST /api/vault/user/add` / `remove` / `GET /api/vault/users` | 多用户管理（禁删最后一个用户） |
+
+### 9.3 数据面
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/vault/migrate` / `GET /api/vault/migrate/status` | 两阶段迁移（instances.json + vaultFiles 文件树；幂等续跑，`{phase, done, total, bytes}`） |
+| `POST /api/vault/backup` | 加密备份包（zip：vault.json + 索引 + 对象，不含密钥材料） |
+
+**数据面门禁**：vault 启用后，未初始化 → `403 vault not initialized`；锁定 →
+`403 vault locked`；迁移中 → `403 vault migrating`。解锁后数据面请求须携带
+`X-Vault-Token` 头（禁止 query string 传令牌）。`/api/overview`、`/api/load`
+豁免（overview 锁定态脱敏）。
+
+**实例文件区**：`vaultFiles: true` 的实例启停物化加密（停止时整树加密入库，
+启动前物化）；已停止状态下文件 API 走加密层（列表/读写/删除/移动/复制/
+建目录/建文件），直连下载/上传与压缩/解压暂不支持（返回明确错误）。
+

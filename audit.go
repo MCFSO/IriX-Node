@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -159,6 +160,47 @@ func (d *Daemon) auditLogf(format string, args ...any) {
 	}
 }
 
+// vaultMaskFields 保险库请求体中的敏感字段（值一律打码，docs/vault-design.md §11）。
+// 覆盖：密码类、TOTP 验证码、挑战签名、恢复令牌、会话令牌。
+var vaultMaskFields = []string{
+	`"password"`, `"newPassword"`, `"oldPassword"`,
+	`"totp"`, `"signature"`, `"recoveryToken"`, `"sessionToken"`,
+}
+
+// vaultMaskCodeRE 打码 "code" 字段（TOTP 验证码）。该字段名通用，仅在
+// /api/vault/* 路径打码，避免误伤其他 API 的同名字段。
+var vaultMaskCodeRE = regexp.MustCompile(`"code"\s*:\s*"[^"]*"`)
+
+// vaultMaskRedactors 预编译的敏感字段替换器（"field":"值" → "field":"***"）。
+var vaultMaskRedactors = func() []*regexp.Regexp {
+	reds := make([]*regexp.Regexp, 0, len(vaultMaskFields))
+	for _, f := range vaultMaskFields {
+		reds = append(reds, regexp.MustCompile(regexp.QuoteMeta(f)+`\s*:\s*"[^"]*"`))
+	}
+	return reds
+}()
+
+// maskFieldValue 保留字段名、打码字段值（"password":"abc" → "password":"***"）。
+func maskFieldValue(m string) string {
+	if i := strings.Index(m, ":"); i >= 0 {
+		return m[:i+1] + `"***"`
+	}
+	return `"***"`
+}
+
+// redactBody 将请求体前缀中的保险库敏感字段值打码。
+// vaultPath=true 时额外打码 "code" 字段。请求体只捕获前 auditBodyMax 字节，
+// 截断处未闭合的字段值可能残留 —— 审计行带「(截断)」标记，属可接受边界。
+func redactBody(s string, vaultPath bool) string {
+	for _, re := range vaultMaskRedactors {
+		s = re.ReplaceAllStringFunc(s, maskFieldValue)
+	}
+	if vaultPath {
+		s = vaultMaskCodeRE.ReplaceAllStringFunc(s, maskFieldValue)
+	}
+	return s
+}
+
 // auditMiddleware 记录每一次请求的审计日志（替换原 logMiddleware）：
 //
 //	时间 | 来源 IP | 方法 路径+查询（apikey 打码）| 状态码 | 耗时 | 请求体前缀
@@ -177,7 +219,7 @@ func (d *Daemon) auditMiddleware(next http.Handler) http.Handler {
 
 		body := ""
 		if ab != nil {
-			body = string(ab.kept)
+			body = redactBody(string(ab.kept), strings.HasPrefix(r.URL.Path, "/api/vault/"))
 			if ab.truncated {
 				body += "…(截断)"
 			}

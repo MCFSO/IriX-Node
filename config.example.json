@@ -19,5 +19,37 @@
   "_comment_loadTune": "loadTune: 根据节点负载动态调整 GOMAXPROCS 与 GOGC，状态见 GET /api/load，默认 true。",
   "loadTune": true,
   "_comment_transferAllowCidr": "transferAllowCidr: 集群拉取放行的内网 CIDR（逗号分隔）。默认拒绝全部 RFC1918 内网地址；集群 LAN 直传需显式配置，如 192.168.0.0/16,10.0.0.0/8。环回/链路本地/本机地址不可放行。",
-  "transferAllowCidr": ""
+  "transferAllowCidr": "",
+  "_comment_tls": "tls: TLS 传输加密（可选，默认 off 保持现状，不强制）。等保二级部署请开启：auto = 自动生成自签证书（首次启动生成 {data}/tls/，启动日志打印证书指纹，客户端按指纹固定校验）；manual = 使用 tls.cert / tls.key 指定的正式证书。",
+  "tls": {
+    "mode": "off",
+    "cert": "",
+    "key": ""
+  },
+  "_comment_vault": "vault: 加密保险库（可选，默认关闭，由用户显式开启）。开启后实例配置等数据以 AES-256-GCM 加密存储，访问需 TOTP+密码+证书签名解锁（见 docs/vault-design.md）。开启时强制要求 TLS（tls.mode 不能为 off），否则拒绝启动。",
+  "vault": {
+    "enabled": false,
+    "_comment_idleTimeoutMinutes": "idleTimeoutMinutes: 解锁会话空闲超时（分钟），到期自动锁定，默认 30。",
+    "idleTimeoutMinutes": 30,
+    "_comment_maxAttempts": "maxAttempts: unlock/recovery/初始化 TOTP 验证的统一失败限速阈值（用户+IP 双维度），默认 5。",
+    "maxAttempts": 5,
+    "_comment_lockoutMinutes": "lockoutMinutes: 超过限速阈值后的锁定时长（分钟），默认 15。",
+    "lockoutMinutes": 15,
+    "_comment_pbkdf2Iterations": "pbkdf2Iterations: 密码派生密钥的 PBKDF2 迭代次数，默认 600000（OWASP 建议；解锁为一次性成本，可调高）。",
+    "pbkdf2Iterations": 600000,
+    "_comment_passwordMinLength": "passwordMinLength: 密码最小长度，默认 12（须含大写、小写与数字）。",
+    "passwordMinLength": 12,
+    "_comment_passwordExpireDays": "passwordExpireDays: 密码有效期（天），到期后解锁响应提示 passwordExpired，默认 90。0 = 不过期。",
+    "passwordExpireDays": 90,
+    "_comment_forceExpire": "forceExpire: 密码到期后强制改密：解锁请求必须携带 newPassword，同请求完成解锁+改密，默认 false。",
+    "forceExpire": false,
+    "_comment_bindSessionIP": "bindSessionIP: 会话令牌绑定来源 IP（防令牌跨机器盗用；动态 IP 场景请保持 false），默认 false。",
+    "bindSessionIP": false,
+    "_comment_blockSizeKB": "blockSizeKB: 密文对象分块大小（KB，1-65536），默认 1024。分块随机读的粒度，越小越省按需解密开销、越大磁盘利用率越高。",
+    "blockSizeKB": 1024,
+    "_comment_scrubOnDelete": "scrubOnDelete: 回收/删除明文前覆盖随机数据（best-effort 防介质残留；大文件树会显著变慢），默认 false。",
+    "scrubOnDelete": false,
+    "_comment_defaultFilesMode": "defaultFilesMode: 新实例文件区默认模式：plaintext（明文，默认，兼容现状）/ materialize（启停物化加密，新实例默认 vaultFiles=true）。",
+    "defaultFilesMode": "plaintext"
+  }
 }

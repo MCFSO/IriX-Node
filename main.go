@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +39,21 @@ func main() {
 		auditLogMB    = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		loadTune      = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
 		transferCIDR  = flag.String("transfer-allow-cidr", "", "集群拉取（POST /api/cluster/transfer）额外放行的内网 CIDR 列表（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置（环回/链路本地/本机地址任何配置都不可放行）")
+		tlsMode       = flag.String("tls-mode", "off", "TLS 模式：off（默认，明文 HTTP，与既有部署兼容）/ auto（自动生成自签证书，启动日志打印指纹，客户端按指纹固定校验）/ manual（使用 -tls-cert / -tls-key 指定的正式证书）；开启加密保险库（-vault）时强制要求 TLS")
+		tlsCertFile   = flag.String("tls-cert", "", "manual 模式：TLS 证书文件路径（PEM）")
+		tlsKeyFile    = flag.String("tls-key", "", "manual 模式：TLS 私钥文件路径（PEM）")
+		vaultEnabled  = flag.Bool("vault", false, "启用加密保险库：数据加密存储，访问需 TOTP+密码+证书签名解锁（见 docs/vault-design.md；开启时强制要求 TLS，否则拒绝启动）")
+		vaultIdle     = flag.Int("vault-idle-timeout", 30, "保险库解锁会话空闲超时（分钟），到期自动锁定")
+		vaultAttempts = flag.Int("vault-max-attempts", 5, "保险库 unlock/recovery/初始化验证的统一失败限速阈值（用户+IP 双维度）")
+		vaultLockout  = flag.Int("vault-lockout-minutes", 15, "保险库失败限速触发后的锁定时长（分钟）")
+		vaultKDFIter  = flag.Int("vault-pbkdf2-iterations", 600000, "保险库密码派生 KEK 的 PBKDF2 迭代次数")
+		vaultPwMinLen = flag.Int("vault-password-min-length", 12, "保险库密码最小长度（须含大写、小写与数字）")
+		vaultPwExpire = flag.Int("vault-password-expire-days", 90, "保险库密码有效期（天，0=不过期），到期解锁响应提示 passwordExpired")
+		vaultForceExp = flag.Bool("vault-force-expire", false, "保险库密码到期强制改密：解锁请求必须携带 newPassword 同请求完成解锁+改密")
+		vaultBindIP   = flag.Bool("vault-bind-session-ip", false, "保险库会话令牌绑定来源 IP（防令牌跨机器盗用；动态 IP 场景请保持关闭）")
+		vaultBlockKB  = flag.Int("vault-block-size-kb", 1024, "保险库密文对象块大小（KB，1-65536；分块随机读的粒度）")
+		vaultScrub    = flag.Bool("vault-scrub-on-delete", false, "保险库回收/删除明文前覆盖随机数据（best-effort，防介质残留）")
+		vaultFilesDef = flag.String("vault-default-files-mode", "plaintext", "保险库新实例文件区默认模式：plaintext（明文，默认）/ materialize（启停物化加密）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -56,6 +72,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -transfer-allow-cidr 192.168.0.0/16  # 集群 LAN 直传放行内网网段\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -tls-mode auto              # 开启 TLS（自签证书，按启动日志指纹校验）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -tls-mode auto -vault       # 开启 TLS 与加密保险库（TOTP+密码+证书解锁）\n")
 	}
 	flag.Parse()
 
@@ -86,6 +104,21 @@ func main() {
 		AuditLogMax:       *auditLogMB,
 		LoadTune:          *loadTune,
 		TransferAllowCIDR: *transferCIDR,
+		TLSMode:                *tlsMode,
+		TLSCert:                *tlsCertFile,
+		TLSKey:                 *tlsKeyFile,
+		VaultEnabled:           *vaultEnabled,
+		VaultIdleTimeout:       *vaultIdle,
+		VaultMaxAttempts:       *vaultAttempts,
+		VaultLockoutMinutes:    *vaultLockout,
+		VaultPBKDF2Iterations:  *vaultKDFIter,
+		VaultPasswordMinLen:    *vaultPwMinLen,
+		VaultPasswordExpire:    *vaultPwExpire,
+		VaultForceExpire:       *vaultForceExp,
+		VaultBindSessionIP:     *vaultBindIP,
+		VaultBlockSizeKB:       *vaultBlockKB,
+		VaultScrubOnDelete:     *vaultScrub,
+		VaultDefaultFilesMode:  *vaultFilesDef,
 	}
 	opts.applyConfig(cfg, setFlags)
 
@@ -95,6 +128,45 @@ func main() {
 	if opts.InstanceLogMax < 1 || opts.AuditLogMax < 1 {
 		log.Fatalf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
 			opts.InstanceLogMax, opts.AuditLogMax, *configPath)
+	}
+	switch opts.TLSMode {
+	case "off", "auto", "manual":
+	default:
+		log.Fatalf("tls-mode 无效: %q（须为 off / auto / manual；请检查命令行参数或配置文件 %s）", opts.TLSMode, *configPath)
+	}
+	if opts.TLSMode == "manual" && (opts.TLSCert == "" || opts.TLSKey == "") {
+		log.Fatalf("tls-mode=manual 需要同时配置 tls-cert 与 tls-key（请检查命令行参数或配置文件 %s）", *configPath)
+	}
+	if opts.VaultEnabled && opts.TLSMode == "off" {
+		log.Fatalf("启用加密保险库（-vault）必须开启 TLS（tls-mode=auto 或 manual）：密码/TOTP/签名明文传输将完全破坏 Vault 的安全模型")
+	}
+	if opts.VaultEnabled {
+		if opts.VaultIdleTimeout < 1 {
+			log.Fatalf("vault-idle-timeout 无效: %d 分钟（须 ≥1）", opts.VaultIdleTimeout)
+		}
+		if opts.VaultMaxAttempts < 1 {
+			log.Fatalf("vault-max-attempts 无效: %d（须 ≥1）", opts.VaultMaxAttempts)
+		}
+		if opts.VaultLockoutMinutes < 1 {
+			log.Fatalf("vault-lockout-minutes 无效: %d 分钟（须 ≥1）", opts.VaultLockoutMinutes)
+		}
+		if opts.VaultPBKDF2Iterations < 10000 {
+			log.Fatalf("vault-pbkdf2-iterations 无效: %d（须 ≥10000）", opts.VaultPBKDF2Iterations)
+		}
+		if opts.VaultPasswordMinLen < 1 {
+			log.Fatalf("vault-password-min-length 无效: %d（须 ≥1）", opts.VaultPasswordMinLen)
+		}
+		if opts.VaultPasswordExpire < 0 {
+			log.Fatalf("vault-password-expire-days 无效: %d（须 ≥0）", opts.VaultPasswordExpire)
+		}
+		if opts.VaultBlockSizeKB < 1 || opts.VaultBlockSizeKB > 65536 {
+			log.Fatalf("vault-block-size-kb 无效: %d（须在 1-65536 之间）", opts.VaultBlockSizeKB)
+		}
+		switch opts.VaultDefaultFilesMode {
+		case "plaintext", "materialize":
+		default:
+			log.Fatalf("vault-default-files-mode 无效: %q（须为 plaintext 或 materialize）", opts.VaultDefaultFilesMode)
+		}
 	}
 	if opts.DataDir == "" {
 		wd, err := os.Getwd()
@@ -123,19 +195,56 @@ func main() {
 	}
 	if opts.AuditLog {
 		d.AuditLog = newFileLogger(logDir, "audit.log", int64(opts.AuditLogMax)<<20)
+		// 审计日志轮转归档（等保二级「审计记录保护与定期备份」）：
+		// 每次轮转把将被覆盖的审计段复制到 {data}/backup/audit/
+		d.AuditLog.archiveDir = filepath.Join(opts.DataDir, "backup", "audit")
 	}
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
 	d.frpLoad() // 加载 FRP 隧道列表（进程态重置为停止，由用户手动启动）
-	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）
-	for _, inst := range d.Instances {
-		if inst.Config.EventTask.AutoStart {
-			go func(inst *Instance) {
-				if err := d.startInstance(inst); err != nil {
-					alog.Printf("自动启动实例 %s 失败: %v", inst.InstanceUuid, err)
-				}
-			}(inst)
+
+	// 加密保险库初始化（vault.go）：加载 vault.json、应用调优配置。
+	// 数据面门禁（vaultGate）在下方处理链中挂载。
+	if opts.VaultEnabled {
+		d.vault.enabled = true
+		d.vault.idleTimeout = time.Duration(opts.VaultIdleTimeout) * time.Minute
+		d.vault.maxAttempts = opts.VaultMaxAttempts
+		d.vault.lockoutDuration = time.Duration(opts.VaultLockoutMinutes) * time.Minute
+		d.vault.pbkdf2Iterations = opts.VaultPBKDF2Iterations
+		d.vault.passwordMinLen = opts.VaultPasswordMinLen
+		d.vault.passwordExpire = time.Duration(opts.VaultPasswordExpire) * 24 * time.Hour
+		d.vault.forceExpire = opts.VaultForceExpire
+		d.vault.bindSessionIP = opts.VaultBindSessionIP
+		d.vault.scrubOnDelete = opts.VaultScrubOnDelete
+		d.vault.defaultFilesMode = opts.VaultDefaultFilesMode
+		if opts.VaultBlockSizeKB != 0 {
+			d.vault.blockSizeKB = opts.VaultBlockSizeKB
+			d.vault.store.blockSize = opts.VaultBlockSizeKB * 1024
+		}
+		if err := d.vault.load(filepath.Join(opts.DataDir, "vault", "vault.json")); err != nil {
+			log.Fatalf("加载保险库状态失败: %v", err)
+		}
+		if d.vault.initialized {
+			alog.Printf("加密保险库已启用（已初始化，当前锁定：请先解锁再访问数据）")
+		} else {
+			alog.Printf("加密保险库已启用（未初始化：请调用 POST /api/vault/init 完成初始化）")
+		}
+	}
+
+	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）。
+	// vault 开启时跳过：重启后保险库处于锁定状态，必须先解锁才能操作实例。
+	if opts.VaultEnabled {
+		alog.Printf("保险库已启用：跳过实例自动启动（解锁后才能启动实例）")
+	} else {
+		for _, inst := range d.Instances {
+			if inst.Config.EventTask.AutoStart {
+				go func(inst *Instance) {
+					if err := d.startInstance(inst); err != nil {
+						alog.Printf("自动启动实例 %s 失败: %v", inst.InstanceUuid, err)
+					}
+				}(inst)
+			}
 		}
 	}
 	if opts.APIKey == "" {
@@ -160,10 +269,40 @@ func main() {
 	d.BindHost = bind
 	addr := net.JoinHostPort(bind, strconv.Itoa(opts.Port))
 
+	// TLS 初始化：auto 生成自签证书 / manual 加载正式证书 / off 保持明文（打印一行提示）
+	var tlsCfg *tls.Config
+	tlsFingerprint := ""
+	switch opts.TLSMode {
+	case "auto":
+		tlsCfg, tlsFingerprint, err = ensureSelfSignedTLS(filepath.Join(opts.DataDir, "tls"))
+		if err != nil {
+			log.Fatalf("TLS 自签证书初始化失败: %v", err)
+		}
+	case "manual":
+		tlsCfg, tlsFingerprint, err = loadManualTLS(opts.TLSCert, opts.TLSKey)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+	default:
+		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
+	}
+
 	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
+	}
+	// TLS 开启时在监听器上包一层 tls.NewListener（日志包装保持最外层）
+	var serveLn net.Listener = &connLogListener{Listener: ln, d: d}
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+		serveLn = &connLogListener{Listener: tls.NewListener(ln, tlsCfg), d: d}
+		if tlsFingerprint != "" {
+			alog.Printf("TLS 已开启（%s 模式），证书指纹（SHA-256）: %s", opts.TLSMode, tlsFingerprint)
+		} else {
+			alog.Printf("TLS 已开启（%s 模式）", opts.TLSMode)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -171,7 +310,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: d.auditMiddleware(limitAPIBody(mux)),
+		Handler: d.auditMiddleware(d.vaultGate(limitAPIBody(mux))),
 		// 只限制读取请求头与空闲连接：防 slowloris 占用连接。
 		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
 		ReadHeaderTimeout: 10 * time.Second,
@@ -183,7 +322,7 @@ func main() {
 		d.auditLogf("已加载配置文件: %s", *configPath)
 	}
 	d.auditLogf("数据目录: %s", opts.DataDir)
-	d.auditLogf("监听地址: http://%s/api/overview", addr)
+	d.auditLogf("监听地址: %s://%s/api/overview", scheme, addr)
 	if d.LogDir != "" {
 		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, opts.InstanceLogMax)
 	}
@@ -213,10 +352,17 @@ func main() {
 		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
 		d.StopAll(30 * time.Second)
 		d.frpStopAll() // 停止全部 FRP 隧道进程
+		// 保险库：进程退出前落盘加密索引（解锁状态下的最后变更不能丢）
+		if d.vault != nil && d.vault.enabled && d.vault.unlockedSafe() {
+			if err := d.vault.store.flush(); err != nil {
+				alog.Printf("保险库索引落盘失败: %v", err)
+			}
+			d.auditLogf("保险库索引已落盘（关停）")
+		}
 		close(stopped)
 	}()
 
-	if err := srv.Serve(&connLogListener{Listener: ln, d: d}); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(serveLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("HTTP 服务启动失败: %v", err)
 	}
 	<-stopped

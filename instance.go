@@ -160,6 +160,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 
 	// 集群节点 API（P0-P2，docs/cluster-node-api.md）
 	d.registerClusterRoutes(mux)
+
+	// 加密保险库（M3，docs/vault-design.md §10）
+	d.registerVaultRoutes(mux)
 }
 
 // auth 包装器：校验 API 密钥。
@@ -284,6 +287,7 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.FillDefaults()
+	d.applyVaultDefault(&cfg)
 	abs, err := normalizeCwd(cfg.Cwd)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -515,6 +519,13 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	if lc != nil {
 		lc.name = inst.InstanceUuid + ".log"
 	}
+	// vaultFiles 物化（D9）：崩溃残留回收（幂等）→ 余量预检 → 解密物化到工作目录
+	if inst.Config.VaultFiles {
+		if err := d.vaultMaterialize(inst, cwd); err != nil {
+			inst.SetStatus(StatusStopped)
+			return fmt.Errorf("文件区物化失败: %w", err)
+		}
+	}
 	proc, err := startProcess(startCommand, cwd, lc)
 	if err != nil {
 		inst.SetStatus(StatusStopped)
@@ -554,6 +565,11 @@ func (d *Daemon) startInstance(inst *Instance) error {
 
 // autoRestart 自动重启实例（防崩溃循环：10 秒窗口内最多 3 次）。
 func (d *Daemon) autoRestart(inst *Instance) {
+	// 保险库锁定态禁止自动重启（docs/vault-design.md §7.3）
+	if d.vault != nil && d.vault.enabled && !d.vault.unlockedSafe() {
+		d.auditLogf("vault.autoRestart.blocked 实例 %s 自动重启被拒绝（保险库锁定）", inst.InstanceUuid)
+		return
+	}
 	inst.mu.Lock()
 	now := time.Now()
 	if now.Sub(inst.arWindowStart) > 10*time.Second {
@@ -584,13 +600,18 @@ func (d *Daemon) StopAll(timeout time.Duration) {
 	d.mu.Unlock()
 
 	var wg sync.WaitGroup
+	type recycler struct {
+		inst *Instance
+		cwd  string
+	}
+	var toRecycle []recycler
 	for _, inst := range insts {
 		inst.mu.Lock()
 		proc := inst.Proc
 		// 提前解除引用：关停属于主动行为，不触发 AutoRestart
 		inst.Proc = nil
 		// 昵称必须在锁内取出：goroutine 里读 inst.Config 与并发 Update 竞争
-		stopCmd, nickname := inst.Config.StopCommand, inst.Config.Nickname
+		stopCmd, nickname, cwd := inst.Config.StopCommand, inst.Config.Nickname, inst.Config.Cwd
 		inst.mu.Unlock()
 		if proc == nil || !proc.IsRunning() {
 			continue
@@ -604,8 +625,17 @@ func (d *Daemon) StopAll(timeout time.Duration) {
 			}
 			inst.SetStatus(StatusStopped)
 		}(inst, proc, stopCmd, nickname)
+		if inst.Config.VaultFiles {
+			toRecycle = append(toRecycle, recycler{inst, cwd})
+		}
 	}
 	wg.Wait()
+	// vaultFiles 回收（D9）：优雅关停时整树加密入库（串行，避免并发回收竞态）
+	for _, rc := range toRecycle {
+		if err := d.vaultRecycle(rc.inst, rc.cwd); err != nil {
+			alog.Printf("实例 %s 文件树回收失败（解锁后自动重试）: %v", rc.inst.InstanceUuid, err)
+		}
+	}
 	if err := d.Save(); err != nil {
 		alog.Printf("关停时保存实例状态失败: %v", err)
 	}
@@ -633,6 +663,7 @@ func (d *Daemon) stopInstance(inst *Instance) error {
 	proc := inst.Proc
 	inst.Proc = nil // 先解除引用再等待退出，防止误触发 AutoRestart
 	stopCmd := inst.Config.StopCommand
+	cwd := inst.Config.Cwd
 	inst.mu.Unlock()
 	defer func() {
 		inst.mu.Lock()
@@ -643,5 +674,11 @@ func (d *Daemon) stopInstance(inst *Instance) error {
 	err := proc.Stop(stopCmd, 30*time.Second)
 	inst.SetStatus(StatusStopped)
 	_ = d.Save()
+	// vaultFiles 回收（D9）：停止后整树加密入库并删除明文
+	if inst.Config.VaultFiles {
+		if rerr := d.vaultRecycle(inst, cwd); rerr != nil {
+			alog.Printf("实例 %s 文件树回收失败（解锁后或下次启动时重试）: %v", inst.InstanceUuid, rerr)
+		}
+	}
 	return err
 }

@@ -59,6 +59,9 @@ type InstanceConfig struct {
 	Crlf              int        `json:"crlf"`
 	EventTask         EventTask  `json:"eventTask"`
 	PingConfig        PingConfig `json:"pingConfig"`
+	// VaultFiles 文件区加密（docs/vault-design.md D8/D9）：true = 启停物化加密
+	// （停止时整树加密入库，启动前物化到工作目录）；false = 明文（默认）。
+	VaultFiles bool `json:"vaultFiles"`
 }
 
 // FillDefaults 补齐空字段的默认值。
@@ -228,11 +231,15 @@ type Daemon struct {
 	// 解析结果存 transferAllowNets（启动时解析一次，之后只读）。
 	transferAllowCIDR string
 	transferAllowNets []*net.IPNet
+
+	// vault 加密保险库状态（vault.go/vault_handlers.go；enabled=false 时
+	// 全部 vault 路由返回未启用、数据面门禁放行）。
+	vault *vaultState
 }
 
 // NewDaemon 创建守护进程实例。
 func NewDaemon(dataDir, apiKey string) *Daemon {
-	return &Daemon{
+	d := &Daemon{
 		DataDir:         dataDir,
 		APIKey:          apiKey,
 		Port:            12346,
@@ -247,6 +254,8 @@ func NewDaemon(dataDir, apiKey string) *Daemon {
 		transfers:       map[string]*transferJob{},
 		tasks:           newTaskStore(),
 	}
+	d.vault = newVaultState(d)
+	return d
 }
 
 // logConfig 返回实例日志落盘配置；LogDir 为空时返回 nil（不落盘）。
@@ -272,6 +281,11 @@ func (d *Daemon) instanceFile() string {
 // 若 instances.json 损坏（崩溃中断写盘等），将损坏文件备份为
 // instances.json.corrupt-<时间戳> 后按空列表继续启动，保证守护进程可用。
 func (d *Daemon) Load() error {
+	// 保险库模式：实例列表已加密迁移，启动时跳过明文加载（解锁后从加密对象加载）
+	if d.vault != nil && d.vault.enabled && d.vault.initialized && d.vault.instancesMigrated() {
+		alog.Printf("保险库模式：实例列表加密存储，解锁后加载")
+		return nil
+	}
 	data, err := os.ReadFile(d.instanceFile())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -337,6 +351,14 @@ func (d *Daemon) Save() error {
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
+	}
+	// 保险库模式：实例列表写入加密对象（原子换对象 + 索引脏落盘）
+	if d.vaultActive() {
+		if err := d.vault.store.writeFile(d.vault, systemInstancesPath, data); err != nil {
+			return fmt.Errorf("加密持久化实例列表失败: %w", err)
+		}
+		_ = d.vault.store.flush()
+		return nil
 	}
 	tmp := d.instanceFile() + ".tmp"
 	// 不用 os.WriteFile：必须 fsync 后再 rename，
@@ -424,6 +446,12 @@ func (d *Daemon) Remove(uuid string, deleteFiles bool) error {
 
 	if deleteFiles && cwd != "" {
 		_ = os.RemoveAll(cwd)
+	}
+	// vaultFiles：删除该实例在加密层的全部对象（D8/D9 清理）
+	if d.vault != nil && d.vault.enabled && d.vaultActive() && inst.Config.VaultFiles {
+		if err := d.vault.store.remove(d.vault, "/"+uuid); err != nil && !os.IsNotExist(err) {
+			alog.Printf("删除实例 %s 加密对象失败: %v", uuid, err)
+		}
 	}
 	return d.Save()
 }

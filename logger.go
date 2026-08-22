@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,10 @@ type fileLogger struct {
 	maxSize  int64         // 单文件轮转上限（字节）
 	keep     int           // 轮转保留份数（.1 … .keep），默认 1
 	interval time.Duration // 时间轮转间隔（0 = 不启用）
+	// archiveDir 非空时，每次轮转把即将被覆盖的 .1 归档到该目录
+	// （<基名>-<时间戳>.log）。审计日志启用此机制（等保二级「审计记录
+	// 保护与定期备份」，docs/vault-design.md §11）；实例日志不启用。
+	archiveDir string
 
 	// 以下字段仅由消费 goroutine 访问
 	file   *os.File
@@ -247,12 +252,16 @@ func (f *fileLogger) open() error {
 
 // rotate 轮转：当前文件落盘后沿 .1 → .2 → … → .keep 依次后移
 // （最旧的 .keep 直接删除），当前文件变为新的 .1，再新建当前文件。
+// 轮转前先把即将被覆盖的 .1 归档（archiveDir 非空时，见 archiveRotated）。
 func (f *fileLogger) rotate() error {
 	if f.buf != nil {
 		_ = f.buf.Flush()
 	}
 	_ = f.file.Close()
 	f.file, f.buf = nil, nil
+	if f.archiveDir != "" {
+		f.archiveRotated()
+	}
 	if f.keep > 1 {
 		_ = os.Remove(f.path + fmt.Sprintf(".%d", f.keep))
 		for i := f.keep - 1; i >= 1; i-- {
@@ -270,6 +279,27 @@ func (f *fileLogger) rotate() error {
 		_ = os.Remove(f.path)
 	}
 	return f.open()
+}
+
+// archiveRotated 把即将被 .1 覆盖的旧轮转文件复制到归档目录
+// （{archiveDir}/{基名}-{时间戳}.log）。best-effort：失败仅告警，不阻断轮转。
+// 消费 goroutine 内调用（rotate 路径）。
+func (f *fileLogger) archiveRotated() {
+	src := f.path + ".1"
+	if _, err := os.Stat(src); err != nil {
+		return // 尚无轮转文件可归档
+	}
+	dir := f.archiveDir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		alog.Printf("警告: 日志归档目录创建失败 %s: %v", dir, err)
+		return
+	}
+	base := strings.TrimSuffix(filepath.Base(f.path), filepath.Ext(f.path))
+	// 毫秒精度：测试与高频轮转场景下同一秒内多次轮转不互相覆盖
+	dst := filepath.Join(dir, fmt.Sprintf("%s-%s.log", base, time.Now().Format("20060102-150405.000")))
+	if err := copyFile(src, dst); err != nil {
+		alog.Printf("警告: 日志归档 %s 失败: %v", dst, err)
+	}
 }
 
 // Clear 清空日志：删除当前文件与全部轮转文件（由消费 goroutine 执行，

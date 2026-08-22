@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -187,5 +188,35 @@ func TestSanitizeLog(t *testing.T) {
 	}
 	if got := sanitizeLog("正常日志"); got != "正常日志" {
 		t.Errorf("无控制字符时不应改写: %q", got)
+	}
+}
+
+// TestAuditLogArchive 审计日志轮转归档（等保二级「审计记录保护与定期备份」）：
+// 每次轮转把将被覆盖的审计段复制到归档目录，防止轮转覆盖丢失历史。
+func TestAuditLogArchive(t *testing.T) {
+	dir := t.TempDir()
+	archive := t.TempDir()
+	f := newFileLogger(dir, "audit.log", 1024)
+	f.archiveDir = archive
+	line := bytes.Repeat([]byte("A"), 200) // 200B/段
+	for i := 0; i < 20; i++ {
+		_, _ = f.Write(line)
+	}
+	f.Close()
+	entries, err := os.ReadDir(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("归档文件应 ≥2 个，实际 %d（轮转未触发或归档未生效）", len(entries))
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(archive, e.Name()))
+		if err != nil {
+			t.Fatalf("读取归档失败 %s: %v", e.Name(), err)
+		}
+		if len(data) < 200 {
+			t.Fatalf("归档内容异常（应含完整审计段）: %s 仅 %d 字节", e.Name(), len(data))
+		}
 	}
 }

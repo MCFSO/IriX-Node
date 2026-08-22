@@ -73,6 +73,7 @@ func (d *Daemon) handleInstanceImport(w http.ResponseWriter, r *http.Request) {
 		Type:     "universal",
 	}
 	cfg.FillDefaults()
+	d.applyVaultDefault(&cfg)
 	cfg.CreateDatetime = time.Now().UnixMilli()
 	cfg.LastDatetime = cfg.CreateDatetime
 	inst := NewInstance("", cfg)

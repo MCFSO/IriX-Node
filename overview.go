@@ -50,6 +50,12 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	instances := d.List()
 	running := d.CountRunning()
+	// vault 启用且未解锁/未初始化时脱敏：不泄露实例数量与运行状态
+	// （docs/vault-design.md §7.3，/api/overview 为门禁豁免路径）。
+	if d.vault != nil && d.vault.enabled && !d.vault.unlockedSafe() {
+		instances = nil
+		running = 0
+	}
 
 	writeOK(w, map[string]any{
 		"version":                Version,

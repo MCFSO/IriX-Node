@@ -144,6 +144,17 @@ func (d *Daemon) handleFileDownloadTicket(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// vaultFiles 停止态：直连通道按明文路径工作，加密层不签发票据（M4 范围边界）
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			writeError(w, http.StatusBadRequest,
+				"该实例文件区已加密且未运行，直连下载暂不支持（请先启动实例，或使用文件读写接口）")
+			return
+		}
+	}
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		writeError(w, http.StatusBadRequest, "文件不存在: "+fileName)
 		return
@@ -179,6 +190,17 @@ func (d *Daemon) handleFileUploadTicket(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// vaultFiles 停止态：直连通道按明文路径工作，加密层不签发票据（M4 范围边界）
+	if inst := d.Find(uuid); inst != nil {
+		if mode, merr := d.vaultFilesMode(inst); merr != nil {
+			writeError(w, http.StatusBadRequest, merr.Error())
+			return
+		} else if mode == 1 {
+			writeError(w, http.StatusBadRequest,
+				"该实例文件区已加密且未运行，直连上传暂不支持（请先启动实例，或使用文件读写接口）")
+			return
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
