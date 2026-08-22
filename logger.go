@@ -90,9 +90,10 @@ type fileLogger struct {
 	keep     int           // 轮转保留份数（.1 … .keep），默认 1
 	interval time.Duration // 时间轮转间隔（0 = 不启用）
 	// archiveDir 非空时，每次轮转把即将被覆盖的 .1 归档到该目录
-	// （<基名>-<时间戳>.log）。审计日志启用此机制（等保二级「审计记录
+	// （<基名>-<时间戳>-<序号>.log）。审计日志启用此机制（等保二级「审计记录
 	// 保护与定期备份」，docs/vault-design.md §11）；实例日志不启用。
 	archiveDir string
+	archiveSeq int // 归档序号（同一毫秒内多次轮转保证文件名唯一）
 
 	// 以下字段仅由消费 goroutine 访问
 	file   *os.File
@@ -295,8 +296,10 @@ func (f *fileLogger) archiveRotated() {
 		return
 	}
 	base := strings.TrimSuffix(filepath.Base(f.path), filepath.Ext(f.path))
-	// 毫秒精度：测试与高频轮转场景下同一秒内多次轮转不互相覆盖
-	dst := filepath.Join(dir, fmt.Sprintf("%s-%s.log", base, time.Now().Format("20060102-150405.000")))
+	// 毫秒时间戳 + 单调序号：同一毫秒内多次轮转（小文件高速轮转）不互相覆盖
+	f.archiveSeq++
+	dst := filepath.Join(dir, fmt.Sprintf("%s-%s-%03d.log", base,
+		time.Now().Format("20060102-150405.000"), f.archiveSeq))
 	if err := copyFile(src, dst); err != nil {
 		alog.Printf("警告: 日志归档 %s 失败: %v", dst, err)
 	}

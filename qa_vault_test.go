@@ -288,7 +288,9 @@ func TestKeySizeOK(t *testing.T) {
 
 // TestSelfSignedTLS 验证自签证书生成、指纹稳定复用、文件落盘与权限。
 func TestSelfSignedTLS(t *testing.T) {
-	dir := t.TempDir()
+	// 使用不存在的子目录路径：ensureSelfSignedTLS 创建时应为 0700
+	//（Linux 上 t.TempDir() 本身已存在且为 0755，MkdirAll 不会改权限）
+	dir := filepath.Join(t.TempDir(), "tls")
 	cfg1, fp1, err := ensureSelfSignedTLS(dir)
 	if err != nil {
 		t.Fatalf("首次生成失败: %v", err)
