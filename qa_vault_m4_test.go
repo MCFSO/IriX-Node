@@ -40,10 +40,10 @@ func m4AddInstance(t *testing.T, e *vaultTestEnv, files map[string]string) *Inst
 		}
 	}
 	inst := NewInstance("", InstanceConfig{
-		Nickname:    "m4sv",
-		Cwd:         cwd,
+		Nickname:     "m4sv",
+		Cwd:          cwd,
 		StartCommand: "sleep 100",
-		VaultFiles:  true,
+		VaultFiles:   true,
 	})
 	if err := e.d.Add(inst); err != nil {
 		t.Fatal(err)

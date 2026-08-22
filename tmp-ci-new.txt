@@ -1,0 +1,207 @@
+﻿2026-08-22T12:11:45.3498211Z Current runner version: '2.336.0'
+2026-08-22T12:11:45.3525442Z ##[group]Runner Image Provisioner
+2026-08-22T12:11:45.3526879Z Hosted Compute Agent
+2026-08-22T12:11:45.3527501Z Version: 20260729.566
+2026-08-22T12:11:45.3528250Z Commit: cf7153fe6e25b664e8693c24944bf2b00355d109
+2026-08-22T12:11:45.3529025Z Build Date: 2026-07-29T19:17:02Z
+2026-08-22T12:11:45.3529726Z Worker ID: {e151d40c-7bf2-4768-a234-b7efd933bbb0}
+2026-08-22T12:11:45.3530508Z Azure Region: eastus
+2026-08-22T12:11:45.3531103Z ##[endgroup]
+2026-08-22T12:11:45.3532713Z ##[group]Operating System
+2026-08-22T12:11:45.3533377Z Ubuntu
+2026-08-22T12:11:45.3533931Z 24.04.4
+2026-08-22T12:11:45.3534510Z LTS
+2026-08-22T12:11:45.3535062Z ##[endgroup]
+2026-08-22T12:11:45.3535826Z ##[group]Runner Image
+2026-08-22T12:11:45.3536523Z Image: ubuntu-24.04
+2026-08-22T12:11:45.3537114Z Version: 20260816.277.1
+2026-08-22T12:11:45.3538871Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260816.277/images/ubuntu/Ubuntu2404-Readme.md
+2026-08-22T12:11:45.3540448Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260816.277
+2026-08-22T12:11:45.3541516Z ##[endgroup]
+2026-08-22T12:11:45.3542662Z ##[group]GITHUB_TOKEN Permissions
+2026-08-22T12:11:45.3544975Z Contents: read
+2026-08-22T12:11:45.3545803Z Metadata: read
+2026-08-22T12:11:45.3546539Z ##[endgroup]
+2026-08-22T12:11:45.3548715Z Secret source: Actions
+2026-08-22T12:11:45.3550238Z Prepare workflow directory
+2026-08-22T12:11:45.3884940Z Prepare all required actions
+2026-08-22T12:11:45.3934681Z Getting action download info
+2026-08-22T12:11:45.6047606Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+2026-08-22T12:11:45.7260648Z Download action repository 'actions/setup-go@v5' (SHA:40f1582b2485089dde7abd97c1529aa768e1baff)
+2026-08-22T12:11:46.0002417Z Complete job name: Test (go 1.24)
+2026-08-22T12:11:46.0755537Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-08-22T12:11:46.0764914Z ##[group]Run actions/checkout@v4
+2026-08-22T12:11:46.0765804Z with:
+2026-08-22T12:11:46.0766262Z   repository: MCFSO/IriX-Node
+2026-08-22T12:11:46.0770447Z   token: ***
+2026-08-22T12:11:46.0770894Z   ssh-strict: true
+2026-08-22T12:11:46.0771343Z   ssh-user: git
+2026-08-22T12:11:46.0771801Z   persist-credentials: true
+2026-08-22T12:11:46.0772294Z   clean: true
+2026-08-22T12:11:46.0772742Z   sparse-checkout-cone-mode: true
+2026-08-22T12:11:46.0773261Z   fetch-depth: 1
+2026-08-22T12:11:46.0773691Z   fetch-tags: false
+2026-08-22T12:11:46.0774155Z   show-progress: true
+2026-08-22T12:11:46.0774601Z   lfs: false
+2026-08-22T12:11:46.0775063Z   submodules: false
+2026-08-22T12:11:46.0775520Z   set-safe-directory: true
+2026-08-22T12:11:46.0776150Z   allow-unsafe-pr-checkout: false
+2026-08-22T12:11:46.0776895Z ##[endgroup]
+2026-08-22T12:11:46.1800998Z Syncing repository: MCFSO/IriX-Node
+2026-08-22T12:11:46.1803620Z ##[group]Getting Git version info
+2026-08-22T12:11:46.1804521Z Working directory is '/home/runner/work/IriX-Node/IriX-Node'
+2026-08-22T12:11:46.1805569Z [command]/usr/bin/git version
+2026-08-22T12:11:46.1855560Z git version 2.55.0
+2026-08-22T12:11:46.1920888Z ##[endgroup]
+2026-08-22T12:11:46.1930476Z Temporarily overriding HOME='/home/runner/work/_temp/b7e9c976-899b-4e40-a9ff-9c3dac7c0d5d' before making global git config changes
+2026-08-22T12:11:46.1933038Z Adding repository directory to the temporary git global config as a safe directory
+2026-08-22T12:11:46.1935391Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/IriX-Node/IriX-Node
+2026-08-22T12:11:46.1983241Z Deleting the contents of '/home/runner/work/IriX-Node/IriX-Node'
+2026-08-22T12:11:46.1988863Z ##[group]Initializing the repository
+2026-08-22T12:11:46.1992327Z [command]/usr/bin/git init /home/runner/work/IriX-Node/IriX-Node
+2026-08-22T12:11:46.2063538Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-08-22T12:11:46.2065505Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-08-22T12:11:46.2067761Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-08-22T12:11:46.2069673Z hint: call:
+2026-08-22T12:11:46.2070608Z hint:
+2026-08-22T12:11:46.2071677Z hint: 	git config --global init.defaultBranch <name>
+2026-08-22T12:11:46.2073021Z hint:
+2026-08-22T12:11:46.2074141Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-08-22T12:11:46.2076192Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-08-22T12:11:46.2077756Z hint:
+2026-08-22T12:11:46.2078891Z hint: 	git branch -m <name>
+2026-08-22T12:11:46.2079948Z hint:
+2026-08-22T12:11:46.2081172Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-08-22T12:11:46.2083003Z Initialized empty Git repository in /home/runner/work/IriX-Node/IriX-Node/.git/
+2026-08-22T12:11:46.2086424Z [command]/usr/bin/git remote add origin https://github.com/MCFSO/IriX-Node
+2026-08-22T12:11:46.2124882Z ##[endgroup]
+2026-08-22T12:11:46.2126266Z ##[group]Disabling automatic garbage collection
+2026-08-22T12:11:46.2129575Z [command]/usr/bin/git config --local gc.auto 0
+2026-08-22T12:11:46.2163099Z ##[endgroup]
+2026-08-22T12:11:46.2164233Z ##[group]Setting up auth
+2026-08-22T12:11:46.2170287Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-08-22T12:11:46.2205230Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-08-22T12:11:46.2569889Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-08-22T12:11:46.2603925Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-08-22T12:11:46.2858115Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-08-22T12:11:46.2899746Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-08-22T12:11:46.3144317Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-08-22T12:11:46.3190176Z ##[endgroup]
+2026-08-22T12:11:46.3191582Z ##[group]Fetching the repository
+2026-08-22T12:11:46.3202670Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +8085fb6f93e8df2e95b74b34fc3c1cf943975593:refs/remotes/origin/main
+2026-08-22T12:11:46.5838541Z From https://github.com/MCFSO/IriX-Node
+2026-08-22T12:11:46.5839474Z  * [new ref]         8085fb6f93e8df2e95b74b34fc3c1cf943975593 -> origin/main
+2026-08-22T12:11:46.5842395Z ##[endgroup]
+2026-08-22T12:11:46.5843233Z ##[group]Determining the checkout info
+2026-08-22T12:11:46.5845189Z ##[endgroup]
+2026-08-22T12:11:46.5852201Z [command]/usr/bin/git sparse-checkout disable
+2026-08-22T12:11:46.5902918Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-08-22T12:11:46.5937360Z ##[group]Checking out the ref
+2026-08-22T12:11:46.5941645Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-08-22T12:11:46.6079864Z Switched to a new branch 'main'
+2026-08-22T12:11:46.6083865Z branch 'main' set up to track 'origin/main'.
+2026-08-22T12:11:46.6090689Z ##[endgroup]
+2026-08-22T12:11:46.6136507Z [command]/usr/bin/git log -1 --format=%H
+2026-08-22T12:11:46.6166129Z 8085fb6f93e8df2e95b74b34fc3c1cf943975593
+2026-08-22T12:11:46.6445311Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-08-22T12:11:46.6448266Z ##[group]Run actions/setup-go@v5
+2026-08-22T12:11:46.6448780Z with:
+2026-08-22T12:11:46.6449201Z   go-version: 1.24
+2026-08-22T12:11:46.6449654Z   cache: true
+2026-08-22T12:11:46.6450084Z   check-latest: false
+2026-08-22T12:11:46.6454150Z   token: ***
+2026-08-22T12:11:46.6454657Z ##[endgroup]
+2026-08-22T12:11:46.7753367Z Setup go version spec 1.24
+2026-08-22T12:11:46.7983590Z Found in cache @ /opt/hostedtoolcache/go/1.24.13/x64
+2026-08-22T12:11:46.7986027Z (node:2309) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-08-22T12:11:46.7987425Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-08-22T12:11:46.7989512Z Added go to the path
+2026-08-22T12:11:46.7992976Z Successfully set up Go version 1.24
+2026-08-22T12:11:47.3875498Z [command]/opt/hostedtoolcache/go/1.24.13/x64/bin/go env GOMODCACHE
+2026-08-22T12:11:47.3922477Z [command]/opt/hostedtoolcache/go/1.24.13/x64/bin/go env GOCACHE
+2026-08-22T12:11:47.3984769Z /home/runner/go/pkg/mod
+2026-08-22T12:11:47.4029915Z /home/runner/.cache/go-build
+2026-08-22T12:11:47.4064073Z ##[warning]Restore cache failed: Dependencies file is not found in /home/runner/work/IriX-Node/IriX-Node. Supported file pattern: go.sum
+2026-08-22T12:11:47.4094336Z go version go1.24.13 linux/amd64
+2026-08-22T12:11:47.4094749Z 
+2026-08-22T12:11:47.4095347Z ##[group]go env
+2026-08-22T12:11:48.0730131Z AR='ar'
+2026-08-22T12:11:48.0731468Z CC='gcc'
+2026-08-22T12:11:48.0731935Z CGO_CFLAGS='-O2 -g'
+2026-08-22T12:11:48.0732393Z CGO_CPPFLAGS=''
+2026-08-22T12:11:48.0732823Z CGO_CXXFLAGS='-O2 -g'
+2026-08-22T12:11:48.0733268Z CGO_ENABLED='1'
+2026-08-22T12:11:48.0733683Z CGO_FFLAGS='-O2 -g'
+2026-08-22T12:11:48.0734019Z CGO_LDFLAGS='-O2 -g'
+2026-08-22T12:11:48.0734344Z CXX='g++'
+2026-08-22T12:11:48.0734642Z GCCGO='gccgo'
+2026-08-22T12:11:48.0734954Z GO111MODULE=''
+2026-08-22T12:11:48.0735222Z GOAMD64='v1'
+2026-08-22T12:11:48.0735837Z GOARCH='amd64'
+2026-08-22T12:11:48.0736183Z GOAUTH='netrc'
+2026-08-22T12:11:48.0736526Z GOBIN=''
+2026-08-22T12:11:48.0736896Z GOCACHE='/home/runner/.cache/go-build'
+2026-08-22T12:11:48.0737295Z GOCACHEPROG=''
+2026-08-22T12:11:48.0737584Z GODEBUG=''
+2026-08-22T12:11:48.0737861Z GOENV='/home/runner/.config/go/env'
+2026-08-22T12:11:48.0738177Z GOEXE=''
+2026-08-22T12:11:48.0738448Z GOEXPERIMENT=''
+2026-08-22T12:11:48.0738786Z GOFIPS140='off'
+2026-08-22T12:11:48.0739142Z GOFLAGS=''
+2026-08-22T12:11:48.0740019Z GOGCCFLAGS='-fPIC -m64 -pthread -Wl,--no-gc-sections -fmessage-length=0 -ffile-prefix-map=/tmp/go-build2916907568=/tmp/go-build -gno-record-gcc-switches'
+2026-08-22T12:11:48.0740811Z GOHOSTARCH='amd64'
+2026-08-22T12:11:48.0826406Z GOHOSTOS='linux'
+2026-08-22T12:11:48.0826994Z GOINSECURE=''
+2026-08-22T12:11:48.0827655Z GOMOD='/home/runner/work/IriX-Node/IriX-Node/go.mod'
+2026-08-22T12:11:48.0828396Z GOMODCACHE='/home/runner/go/pkg/mod'
+2026-08-22T12:11:48.0828939Z GONOPROXY=''
+2026-08-22T12:11:48.0829298Z GONOSUMDB=''
+2026-08-22T12:11:48.0829657Z GOOS='linux'
+2026-08-22T12:11:48.0830070Z GOPATH='/home/runner/go'
+2026-08-22T12:11:48.0830511Z GOPRIVATE=''
+2026-08-22T12:11:48.0831016Z GOPROXY='https://proxy.golang.org,direct'
+2026-08-22T12:11:48.0831436Z GOROOT='/opt/hostedtoolcache/go/1.24.13/x64'
+2026-08-22T12:11:48.0831833Z GOSUMDB='sum.golang.org'
+2026-08-22T12:11:48.0832136Z GOTELEMETRY='local'
+2026-08-22T12:11:48.0832470Z GOTELEMETRYDIR='/home/runner/.config/go/telemetry'
+2026-08-22T12:11:48.0832829Z GOTMPDIR=''
+2026-08-22T12:11:48.0833091Z GOTOOLCHAIN='auto'
+2026-08-22T12:11:48.0833488Z GOTOOLDIR='/opt/hostedtoolcache/go/1.24.13/x64/pkg/tool/linux_amd64'
+2026-08-22T12:11:48.0833903Z GOVCS=''
+2026-08-22T12:11:48.0834481Z GOVERSION='go1.24.13'
+2026-08-22T12:11:48.0834770Z GOWORK=''
+2026-08-22T12:11:48.0835044Z PKG_CONFIG='pkg-config'
+2026-08-22T12:11:48.0835237Z 
+2026-08-22T12:11:48.0836431Z ##[endgroup]
+2026-08-22T12:11:48.0901083Z ##[group]Run unformatted=$(gofmt -l .)
+2026-08-22T12:11:48.0901544Z [36;1munformatted=$(gofmt -l .)[0m
+2026-08-22T12:11:48.0901945Z [36;1mif [ -n "$unformatted" ]; then[0m
+2026-08-22T12:11:48.0902298Z [36;1m  echo "以下文件未通过 gofmt:"[0m
+2026-08-22T12:11:48.0902619Z [36;1m  echo "$unformatted"[0m
+2026-08-22T12:11:48.0902921Z [36;1m  exit 1[0m
+2026-08-22T12:11:48.0903176Z [36;1mfi[0m
+2026-08-22T12:11:48.0951172Z shell: /usr/bin/bash -e {0}
+2026-08-22T12:11:48.0951524Z ##[endgroup]
+2026-08-22T12:11:48.6118181Z 以下文件未通过 gofmt:
+2026-08-22T12:11:48.6118692Z qa_vault_m4_test.go
+2026-08-22T12:11:48.6119056Z vault.go
+2026-08-22T12:11:48.6119383Z vault_handlers.go
+2026-08-22T12:11:48.6119701Z vault_store.go
+2026-08-22T12:11:48.6127284Z ##[error]Process completed with exit code 1.
+2026-08-22T12:11:48.6267744Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-08-22T12:11:48.6268967Z Post job cleanup.
+2026-08-22T12:11:48.7120525Z [command]/usr/bin/git version
+2026-08-22T12:11:48.7198264Z git version 2.55.0
+2026-08-22T12:11:48.7240544Z Temporarily overriding HOME='/home/runner/work/_temp/8263d5dd-0c3c-499c-9426-215801353c36' before making global git config changes
+2026-08-22T12:11:48.7241856Z Adding repository directory to the temporary git global config as a safe directory
+2026-08-22T12:11:48.7246835Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/IriX-Node/IriX-Node
+2026-08-22T12:11:48.7337380Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-08-22T12:11:48.7368708Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-08-22T12:11:48.7677594Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-08-22T12:11:48.7770674Z http.https://github.com/.extraheader
+2026-08-22T12:11:48.7782194Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-08-22T12:11:48.7815762Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-08-22T12:11:48.8120034Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-08-22T12:11:48.8160362Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-08-22T12:11:48.8577543Z Cleaning up orphan processes
+2026-08-22T12:11:48.8884460Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-go@v5. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

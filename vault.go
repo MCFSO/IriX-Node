@@ -33,8 +33,8 @@ import (
 const (
 	vaultFileVersion = 1 // vault.json 结构版本
 
-	maxChallenges = 1024        // 挑战池上限，防刷爆内存
-	challengeTTL  = 5 * time.Minute // 挑战有效期
+	maxChallenges = 1024             // 挑战池上限，防刷爆内存
+	challengeTTL  = 5 * time.Minute  // 挑战有效期
 	initTokenTTL  = 10 * time.Minute // 初始化令牌有效期
 	recoveryTTL   = 5 * time.Minute  // 恢复会话有效期
 	maxTOTPFails  = 5                // 初始化 TOTP 验证失败上限（作废 initToken）
@@ -70,20 +70,20 @@ type vaultState struct {
 	masterKey []byte // 数据域主密钥（仅内存；锁定即清零置空）
 	loading   bool   // 解锁后初始化中（存储层/实例列表加载，数据面短暂 403）
 
-	store     *vaultStore       // 加密存储层（M4）
-	migration *vaultMigration   // 迁移状态（持久化）
-	migrating bool              // 迁移运行中（数据面 403 vault migrating）
+	store     *vaultStore     // 加密存储层（M4）
+	migration *vaultMigration // 迁移状态（持久化）
+	migrating bool            // 迁移运行中（数据面 403 vault migrating）
 
-	users        map[string]*vaultUser
-	recovery     *vaultRecovery
-	seq          int64 // 单调递增序号（防回滚弱防护，见设计 §8.6）
-	createdAt    time.Time
-	file         string // vault.json 路径
-	lastTOTPWin  map[string]int64 // 用户 → 最近成功 TOTP 窗口（防重放）
-	sessions     map[string]*vaultSession
-	challenges   map[string]*vaultChallenge
-	initTokens   map[string]*vaultInitToken
-	failures     map[string]*vaultFail // 限速器（unlock/recovery/init-verify 共用）
+	users       map[string]*vaultUser
+	recovery    *vaultRecovery
+	seq         int64 // 单调递增序号（防回滚弱防护，见设计 §8.6）
+	createdAt   time.Time
+	file        string           // vault.json 路径
+	lastTOTPWin map[string]int64 // 用户 → 最近成功 TOTP 窗口（防重放）
+	sessions    map[string]*vaultSession
+	challenges  map[string]*vaultChallenge
+	initTokens  map[string]*vaultInitToken
+	failures    map[string]*vaultFail // 限速器（unlock/recovery/init-verify 共用）
 
 	indexDEKWrapB64 string // 索引密钥包裹（vault.json；解锁时解开）
 }
@@ -149,34 +149,34 @@ type vaultFail struct {
 
 // vaultFile vault.json 持久化结构。
 type vaultFile struct {
-	Version         int            `json:"version"`
-	Seq             int64          `json:"seq"`
-	Users           []*vaultUser   `json:"users"`
-	Recovery        *vaultRecovery `json:"recovery"`
-	IndexDEKWrapB64 string         `json:"indexDEKWrapB64"` // 索引密钥包裹（M4）
+	Version         int             `json:"version"`
+	Seq             int64           `json:"seq"`
+	Users           []*vaultUser    `json:"users"`
+	Recovery        *vaultRecovery  `json:"recovery"`
+	IndexDEKWrapB64 string          `json:"indexDEKWrapB64"` // 索引密钥包裹（M4）
 	Migration       *vaultMigration `json:"migration"`       // 迁移标记（M4）
-	CreatedAt       time.Time      `json:"createdAt"`
+	CreatedAt       time.Time       `json:"createdAt"`
 }
 
 // newVaultState 创建保险库状态（默认配置；main 按 opts 覆盖）。
 func newVaultState(d *Daemon) *vaultState {
 	vaultDir := filepath.Join(d.DataDir, "vault")
 	v := &vaultState{
-		d:                 d,
-		idleTimeout:       30 * time.Minute,
-		maxAttempts:       5,
-		lockoutDuration:   15 * time.Minute,
-		pbkdf2Iterations:  defaultPBKDF2Iterations,
-		passwordMinLen:    12,
-		passwordExpire:    90 * 24 * time.Hour,
-		blockSizeKB:       1024,
-		defaultFilesMode:  "plaintext",
-		users:             map[string]*vaultUser{},
-		lastTOTPWin:       map[string]int64{},
-		sessions:          map[string]*vaultSession{},
-		challenges:        map[string]*vaultChallenge{},
-		initTokens:        map[string]*vaultInitToken{},
-		failures:          map[string]*vaultFail{},
+		d:                d,
+		idleTimeout:      30 * time.Minute,
+		maxAttempts:      5,
+		lockoutDuration:  15 * time.Minute,
+		pbkdf2Iterations: defaultPBKDF2Iterations,
+		passwordMinLen:   12,
+		passwordExpire:   90 * 24 * time.Hour,
+		blockSizeKB:      1024,
+		defaultFilesMode: "plaintext",
+		users:            map[string]*vaultUser{},
+		lastTOTPWin:      map[string]int64{},
+		sessions:         map[string]*vaultSession{},
+		challenges:       map[string]*vaultChallenge{},
+		initTokens:       map[string]*vaultInitToken{},
+		failures:         map[string]*vaultFail{},
 		store: newVaultStore(d,
 			filepath.Join(vaultDir, "objects"),
 			filepath.Join(vaultDir, "index.json.enc"),

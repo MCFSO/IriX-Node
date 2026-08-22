@@ -70,7 +70,9 @@ func (d *Daemon) handleVaultStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleVaultInit 首次初始化保险库（仅未初始化时可用）。
 // POST /api/vault/init { user, password } →
-//   { initToken, totpSecret, otpauthURI, recoveryToken }
+//
+//	{ initToken, totpSecret, otpauthURI, recoveryToken }
+//
 // recoveryToken 仅此一次返回（仅存哈希），丢失后只能删除 vault 目录重新初始化。
 func (d *Daemon) handleVaultInit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -307,7 +309,8 @@ func (d *Daemon) handleVaultTOTPReset(w http.ResponseWriter, r *http.Request) {
 
 // handleVaultChallenge 签发一次性挑战（分用途，防跨协议签名重用 S4）。
 // POST /api/vault/challenge { purpose: "unlock"|"cert-bind" } →
-//   { challengeId, challenge }；挑战 base64（无填充），TTL 5 分钟，首试即作废。
+//
+//	{ challengeId, challenge }；挑战 base64（无填充），TTL 5 分钟，首试即作废。
 func (d *Daemon) handleVaultChallenge(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Purpose string `json:"purpose"`

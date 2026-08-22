@@ -46,8 +46,8 @@ const (
 	objectMagic      = "IRIXVT01"
 	objectVersion    = 1
 	objectHeaderSize = 8 + 1 + 4 + 12 + 48 + 4 + 4 // = 81
-	objectBlockOver  = 12 + 16                      // 每块 nonce(12) + GCM tag(16)
-	objectIDBytes    = 32                           // 对象 ID 随机字节（hex 64 位）
+	objectBlockOver  = 12 + 16                     // 每块 nonce(12) + GCM tag(16)
+	objectIDBytes    = 32                          // 对象 ID 随机字节（hex 64 位）
 
 	indexFlushTick  = time.Second // 索引脏标记延迟落盘周期（D12）
 	indexFlushBatch = 100         // 迁移游标落盘间隔（文件数）
@@ -66,14 +66,14 @@ type vaultIndexEntry struct {
 type vaultStore struct {
 	d *Daemon
 
-	mu          sync.RWMutex
-	index       map[string]*vaultIndexEntry
-	dirty       bool
-	indexDEK    []byte // 索引密钥（解锁后内存，锁定清零）
-	pendingDel  []string // 待删旧对象：延迟到下次索引成功落盘后删除（崩溃安全，见 writeFile）
-	objectsDir  string
-	indexFile   string
-	blockSize   int
+	mu         sync.RWMutex
+	index      map[string]*vaultIndexEntry
+	dirty      bool
+	indexDEK   []byte   // 索引密钥（解锁后内存，锁定清零）
+	pendingDel []string // 待删旧对象：延迟到下次索引成功落盘后删除（崩溃安全，见 writeFile）
+	objectsDir string
+	indexFile  string
+	blockSize  int
 }
 
 // newVaultStore 创建加密存储层并启动脏索引落盘循环。
