@@ -45,6 +45,7 @@
 - 资源信息：`GET /api/overview`
 - 实例 CRUD / 启停 / 命令 / 输出轮询：`/api/instance`、`/api/protected_instance/*`
 - 实例级文件：`/api/files/list|mkdir|touch|move|copy|compress|delete`、`PUT /api/files/`（读写）
+- 实例插件/Mod 元数据：`GET /api/instance/plugins`（§4.4；客户端「远程实例 → 插件/Mod」Tab 已实现，节点不支持时回退文件列表）
 - 直连传输：`POST /api/files/download|upload` → `GET /download/...`、`POST /upload/...`
 - 容器环境：`/api/container/*`、`/api/image/*`、`/api/volume/*`、`/api/network/*`（Docker，见容器对接文档）
 - Bastille（FreeBSD）：`/api/bastille/*`

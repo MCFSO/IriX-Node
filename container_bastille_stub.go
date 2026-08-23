@@ -85,6 +85,10 @@ func bastilleRunStatus(name, session string, tail int, since int64) (map[string]
 	return nil, errContainerUnsupported
 }
 
+func bastilleJailHostPath(name, jailPath string) (string, error) {
+	return "", errContainerUnsupported
+}
+
 func bastilleRunStdin(name, session, input string) error { return errContainerUnsupported }
 
 func bastilleRunStop(name, session string) error { return errContainerUnsupported }

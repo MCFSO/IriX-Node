@@ -308,6 +308,16 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bastille/jails/{name}/run/{session}/stop", d.auth(d.handleBastilleRunStop))
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/run/{session}", d.auth(d.handleBastilleRunDelete))
 
+	// jail 文件管理（NODE_API.md §6.1）：jail 内路径的列表/读写/删除/上传/下载
+	mux.HandleFunc("GET /api/bastille/jails/{name}/files", d.auth(d.handleBastilleFilesList))
+	mux.HandleFunc("GET /api/bastille/jails/{name}/files/content", d.auth(d.handleBastilleFilesContentRead))
+	mux.HandleFunc("PUT /api/bastille/jails/{name}/files/content", d.auth(d.handleBastilleFilesContentWrite))
+	mux.HandleFunc("DELETE /api/bastille/jails/{name}/files", d.auth(d.handleBastilleFilesDelete))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/files/mkdir", d.auth(d.handleBastilleFilesMkdir))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/files/touch", d.auth(d.handleBastilleFilesTouch))
+	mux.HandleFunc("POST /api/bastille/jails/{name}/files/upload", d.auth(d.handleBastilleFilesUpload))
+	mux.HandleFunc("GET /api/bastille/jails/{name}/files/download", d.auth(d.handleBastilleFilesDownload))
+
 	// 节点级归档（docs/irix-node-container-api.md §4.8）：编排迁移用，任意宿主机路径
 	mux.HandleFunc("POST /api/container/archive", d.auth(d.handleArchiveCreate))
 	mux.HandleFunc("GET /api/container/archive", d.auth(d.handleArchiveDownload))

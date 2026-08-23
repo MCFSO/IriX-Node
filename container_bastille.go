@@ -514,6 +514,20 @@ func bastilleJailRoot(name string) string {
 	return filepath.Join(bastilleRoot, "jails", name, "root")
 }
 
+// bastilleJailHostPath 把 jail 内路径解析为宿主机绝对路径（NODE_API.md §6.1 文件管理）。
+// jail 名必须对应 jails/ 下的真实目录；thin jail 的 root 符号链接解析与
+// .. / 符号链接越界校验由 resolveJailHostPath 处理。
+func bastilleJailHostPath(name, jailPath string) (string, error) {
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("%w: jail 名无效: %s", errJailPath, name)
+	}
+	jailDir := filepath.Join(bastilleRoot, "jails", name)
+	if st, err := os.Stat(jailDir); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%w: jail %s 不存在", errJailPath, name)
+	}
+	return resolveJailHostPath(filepath.Join(jailDir, "root"), jailPath)
+}
+
 // fstabEntry 单条 fstab 挂载（device mountpoint fstype options dump pass）。
 type fstabEntry struct {
 	Device  string

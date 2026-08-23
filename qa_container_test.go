@@ -8,6 +8,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -457,9 +458,262 @@ func TestBastilleRoutesSmoke(t *testing.T) {
 		t.Fatalf("mounts DELETE 缺 dst 应 400: %d", code)
 	}
 
+	// jail 文件管理：桩 501（路由已注册）；缺 path / 删根目录 → 400
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodGet, "/api/bastille/jails/mc-1/files?path=/data", nil},
+		{http.MethodGet, "/api/bastille/jails/mc-1/files/content?path=/data/x.txt", nil},
+		{http.MethodPut, "/api/bastille/jails/mc-1/files/content", map[string]any{"path": "/data/x.txt", "content": "hello"}},
+		{http.MethodDelete, "/api/bastille/jails/mc-1/files?path=/data/x.txt", nil},
+		{http.MethodPost, "/api/bastille/jails/mc-1/files/mkdir", map[string]any{"path": "/data/new"}},
+		{http.MethodPost, "/api/bastille/jails/mc-1/files/touch", map[string]any{"path": "/data/new.txt"}},
+	} {
+		code, env := doJSON(t, tc.method, containerTestURL(srv, tc.path), tc.body)
+		if code != 501 {
+			t.Fatalf("%s %s 应 501: %d %v", tc.method, tc.path, code, env)
+		}
+	}
+	// upload：multipart 载荷，路径解析在表单解析前 → 桩 501
+	upBody, upCtype := multipartUpload(t, "a.txt", []byte("hi"))
+	code, _ = doRaw(t, http.MethodPost, containerTestURL(srv, "/api/bastille/jails/mc-1/files/upload?path=/data"), upBody, upCtype)
+	if code != 501 {
+		t.Fatalf("files/upload 应 501: %d", code)
+	}
+	// 缺 path → 400
+	code, _ = doJSON(t, http.MethodGet, containerTestURL(srv, "/api/bastille/jails/mc-1/files/content"), nil)
+	if code != 400 {
+		t.Fatalf("content GET 缺 path 应 400: %d", code)
+	}
+	code, _ = doRaw(t, http.MethodGet, containerTestURL(srv, "/api/bastille/jails/mc-1/files/download"), nil, "")
+	if code != 400 {
+		t.Fatalf("download 缺 path 应 400: %d", code)
+	}
+	code, _ = doJSON(t, http.MethodDelete, containerTestURL(srv, "/api/bastille/jails/mc-1/files"), nil)
+	if code != 400 {
+		t.Fatalf("files DELETE 缺 path（删根）应 400: %d", code)
+	}
+
 	// 未注册路由应 404（确认上面 501 是桩路径而非路由缺失）
 	code, _ = doRaw(t, http.MethodGet, containerTestURL(srv, "/api/bastille/jails/mc-1/not-a-route"), nil, "")
 	if code != 404 {
 		t.Fatalf("未注册路由应 404: %d", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// jail 文件管理全流程（bastilleResolve 替身为临时目录，任意平台可测）
+// ---------------------------------------------------------------------------
+
+func TestBastilleJailFiles(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	srv := newTestServer(d)
+	defer srv.Close()
+
+	// 伪造 jail 根：生产实现把 jail 内路径解析到 jails/<name>/root，
+	// 这里用临时目录承接同一套 resolveJailHostPath 逻辑与处理器。
+	root := filepath.Join(t.TempDir(), "jail-root")
+	if err := os.MkdirAll(filepath.Join(root, "data", "sub"), 0o755); err != nil {
+		t.Fatalf("创建测试目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "server.jar"), []byte("hello world"), 0o644); err != nil {
+		t.Fatalf("创建测试文件失败: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("创建外部文件失败: %v", err)
+	}
+	orig := bastilleResolve
+	bastilleResolve = func(name, jailPath string) (string, error) {
+		if name != "mc-1" {
+			return "", fmt.Errorf("%w: jail %s 不存在", errJailPath, name)
+		}
+		return resolveJailHostPath(root, jailPath)
+	}
+	defer func() { bastilleResolve = orig }()
+	url := func(p string) string { return containerTestURL(srv, p) }
+
+	// 列表：根目录（缺 path 默认）
+	code, env := doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files"), nil)
+	if code != 200 {
+		t.Fatalf("根目录列表应 200: %d %v", code, env)
+	}
+	data := env["data"].(map[string]any)
+	if int(data["total"].(float64)) != 1 {
+		t.Fatalf("根目录 total 应 1: %v", data)
+	}
+	rootItems := data["items"].([]any)
+	if rootItems[0].(map[string]any)["name"] != "data" ||
+		rootItems[0].(map[string]any)["isDir"] != true ||
+		rootItems[0].(map[string]any)["path"] != "/data" {
+		t.Fatalf("根目录条目契约不符: %v", rootItems[0])
+	}
+
+	// 列表：/data（绝对与相对路径等价），目录在前，条目字段契约
+	for _, p := range []string{"/api/bastille/jails/mc-1/files?path=/data",
+		"/api/bastille/jails/mc-1/files?path=data"} {
+		code, env = doJSON(t, http.MethodGet, url(p), nil)
+		if code != 200 {
+			t.Fatalf("列表 %s 应 200: %d %v", p, code, env)
+		}
+		data = env["data"].(map[string]any)
+		if int(data["total"].(float64)) != 2 {
+			t.Fatalf("列表 %s total 应 2: %v", p, data)
+		}
+		items := data["items"].([]any)
+		first := items[0].(map[string]any)
+		if first["name"] != "sub" || first["isDir"] != true || first["path"] != "/data/sub" {
+			t.Fatalf("列表 %s 目录应在前: %v", p, first)
+		}
+		second := items[1].(map[string]any)
+		if second["name"] != "server.jar" || second["isDir"] != false ||
+			second["path"] != "/data/server.jar" || int(second["size"].(float64)) != 11 {
+			t.Fatalf("列表 %s 文件条目契约不符: %v", p, second)
+		}
+		if second["mtime"].(string) == "" {
+			t.Fatalf("列表 %s mtime 不应为空", p)
+		}
+	}
+
+	// 分页：page_size=1 第二页为 server.jar
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files?path=/data&page=2&page_size=1"), nil)
+	if code != 200 {
+		t.Fatalf("分页列表应 200: %d %v", code, env)
+	}
+	data = env["data"].(map[string]any)
+	pageItems := data["items"].([]any)
+	if int(data["total"].(float64)) != 2 || len(pageItems) != 1 ||
+		pageItems[0].(map[string]any)["name"] != "server.jar" {
+		t.Fatalf("分页结果不符: %v", data)
+	}
+
+	// 文本读取：命中 / 目录拒绝
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/server.jar"), nil)
+	if code != 200 || env["data"] != "hello world" {
+		t.Fatalf("读取内容应 200 hello world: %d %v", code, env)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data"), nil)
+	if code != 400 || !strings.Contains(env["data"].(string), "目录") {
+		t.Fatalf("目录按文本读取应 400: %d %v", code, env)
+	}
+
+	// 文本写入（含空内容覆盖）
+	code, env = doJSON(t, http.MethodPut, url("/api/bastille/jails/mc-1/files/content"),
+		map[string]any{"path": "/data/sub/new.txt", "content": "abc"})
+	if code != 200 {
+		t.Fatalf("写入内容应 200: %d %v", code, env)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/sub/new.txt"), nil)
+	if code != 200 || env["data"] != "abc" {
+		t.Fatalf("回读内容应 abc: %d %v", code, env)
+	}
+	code, _ = doJSON(t, http.MethodPut, url("/api/bastille/jails/mc-1/files/content"),
+		map[string]any{"path": "/data/sub/new.txt", "content": ""})
+	if code != 200 {
+		t.Fatalf("空内容覆盖应 200: %d", code)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/sub/new.txt"), nil)
+	if code != 200 || env["data"] != "" {
+		t.Fatalf("空内容回读应空串: %d %v", code, env)
+	}
+
+	// 新建目录 / 空文件
+	code, _ = doJSON(t, http.MethodPost, url("/api/bastille/jails/mc-1/files/mkdir"),
+		map[string]any{"path": "/data/created/deep"})
+	if code != 200 {
+		t.Fatalf("mkdir 应 200: %d", code)
+	}
+	code, _ = doJSON(t, http.MethodPost, url("/api/bastille/jails/mc-1/files/touch"),
+		map[string]any{"path": "/data/created/empty.txt"})
+	if code != 200 {
+		t.Fatalf("touch 应 200: %d", code)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files?path=/data"), nil)
+	if code != 200 || int(env["data"].(map[string]any)["total"].(float64)) != 3 {
+		t.Fatalf("mkdir 后 /data total 应 3: %d %v", code, env)
+	}
+
+	// 上传（multipart）→ 响应保存路径
+	upRawBody, upRawCtype := multipartUpload(t, "up.txt", []byte("uploaded"))
+	rawCode, rawData := doRaw(t, http.MethodPost, url("/api/bastille/jails/mc-1/files/upload?path=/data/sub"), upRawBody, upRawCtype)
+	if rawCode != 200 {
+		t.Fatalf("上传应 200: %d %s", rawCode, string(rawData))
+	}
+	var upEnv map[string]any
+	if err := json.Unmarshal(rawData, &upEnv); err != nil {
+		t.Fatalf("上传响应不是 JSON: %v", err)
+	}
+	if upEnv["data"].(map[string]any)["path"] != "/data/sub/up.txt" {
+		t.Fatalf("上传响应 path 不符: %v", upEnv)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/sub/up.txt"), nil)
+	if code != 200 || env["data"] != "uploaded" {
+		t.Fatalf("上传后回读失败: %d %v", code, env)
+	}
+
+	// 下载（二进制流）；目录下载拒绝
+	rawCode, rawData = doRaw(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/download?path=/data/sub/up.txt"), nil, "")
+	if rawCode != 200 || string(rawData) != "uploaded" {
+		t.Fatalf("下载应 200 uploaded: %d %q", rawCode, string(rawData))
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/download?path=/data"), nil)
+	if code != 400 {
+		t.Fatalf("目录下载应 400: %d %v", code, env)
+	}
+
+	// 删除（递归、幂等）
+	code, _ = doJSON(t, http.MethodDelete, url("/api/bastille/jails/mc-1/files?path=/data/created"), nil)
+	if code != 200 {
+		t.Fatalf("删除应 200: %d", code)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files?path=/data"), nil)
+	if code != 200 || int(env["data"].(map[string]any)["total"].(float64)) != 2 {
+		t.Fatalf("删除后 /data total 应 2: %d %v", code, env)
+	}
+	code, _ = doJSON(t, http.MethodDelete, url("/api/bastille/jails/mc-1/files?path=/data/created"), nil)
+	if code != 200 {
+		t.Fatalf("重复删除应幂等 200: %d", code)
+	}
+
+	// 路径越界：.. 逃逸 → 400
+	for _, p := range []string{
+		"/api/bastille/jails/mc-1/files?path=/../..",
+		"/api/bastille/jails/mc-1/files?path=../../..",
+		"/api/bastille/jails/mc-1/files/content?path=/../../outside.txt",
+		"/api/bastille/jails/mc-1/files/download?path=/../../outside.txt",
+	} {
+		code, env = doJSON(t, http.MethodGet, url(p), nil)
+		if code != 400 || !strings.Contains(env["data"].(string), "越界") {
+			t.Fatalf("越界请求应 400: %s → %d %v", p, code, env)
+		}
+	}
+	// 不存在的 jail → 400
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-x/files"), nil)
+	if code != 400 || !strings.Contains(env["data"].(string), "不存在") {
+		t.Fatalf("jail 不存在应 400: %d %v", code, env)
+	}
+
+	// 超大文件文本读取 → 400（提示走下载接口）
+	big := make([]byte, maxTextReadBytes+1)
+	if err := os.WriteFile(filepath.Join(root, "data", "big.bin"), big, 0o644); err != nil {
+		t.Fatalf("创建大文件失败: %v", err)
+	}
+	code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/big.bin"), nil)
+	if code != 400 || !strings.Contains(env["data"].(string), "文件过大") {
+		t.Fatalf("超大文件读取应 400: %d %v", code, env)
+	}
+
+	// 符号链接逃逸 → 400（Windows 需开发者模式，创建失败则跳过该项）
+	if err := os.Symlink(outside, filepath.Join(root, "data", "leak")); err == nil {
+		code, env = doJSON(t, http.MethodGet, url("/api/bastille/jails/mc-1/files/content?path=/data/leak"), nil)
+		if code != 400 || !strings.Contains(env["data"].(string), "符号链接") {
+			t.Fatalf("符号链接逃逸读取应 400: %d %v", code, env)
+		}
+		code, _ = doJSON(t, http.MethodPut, url("/api/bastille/jails/mc-1/files/content"),
+			map[string]any{"path": "/data/leak", "content": "x"})
+		if code != 400 {
+			t.Fatalf("符号链接逃逸写入应 400: %d", code)
+		}
 	}
 }

@@ -85,6 +85,7 @@
 | `GET` | `/api/protected_instance/kill` | `uuid`, `daemonId` | 强制终止 |
 | `GET` | `/api/protected_instance/command` | `uuid`, `daemonId`, `command` | 向实例 stdin 发命令 |
 | `GET` | `/api/protected_instance/outputlog` | `uuid`, `daemonId`, `size?` | 读取实例输出日志 |
+| `GET` | `/api/instance/plugins` | `uuid`, `daemonId` | 插件/Mod 元数据检测：`{items: [{type, path, fileName, size, name, description, version, iconBase64, configDir}]}`（节点解析 jar 内 plugin.yml/fabric.mod.json 等；不支持时客户端回退文件列表） |
 
 ---
 
@@ -179,7 +180,7 @@ GET /api/container/info
 | `POST` | `/api/bastille/jails/{name}/cmd` | body: `{command}` | jail 内执行命令（data 为输出文本） |
 | `POST` | `/api/bastille/jails/{name}/pkg` | body: `{action, packages}` | 软件包管理（`bastille pkg`，安装 Java 环境等） |
 | `GET` | `/api/bastille/jails/{name}/mounts` | | 挂载列表（nullfs/procfs，见对接文档 §4.10） |
-| `POST` | `/api/bastille/jails/{name}/mounts` | body: `{src?, dst, fstype, options?}` | 添加挂载（nullfs→`bastille mount`；procfs→fstab+挂载） |
+| `POST` | `/api/bastille/jails/{name}/mounts` | body: `{src?, dst, fstype, options?, permanent?}` | 添加挂载（nullfs→`bastille mount`；procfs→fstab+挂载；`permanent` 同时写 fstab，重启自动挂载） |
 | `DELETE` | `/api/bastille/jails/{name}/mounts` | `dst=` | 卸载并移除 fstab 条目 |
 | `POST` | `/api/bastille/jails/{name}/run` | body: `{command, cwd?, watch?}` | 后台运行会话（MC 服务端等长任务；`watch` 进程退出即停 jail）→ `{sessionId}` |
 | `GET` | `/api/bastille/jails/{name}/run/{session}` | `tail=N&since=<偏移>` | 会话状态 `{running, exitCode, offset, log}` |
@@ -192,6 +193,13 @@ GET /api/container/info
 | `GET` | `/api/bastille/templates` | | 模板列表（project/template 格式） |
 | `POST` | `/api/bastille/templates/apply` | body: `{jail, template, args: {KEY=VALUE}}` | 应用模板 |
 | `POST` / `DELETE` | `/api/bastille/rdr` | body: `{jail, proto, hostPort, jailPort}` | 端口转发 / 删除转发 |
+| `GET` | `/api/bastille/jails/{name}/files` | `path`, `page`, `page_size` | 目录列表（jail 内路径，如 `/data`）→ `{items: [{name, path, isDir, size, mtime}], total}` |
+| `GET` | `/api/bastille/jails/{name}/files/content` | `path` | 读取文本文件 |
+| `PUT` | `/api/bastille/jails/{name}/files/content` | body: `{path, content}` | 写入文本文件 |
+| `DELETE` | `/api/bastille/jails/{name}/files` | `path` | 删除文件 / 目录（递归） |
+| `POST` | `/api/bastille/jails/{name}/files/mkdir` `touch` | body: `{path}` | 新建目录 / 空文件 |
+| `POST` | `/api/bastille/jails/{name}/files/upload` | `path`（multipart 字段 `file`） | 上传到 jail 内目录 |
+| `GET` | `/api/bastille/jails/{name}/files/download` | `path` | 下载文件（二进制响应） |
 
 **回退**：MCSM 面板无 `/api/container/info`，客户端自动回退到 §6 受限模式
 （镜像构建 + 容器/网络只读列表），UI 标注「MCSM 受限模式」。
