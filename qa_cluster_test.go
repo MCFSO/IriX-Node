@@ -911,3 +911,72 @@ func TestParseRdrLine(t *testing.T) {
 		t.Fatalf("pass 行不应解析出 jailPort: %d", j2)
 	}
 }
+
+// TestClusterRelativeDataDir 相对 -data 路径下同步区双重拼接回归测试
+// （docs/backend-requirements.md P1）：DataDir 为相对路径时 clusterRoot 必须
+// 绝对路径化，否则 listDir 会以相对根再次拼接（dev-node-data\mirrors\
+// dev-node-data\mirrors…），files/list 报 400、sync/list 报 500。
+func TestClusterRelativeDataDir(t *testing.T) {
+	// 在进程 cwd 下创建数据目录：MkdirTemp 以相对模式返回相对路径，
+	// 复现「-data dev-node-data」相对路径启动场景（与 cwd 同卷，可生成相对路径）
+	rel, err := os.MkdirTemp(".", "irix-node-rel-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(rel) })
+	if filepath.IsAbs(rel) {
+		t.Fatalf("测试前置失败：期望相对路径数据目录，实际 %q", rel)
+	}
+
+	d := NewDaemon(rel, "test-key")
+	if err := d.Load(); err != nil {
+		t.Fatal(err)
+	}
+	// 修复点：同步区根必须绝对路径化
+	root := d.clusterRoot()
+	if !filepath.IsAbs(root) {
+		t.Fatalf("clusterRoot 应为绝对路径，实际 %q", root)
+	}
+	// 构建同步区内容
+	if err := os.MkdirAll(filepath.Join(root, "i-abcd", "world"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "i-abcd", "world", "level.dat"), []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(d)
+	defer srv.Close()
+
+	// files/list：修复前 400（根被拼接两次），修复后应 200 且条目完整
+	code, body := doReq(t, srv.URL+"/api/cluster/files/list?apikey=test-key&path=/mirrors/i-abcd/world")
+	if code != http.StatusOK {
+		t.Fatalf("files/list 失败: %d %s", code, body)
+	}
+	data := decodeData(t, body)
+	if data["absolutePath"] != "/mirrors/i-abcd/world" {
+		t.Fatalf("absolutePath 错误: %v", data["absolutePath"])
+	}
+	items, _ := data["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["name"] != "level.dat" {
+		t.Fatalf("条目错误: %v", items)
+	}
+
+	// sync/list：修复前 500 枚举失败，修复后应 200
+	code, body = doReq(t, srv.URL+"/api/cluster/sync/list?apikey=test-key&path=/mirrors/i-abcd")
+	if code != http.StatusOK {
+		t.Fatalf("sync/list 失败: %d %s", code, body)
+	}
+	data = decodeData(t, body)
+	if total, _ := data["total"].(float64); total < 2 {
+		t.Fatalf("应枚举出目录与文件，实际 total=%v", data["total"])
+	}
+
+	// mkdir：新建目录必须落在同步区根下（不得双重拼接出并列目录）
+	code, body = apiPost(t, srv.URL+"/api/cluster/files/mkdir?apikey=test-key", map[string]any{"path": "/mirrors/newdir"})
+	if code != http.StatusOK {
+		t.Fatalf("mkdir 失败: %d %s", code, body)
+	}
+	if _, err := os.Stat(filepath.Join(root, "newdir")); err != nil {
+		t.Fatalf("mkdir 未落在同步区根下: %v", err)
+	}
+}

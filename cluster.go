@@ -34,9 +34,16 @@ const clusterMtimeFormat = "2006-01-02 15:04:05"
 // maxClusterEvents 集群事件保留条数。
 const maxClusterEvents = 100
 
-// clusterRoot 同步区根目录。
+// clusterRoot 同步区根目录（绝对路径）。
+// DataDir 为相对路径（如 -data dev-node-data）时必须 Abs 化：
+// 否则 clusterPath 返回相对路径，再经 listDir → NormalizePath 相对拼接，
+// 会把根拼接两次（dev-node-data\mirrors\dev-node-data\mirrors…）。
 func (d *Daemon) clusterRoot() string {
-	return filepath.Join(d.DataDir, "mirrors")
+	root := filepath.Join(d.DataDir, "mirrors")
+	if abs, err := filepath.Abs(root); err == nil {
+		return abs
+	}
+	return root
 }
 
 // clusterPath 把 API 路径规范化为同步区绝对路径。
