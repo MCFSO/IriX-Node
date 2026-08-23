@@ -71,6 +71,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/overview", d.auth(d.handleOverview))
 	mux.HandleFunc("GET /api/load", d.auth(d.handleLoad))
 
+	// 审计日志只读接口（docs/backend-requirements.md P0）
+	mux.HandleFunc("GET /api/audit/log", d.auth(d.handleAuditLog))
+
 	// 实例列表 / 详情 / 增删改
 	mux.HandleFunc("GET /api/service/remote_service_instances", d.auth(d.handleInstanceList))
 	mux.HandleFunc("GET /api/instance", d.auth(d.handleInstanceDetail))

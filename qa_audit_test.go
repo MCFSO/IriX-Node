@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newAuditServer 启动带审计中间件的测试服务器（与 main 相同的中间件链）。
@@ -188,6 +190,99 @@ func TestSanitizeLog(t *testing.T) {
 	}
 	if got := sanitizeLog("正常日志"); got != "正常日志" {
 		t.Errorf("无控制字符时不应改写: %q", got)
+	}
+}
+
+// TestAuditLogReadDisabled 未启用审计落盘（AuditLog 为 nil）时，
+// GET /api/audit/log 返回 200 与空字符串（docs/backend-requirements.md P0）。
+func TestAuditLogReadDisabled(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	srv := newTestServer(d)
+	defer srv.Close()
+	code, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	if code != http.StatusOK || !bodyHasStatus(body, http.StatusOK) {
+		t.Fatalf("期望 200，实际 %d: %s", code, body)
+	}
+	if !strings.Contains(string(body), `"data":""`) {
+		t.Errorf("未启用审计落盘时 data 应为空字符串: %s", body)
+	}
+}
+
+// auditLogData 解析审计日志响应体的 data 字符串字段。
+func auditLogData(t *testing.T, body []byte) string {
+	t.Helper()
+	var resp struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("解析响应失败: %v（%s）", err, body)
+	}
+	return resp.Data
+}
+
+// TestAuditLogReadEmpty 审计日志文件尚不存在时返回空字符串（200），不报错。
+func TestAuditLogReadEmpty(t *testing.T) {
+	d, dir := newTestDaemon(t)
+	d.AuditLog = newFileLogger(filepath.Join(dir, "logs"), "audit.log", 1<<20)
+	t.Cleanup(func() { d.AuditLog.Close() })
+	srv := newTestServer(d)
+	defer srv.Close()
+	code, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	if code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", code, body)
+	}
+	if got := auditLogData(t, body); got != "" {
+		t.Errorf("无日志文件时 data 应为空字符串，实际 %q", got)
+	}
+}
+
+// TestAuditLogReadTailSince 端到端验证审计日志读取接口（docs/backend-requirements.md P0）：
+// tail 截取最后 N 行、since 增量过滤、tail 上限钳制。
+func TestAuditLogReadTailSince(t *testing.T) {
+	d, dir := newTestDaemon(t)
+	d.AuditLog = newFileLogger(filepath.Join(dir, "logs"), "audit.log", 1<<20)
+	t.Cleanup(func() { d.AuditLog.Close() })
+	srv := newTestServer(d)
+	defer srv.Close()
+
+	// 写入 5 条审计行并排空落盘队列（Close 幂等，Cleanup 兜底 Fatalf 路径）
+	for i := 1; i <= 5; i++ {
+		d.auditLogf("审计读取测试行 %d", i)
+	}
+	d.AuditLog.Close()
+
+	// tail 缺省（500）→ 包含全部 5 行
+	_, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	got := auditLogData(t, body)
+	for i := 1; i <= 5; i++ {
+		if !strings.Contains(got, fmt.Sprintf("审计读取测试行 %d", i)) {
+			t.Errorf("缺省 tail 缺少行 %d:\n%s", i, got)
+		}
+	}
+	// tail=2 → 恰好最后 2 行（按序：行 4、行 5）
+	_, body = doReq(t, srv.URL+"/api/audit/log?tail=2&apikey=test-key")
+	got = auditLogData(t, body)
+	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+	if len(lines) != 2 ||
+		!strings.Contains(lines[0], "审计读取测试行 4") ||
+		!strings.Contains(lines[1], "审计读取测试行 5") {
+		t.Errorf("tail=2 应恰好返回最后 2 行，实际 %d 行:\n%s", len(lines), got)
+	}
+	// since=0（1970）→ 全部内容（文件 mtime 恒在其后）
+	_, body = doReq(t, srv.URL+"/api/audit/log?since=0&apikey=test-key")
+	got = auditLogData(t, body)
+	if !strings.Contains(got, "审计读取测试行 1") || !strings.Contains(got, "审计读取测试行 5") {
+		t.Errorf("since=0 应返回全部内容:\n%s", got)
+	}
+	// since=未来时间 → 空（mtime 近似过滤）
+	_, body = doReq(t, srv.URL+"/api/audit/log?since="+fmt.Sprint(time.Now().Add(time.Hour).UnixMilli())+"&apikey=test-key")
+	if got := auditLogData(t, body); got != "" {
+		t.Errorf("since=未来时间应返回空，实际 %q", got)
+	}
+	// tail 上限钳制：超大 tail 应钳到 20000 而非报错
+	code, body := doReq(t, srv.URL+"/api/audit/log?tail=999999&apikey=test-key")
+	if code != http.StatusOK || !bodyHasStatus(body, http.StatusOK) {
+		t.Errorf("超大 tail 应被钳制而非报错: %d %s", code, body)
 	}
 }
 

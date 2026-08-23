@@ -234,3 +234,40 @@ func (d *Daemon) auditMiddleware(next http.Handler) http.Handler {
 			status, time.Since(start).Round(time.Millisecond), body)
 	})
 }
+
+// handleAuditLog 读取审计日志（只读查看；内容已经过 apikey 打码与控制字符转义）。
+// GET /api/audit/log?tail=<行数>&since=<unix_ms>
+//   - tail：返回最后 N 行（默认 500；显式 0 表示全部，上限 20000）
+//   - since：返回该时间点之后新增的内容（前端轮询增量用，按文件 mtime 近似过滤）
+//
+// -audit-log=false 或日志文件尚不存在时返回空字符串（200）。
+func (d *Daemon) handleAuditLog(w http.ResponseWriter, r *http.Request) {
+	if d.AuditLog == nil {
+		writeOK(w, "")
+		return
+	}
+	// 旧→新：轮转归档在前，当前文件在后（readLogTail 按此顺序倒读）
+	paths := []string{d.AuditLog.path + ".1", d.AuditLog.path}
+	var (
+		out string
+		err error
+	)
+	if queryParam(r, "since") != "" {
+		since := int64(atoiDefault(queryParam(r, "since"), 0))
+		out, err = readLogSince(paths, since)
+	} else {
+		tail := atoiDefault(queryParam(r, "tail"), 500)
+		if tail < 0 {
+			tail = 0
+		}
+		if tail > 20000 {
+			tail = 20000
+		}
+		out, err = readLogTail(paths, tail)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取审计日志失败: "+err.Error())
+		return
+	}
+	writeOK(w, out)
+}
