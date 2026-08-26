@@ -195,9 +195,10 @@ type Daemon struct {
 	Instances   []*Instance
 	StartedAt   time.Time
 
-	LogDir      string      // 实例日志落盘目录（空 = 不落盘）
-	LogMaxBytes int64       // 单实例日志文件轮转上限（字节）
-	AuditLog    *fileLogger // 审计日志落盘器（nil = 未启用 -audit-log=false）
+	LogDir      string         // 实例日志落盘目录（空 = 不落盘）
+	LogMaxBytes int64          // 单实例日志文件轮转上限（字节）
+	AuditLog    *fileLogger    // 审计日志落盘器（nil = 未启用 -audit-log=false）
+	accounts    *accountSystem // 账户子系统（docs/accounts-design.md；nil = 未启用）
 
 	jobs  *jobStore  // 容器长任务注册表（container.go）
 	tasks *taskStore // 通用异步任务表（JDK 安装 / 核心下载 / 备份恢复等）

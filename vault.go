@@ -453,32 +453,51 @@ func otpauthURI(user string, secret []byte) string {
 
 // registerVaultRoutes 注册保险库路由（RegisterRoutes 调用）。
 func (d *Daemon) registerVaultRoutes(mux *http.ServeMux) {
+	perm("保险库", "GET /api/vault/status", "查看保险库状态")
 	mux.HandleFunc("GET /api/vault/status", d.auth(d.handleVaultStatus))
+	perm("保险库", "POST /api/vault/init", "初始化保险库")
 	mux.HandleFunc("POST /api/vault/init", d.auth(d.handleVaultInit))
+	perm("保险库", "POST /api/vault/totp/verify", "验证 TOTP")
 	mux.HandleFunc("POST /api/vault/totp/verify", d.auth(d.handleVaultTOTPVerify))
+	perm("保险库", "POST /api/vault/totp/reset", "重置 TOTP")
 	mux.HandleFunc("POST /api/vault/totp/reset", d.auth(d.handleVaultTOTPReset))
+	perm("保险库", "POST /api/vault/challenge", "发起解锁挑战")
 	mux.HandleFunc("POST /api/vault/challenge", d.auth(d.handleVaultChallenge))
+	perm("保险库", "POST /api/vault/cert", "注册证书")
 	mux.HandleFunc("POST /api/vault/cert", d.auth(d.handleVaultCert))
+	perm("保险库", "POST /api/vault/unlock", "解锁保险库")
 	mux.HandleFunc("POST /api/vault/unlock", d.auth(d.handleVaultUnlock))
+	perm("保险库", "POST /api/vault/lock", "锁定保险库")
 	mux.HandleFunc("POST /api/vault/lock", d.auth(d.handleVaultLock))
+	perm("保险库", "POST /api/vault/password", "修改保险库密码")
 	mux.HandleFunc("POST /api/vault/password", d.auth(d.handleVaultPassword))
+	perm("保险库", "POST /api/vault/recovery", "恢复保险库")
 	mux.HandleFunc("POST /api/vault/recovery", d.auth(d.handleVaultRecovery))
+	perm("保险库", "POST /api/vault/user/add", "添加保险库用户")
 	mux.HandleFunc("POST /api/vault/user/add", d.auth(d.handleVaultUserAdd))
+	perm("保险库", "POST /api/vault/user/remove", "移除保险库用户")
 	mux.HandleFunc("POST /api/vault/user/remove", d.auth(d.handleVaultUserRemove))
+	perm("保险库", "GET /api/vault/users", "查看保险库用户")
 	mux.HandleFunc("GET /api/vault/users", d.auth(d.handleVaultUsers))
+	perm("保险库", "POST /api/vault/migrate", "发起保险库迁移")
 	mux.HandleFunc("POST /api/vault/migrate", d.auth(d.handleVaultMigrate))
+	perm("保险库", "GET /api/vault/migrate/status", "查看迁移状态")
 	mux.HandleFunc("GET /api/vault/migrate/status", d.auth(d.handleVaultMigrateStatus))
+	perm("保险库", "POST /api/vault/backup", "备份保险库")
 	mux.HandleFunc("POST /api/vault/backup", d.auth(d.handleVaultBackup))
 }
 
 // vaultGate 数据面门禁（docs/vault-design.md §7.3/§8.8）：
 // vault 未启用 → 放行；启用后未初始化 → 403 vault not initialized；
 // 锁定 → 403 vault locked；解锁 → 校验 X-Vault-Token 会话并滑动续期。
-// /api/vault/*、/api/overview、/api/load 豁免（overview 由处理器脱敏）。
+// /api/vault/*、/api/overview、/api/load 豁免（overview 由处理器脱敏）；
+// /api/auth/*（账户登录/登出）豁免：账户系统与保险库是独立安全域，
+// 保险库锁定期间仍需能登录/登出账户。
 func (d *Daemon) vaultGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		if strings.HasPrefix(p, "/api/vault/") || p == "/api/overview" || p == "/api/load" {
+		if strings.HasPrefix(p, "/api/vault/") || p == "/api/overview" || p == "/api/load" ||
+			strings.HasPrefix(p, "/api/auth/") {
 			next.ServeHTTP(w, r)
 			return
 		}

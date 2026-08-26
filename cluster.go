@@ -151,25 +151,38 @@ func zipDir(src, zipPath string) error {
 // registerClusterRoutes 注册集群节点 API 路由。
 func (d *Daemon) registerClusterRoutes(mux *http.ServeMux) {
 	// P0 节点级文件存储
+	perm("集群", "GET /api/cluster/files/list", "列出同步区文件")
 	mux.HandleFunc("GET /api/cluster/files/list", d.auth(d.handleClusterFileList))
+	perm("集群", "POST /api/cluster/files/mkdir", "创建同步区目录")
 	mux.HandleFunc("POST /api/cluster/files/mkdir", d.auth(d.handleClusterMkdir))
+	perm("集群", "DELETE /api/cluster/files", "删除同步区文件")
 	mux.HandleFunc("DELETE /api/cluster/files", d.auth(d.handleClusterDelete))
+	perm("集群", "POST /api/cluster/files/download", "申请同步区下载票据")
 	mux.HandleFunc("POST /api/cluster/files/download", d.auth(d.handleClusterDownload))
+	perm("集群", "POST /api/cluster/files/upload", "申请同步区上传票据")
 	mux.HandleFunc("POST /api/cluster/files/upload", d.auth(d.handleClusterUpload))
 
 	// P1 增量同步原语
+	perm("集群", "GET /api/cluster/sync/list", "同步区文件树快照")
 	mux.HandleFunc("GET /api/cluster/sync/list", d.auth(d.handleClusterSyncList))
+	perm("实例", "GET /api/instance/sync/list", "实例文件树快照")
 	mux.HandleFunc("GET /api/instance/sync/list", d.auth(d.handleInstanceSyncList))
 	// 注意：POST /api/instance/snapshot|restore 已由 backup.go 任务化实现
 	// （docs/irix-node-local-parity.md §4.5），集群迁移经 runTransfer 走
 	// 「任务化快照 → 备份下载票据 → 直连下载」流程，此处不再重复注册。
 
 	// P2 集群协调
+	perm("集群", "GET /api/cluster/status", "查看集群状态")
 	mux.HandleFunc("GET /api/cluster/status", d.auth(d.handleClusterStatus))
+	perm("集群", "POST /api/cluster/heartbeat", "上报集群心跳")
 	mux.HandleFunc("POST /api/cluster/heartbeat", d.auth(d.handleClusterHeartbeat))
+	perm("集群", "POST /api/cluster/events", "上报集群事件")
 	mux.HandleFunc("POST /api/cluster/events", d.auth(d.handleClusterEvents))
+	perm("集群", "GET /api/cluster/peers", "查看对等节点")
 	mux.HandleFunc("GET /api/cluster/peers", d.auth(d.handleClusterPeers))
+	perm("集群", "POST /api/cluster/transfer", "发起节点间直传")
 	mux.HandleFunc("POST /api/cluster/transfer", d.auth(d.handleClusterTransfer))
+	perm("集群", "GET /api/cluster/transfer", "查看直传任务状态")
 	mux.HandleFunc("GET /api/cluster/transfer", d.auth(d.handleTransferStatus))
 }
 

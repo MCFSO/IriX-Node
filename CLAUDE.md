@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-IriX 客户端「节点」类型的本地节点守护进程。纯 Go 标准库实现、**零第三方依赖** (`go.mod` 无 `require`)。提供与 MCSManager 面板一致风格的 HTTP API。
+IriX 客户端「节点」类型的本地节点守护进程，Go 语言实现。
+核心以标准库为主；账户管理引入少量经批准的第三方依赖（SQLite/MySQL/PostgreSQL
+驱动、Redis 客户端与 x/crypto，见 `go.mod` 与 `docs/accounts-design.md`）。
+提供与 MCSManager 面板一致风格的 HTTP API。
 
 ## 常用命令
 
@@ -36,6 +39,10 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 | `download.go` | 带票据的下载/上传直连通道：`ticketStore`（密码票据，10 分钟过期，上限 10000，定时清理） |
 | `overview.go` | `GET /api/overview` 主机信息（MCSM 格式响应，含系统信息与远程节点列表） |
 | `auth.go` | 配对码机制：20 位随机码生成（`crypto/rand`，无偏差）、SHA-256 哈希持久化、恒定时间比较 |
+| `accounts.go` | 账户管理数据面：SQL 存储（sqlite/mysql/postgres 驱动 + database/sql 连接池）、会话、bcrypt、Redis 热缓存与 30 秒冷却降级 |
+| `accounts_handlers.go` | 账户管理 API：登录/登出/改密（root 首次强制改密）/账户 CRUD/权限开关；`authenticate`（apikey → root；Bearer token → 账户身份） |
+| `perm_catalog.go` | 端点权限目录：`perm(组, 模式, 描述)` 织入、分组、`permAllowed` 逐端点判定 |
+| `cors.go` | CORS 中间件：跨源响应头、预检 204 终结、错误响应同样带 CORS 头 |
 | `sysinfo.go` + `sysinfo_{windows,linux,bsd,other}.go` | 跨平台系统信息采集（构建标签区分）：运行时间、内存、CPU |
 
 ## 锁与并发
@@ -49,7 +56,12 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 ## 约定
 
 - **语言**：代码注释、README、错误消息一律使用中文。
-- **依赖**：只允许标准库，禁止引入第三方模块。
+- **依赖**：依赖最小化——核心仍是标准库；仅数据库驱动（`go-sql-driver/mysql`、
+  `jackc/pgx`、`modernc.org/sqlite`）、`redis/go-redis` 与 `golang.org/x/crypto`
+  允许（`go.mod` 直接依赖即这些）。新增依赖须先说明理由。
+- **账户权限**：新路由注册时必须相邻调用 `perm(组名, 路由模式, 中文描述)`
+  纳入端点权限目录（`qa_perms_test.go` 反向扫描源码校验漏标注）。
+  规则见 `docs/accounts-design.md`。
 - **风格**：`gofmt` 排版；导出符号带中文注释；类型为 `*Daemon`/`*Instance` 的方法。
 - **平台差异**：系统相关代码拆成 `_windows`/`_linux`/`_bsd`/`_other` 后缀文件，用 `//go:build` 标签区分。新平台能力必须补齐对应文件。
 - **错误处理**：HTTP 处理器出错时用 `writeError` 返回；错误消息为中文。
@@ -58,7 +70,9 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 ## API 约定
 
 - 路由用 Go 1.22+ 方法前缀模式（如 `"GET /api/instance"`），全部集中在 `RegisterRoutes`。
-- 认证：请求携带 `?apikey=` 参数或 `X-Api-Key` 头；`-apikey` 为空时校验配对码哈希。
+- 认证三通道：`?apikey=`/`X-Api-Key`（配对码，root 管理员，不受权限开关限制）、
+  `Authorization: Bearer <token>`（账户会话，按端点权限开关判定；root 首次登录强制改密）、
+  直连票据（/download/ /upload/）。见 `docs/accounts-design.md`。
 - 文件路径必须经过 `NormalizePath` 防止 `..` 越界。`/` 前缀的路径代表实例 cwd 根（跨平台一致）。
 - 实例状态常量：`StatusBusy=-1, StatusStopped=0, StatusStopping=1, StatusStarting=2, StatusRunning=3`。
 - API 请求体上限 16 MiB（`/upload/` 直连通道除外）。

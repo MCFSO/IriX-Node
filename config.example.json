@@ -51,5 +51,17 @@
     "scrubOnDelete": false,
     "_comment_defaultFilesMode": "defaultFilesMode: 新实例文件区默认模式：plaintext（明文，默认，兼容现状）/ materialize（启停物化加密，新实例默认 vaultFiles=true）。",
     "defaultFilesMode": "plaintext"
+  },
+  "_comment_accounts": "accounts: 账户管理存储（docs/accounts-design.md）。默认 SQLite（{data}/accounts.db）；可选 MySQL / PostgreSQL（driver=mysql|postgres 且需 dsn 连接串）；Redis 可选缓存登录会话与权限热数据（不可用时自动回退数据库，不影响功能）。连接池参数：maxOpen 最大连接数（默认 20）、maxIdle 最大空闲连接（默认 10）、connMaxLifetimeMin 连接最大存活分钟（默认 30）；redisPoolSize Redis 连接池大小（默认 16）。",
+  "accounts": {
+    "driver": "sqlite",
+    "dsn": "",
+    "maxOpen": 20,
+    "maxIdle": 10,
+    "connMaxLifetimeMin": 30,
+    "redisAddr": "",
+    "redisPassword": "",
+    "redisDB": 0,
+    "redisPoolSize": 16
   }
 }

@@ -65,98 +65,158 @@ func (d *Daemon) authOK(r *http.Request) bool {
 	return checkPairing(got, d.PairingHash)
 }
 
-// RegisterRoutes 注册全部路由。
+// RegisterRoutes 注册全部路由。除直连通道与登录入口外，
+// 每个端点同时通过 perm() 织入权限目录（组名 + 端点 + 中文描述），
+// 供账户管理的「每一步开关」使用（docs/accounts-design.md）。
 func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 概览
+	perm("概览", "GET /api/overview", "查看节点概览")
 	mux.HandleFunc("GET /api/overview", d.auth(d.handleOverview))
+	perm("概览", "GET /api/load", "查看负载调谐状态")
 	mux.HandleFunc("GET /api/load", d.auth(d.handleLoad))
 
 	// 审计日志只读接口（docs/backend-requirements.md P0）
+	perm("审计", "GET /api/audit/log", "查看审计日志")
 	mux.HandleFunc("GET /api/audit/log", d.auth(d.handleAuditLog))
 
 	// 实例列表 / 详情 / 增删改
+	perm("实例", "GET /api/service/remote_service_instances", "查看实例列表")
 	mux.HandleFunc("GET /api/service/remote_service_instances", d.auth(d.handleInstanceList))
+	perm("实例", "GET /api/instance", "查看实例详情")
 	mux.HandleFunc("GET /api/instance", d.auth(d.handleInstanceDetail))
+	perm("实例", "POST /api/instance", "创建实例")
 	mux.HandleFunc("POST /api/instance", d.auth(d.handleInstanceCreate))
+	perm("实例", "PUT /api/instance", "修改实例配置")
 	mux.HandleFunc("PUT /api/instance", d.auth(d.handleInstanceUpdate))
+	perm("实例", "DELETE /api/instance", "删除实例")
 	mux.HandleFunc("DELETE /api/instance", d.auth(d.handleInstanceDelete))
 
 	// 导入目录创建实例（docs/irix-node-local-parity.md §4.2.4）
+	perm("实例", "POST /api/instance/import", "导入实例")
 	mux.HandleFunc("POST /api/instance/import", d.auth(d.handleInstanceImport))
 
 	// 实例操作
+	perm("实例", "GET /api/protected_instance/open", "启动实例")
 	mux.HandleFunc("GET /api/protected_instance/open", d.auth(d.handleInstanceStart))
+	perm("实例", "GET /api/protected_instance/stop", "停止实例")
 	mux.HandleFunc("GET /api/protected_instance/stop", d.auth(d.handleInstanceStop))
+	perm("实例", "GET /api/protected_instance/restart", "重启实例")
 	mux.HandleFunc("GET /api/protected_instance/restart", d.auth(d.handleInstanceRestart))
+	perm("实例", "GET /api/protected_instance/kill", "强制终止实例")
 	mux.HandleFunc("GET /api/protected_instance/kill", d.auth(d.handleInstanceKill))
+	perm("实例", "GET /api/protected_instance/command", "向实例发送命令")
 	mux.HandleFunc("GET /api/protected_instance/command", d.auth(d.handleInstanceCommand))
+	perm("实例", "GET /api/protected_instance/outputlog", "查看实例输出日志")
 	mux.HandleFunc("GET /api/protected_instance/outputlog", d.auth(d.handleInstanceOutputLog))
 
 	// 实例日志（docs/irix-node-local-parity.md §4.1.2）
+	perm("实例", "GET /api/instance/logs", "查看实例历史日志")
 	mux.HandleFunc("GET /api/instance/logs", d.auth(d.handleInstanceLogs))
+	perm("实例", "DELETE /api/instance/logs", "清空实例日志")
 	mux.HandleFunc("DELETE /api/instance/logs", d.auth(d.handleInstanceLogsClear))
 
 	// 实例级指标（docs/irix-node-local-parity.md §4.3）
+	perm("实例", "GET /api/instance/stats", "查看实例实时指标")
 	mux.HandleFunc("GET /api/instance/stats", d.auth(d.handleInstanceStats))
 
 	// 插件/Mod 元数据（docs/irix-node-local-parity.md §4.4）
+	perm("实例", "GET /api/instance/plugins", "查看实例插件元数据")
 	mux.HandleFunc("GET /api/instance/plugins", d.auth(d.handleInstancePlugins))
 
 	// 实例备份/恢复（docs/irix-node-local-parity.md §4.5，任务化）
+	perm("实例", "POST /api/instance/snapshot", "创建实例快照")
 	mux.HandleFunc("POST /api/instance/snapshot", d.auth(d.handleInstanceSnapshot))
+	perm("实例", "GET /api/instance/snapshot-progress", "查看快照进度")
 	mux.HandleFunc("GET /api/instance/snapshot-progress", d.auth(d.writeSnapshotStatus))
+	perm("实例", "POST /api/instance/restore", "恢复实例快照")
 	mux.HandleFunc("POST /api/instance/restore", d.auth(d.handleInstanceRestore))
+	perm("实例", "GET /api/instance/backups", "查看实例备份列表")
 	mux.HandleFunc("GET /api/instance/backups", d.auth(d.handleBackupsList))
+	perm("实例", "DELETE /api/instance/backups", "删除实例备份")
 	mux.HandleFunc("DELETE /api/instance/backups", d.auth(d.handleBackupsDelete))
+	perm("实例", "POST /api/instance/backups/download", "下载实例备份")
 	mux.HandleFunc("POST /api/instance/backups/download", d.auth(d.handleBackupDownloadTicket))
 
 	// 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）
+	perm("实例", "GET /api/instance/console/ws", "实时控制台")
 	mux.HandleFunc("GET /api/instance/console/ws", d.auth(d.handleConsoleWS))
 
 	// 核心下载（docs/irix-node-local-parity.md §4.2.3，任务化）
+	perm("实例", "POST /api/instance/download-core", "下载核心")
 	mux.HandleFunc("POST /api/instance/download-core", d.auth(d.handleDownloadCore))
+	perm("实例", "GET /api/instance/download-core-progress", "查看核心下载进度")
 	mux.HandleFunc("GET /api/instance/download-core-progress", d.auth(d.writeTaskStatus))
 	// Java 运行时（docs/irix-node-local-parity.md §4.2.1）
+	perm("运行时", "GET /api/runtime/java", "查看 Java 运行时")
 	mux.HandleFunc("GET /api/runtime/java", d.auth(d.handleRuntimeJava))
 	// JDK 安装/卸载（docs/irix-node-local-parity.md §4.2.2，任务化）
+	perm("运行时", "POST /api/runtime/java/install", "安装 JDK")
 	mux.HandleFunc("POST /api/runtime/java/install", d.auth(d.handleInstallJava))
+	perm("运行时", "GET /api/runtime/java/install-progress", "查看 JDK 安装进度")
 	mux.HandleFunc("GET /api/runtime/java/install-progress", d.auth(d.writeTaskStatus))
+	perm("运行时", "DELETE /api/runtime/java", "卸载 JDK")
 	mux.HandleFunc("DELETE /api/runtime/java", d.auth(d.handleUninstallJava))
 
 	// 文件管理
+	perm("文件", "GET /api/files/list", "列出文件")
 	mux.HandleFunc("GET /api/files/list", d.auth(d.handleFileList))
+	perm("文件", "PUT /api/files/", "读写文件内容")
 	mux.HandleFunc("PUT /api/files/", d.auth(d.handleFileReadWrite))
+	perm("文件", "DELETE /api/files", "删除文件")
 	mux.HandleFunc("DELETE /api/files", d.auth(d.handleFileDelete))
+	perm("文件", "PUT /api/files/move", "移动文件")
 	mux.HandleFunc("PUT /api/files/move", d.auth(d.handleFileMove))
+	perm("文件", "POST /api/files/copy", "复制文件")
 	mux.HandleFunc("POST /api/files/copy", d.auth(d.handleFileCopy))
+	perm("文件", "POST /api/files/compress", "压缩文件")
 	mux.HandleFunc("POST /api/files/compress", d.auth(d.handleFileCompress))
+	perm("文件", "POST /api/files/mkdir", "新建目录")
 	mux.HandleFunc("POST /api/files/mkdir", d.auth(d.handleFileMkdir))
+	perm("文件", "POST /api/files/touch", "新建文件")
 	mux.HandleFunc("POST /api/files/touch", d.auth(d.handleFileTouch))
+	perm("文件", "POST /api/files/download", "申请下载票据")
 	mux.HandleFunc("POST /api/files/download", d.auth(d.handleFileDownloadTicket))
+	perm("文件", "POST /api/files/upload", "申请上传票据")
 	mux.HandleFunc("POST /api/files/upload", d.auth(d.handleFileUploadTicket))
 
 	// 实例级回收站（docs/irix-node-local-parity.md §4.6）
+	perm("回收站", "POST /api/files/trash", "移入回收站")
 	mux.HandleFunc("POST /api/files/trash", d.auth(d.handleFileTrash))
+	perm("回收站", "GET /api/files/trash/list", "查看回收站")
 	mux.HandleFunc("GET /api/files/trash/list", d.auth(d.handleTrashList))
+	perm("回收站", "POST /api/files/trash/restore", "恢复回收站条目")
 	mux.HandleFunc("POST /api/files/trash/restore", d.auth(d.handleTrashRestore))
+	perm("回收站", "POST /api/files/trash/empty", "清空回收站")
 	mux.HandleFunc("POST /api/files/trash/empty", d.auth(d.handleTrashEmpty))
 
 	// 节点端内网穿透 FRP（docs/irix-node-local-parity.md §4.7）
+	perm("FRP", "GET /api/frp/status", "查看 FRP 状态")
 	mux.HandleFunc("GET /api/frp/status", d.auth(d.handleFRPStatus))
+	perm("FRP", "POST /api/frp/tunnels", "创建 FRP 隧道")
 	mux.HandleFunc("POST /api/frp/tunnels", d.auth(d.handleFRPCreate))
+	perm("FRP", "POST /api/frp/tunnels/{id}/start", "启动 FRP 隧道")
 	mux.HandleFunc("POST /api/frp/tunnels/{id}/start", d.auth(d.handleFRPStart))
+	perm("FRP", "POST /api/frp/tunnels/{id}/stop", "停止 FRP 隧道")
 	mux.HandleFunc("POST /api/frp/tunnels/{id}/stop", d.auth(d.handleFRPStop))
+	perm("FRP", "DELETE /api/frp/tunnels/{id}", "删除 FRP 隧道")
 	mux.HandleFunc("DELETE /api/frp/tunnels/{id}", d.auth(d.handleFRPDelete))
+	perm("FRP", "GET /api/frp/tunnels/{id}/logs", "查看隧道日志")
 	mux.HandleFunc("GET /api/frp/tunnels/{id}/logs", d.auth(d.handleFRPLogs))
+	perm("FRP", "POST /api/frp/binary", "上传 FRP 客户端")
 	mux.HandleFunc("POST /api/frp/binary", d.auth(d.handleFRPUploadBinary))
 
 	// AI 日志查询与监控历史（docs/irix-node-local-parity.md §4.8）
+	perm("AI 与指标", "GET /api/instance/logs/query", "AI 日志查询")
 	mux.HandleFunc("GET /api/instance/logs/query", d.auth(d.handleLogsQuery))
+	perm("AI 与指标", "GET /api/instance/metrics", "查看实例监控历史")
 	mux.HandleFunc("GET /api/instance/metrics", d.auth(d.handleInstanceMetrics))
 
-	// 下载/上传直连通道
+	// 下载/上传直连通道（票据绕过 API 认证，不在权限目录内）
 	mux.HandleFunc("GET /download/", d.handleDirectDownload)
 	mux.HandleFunc("POST /upload/", d.handleDirectUpload)
+
+	// 账户管理（docs/accounts-design.md）
+	d.registerAccountRoutes(mux)
 
 	// 容器环境（Docker / Bastille，NODE_API.md §6.1）
 	d.registerContainerRoutes(mux)
@@ -168,15 +228,49 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	d.registerVaultRoutes(mux)
 }
 
-// auth 包装器：校验 API 密钥。
+// auth 包装器：校验 API 密钥或账户会话，并按端点权限开关放行。
+// 管理员（配对码 / 固定 apikey / root 或 is_admin 账户会话）不受端点开关限制。
+// root 首次登录（尚未设置独立密码）的会话处于强制改密状态：
+// 除改密/登出/查看自身与权限目录外一律 403。
 func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !d.authOK(r) {
+		id := d.authenticate(r)
+		if id == nil {
 			writeError(w, http.StatusForbidden, "API 密钥无效")
 			return
 		}
-		next(w, r)
+		if id.mustChange && !permMustChangeExempt(r.Pattern) {
+			writeError(w, http.StatusForbidden, "首次登录必须先修改密码（PUT /api/accounts/password）")
+			return
+		}
+		if !id.isAdmin && !permIdentityExempt(r.Pattern) && !d.permAllowed(id.username, r.Pattern) {
+			writeError(w, http.StatusForbidden, "权限不足: 当前账户无权访问 "+r.Pattern)
+			return
+		}
+		next(w, withIdentity(r, id))
 	}
+}
+
+// permMustChangeExempt 强制改密状态下仍可访问的端点。
+func permMustChangeExempt(pattern string) bool {
+	switch pattern {
+	case "PUT /api/accounts/password", "POST /api/auth/logout",
+		"GET /api/accounts/me", "GET /api/accounts/catalog":
+		return true
+	}
+	return false
+}
+
+// permIdentityExempt 账户自身端点（查看自身/权限目录/自己改密/登出）：
+// 任何已登录账户均可用，不参与端点开关；管理端点（账户增删查、权限开关、
+// 管理员重置）在 handler 内再校验管理员身份。
+func permIdentityExempt(pattern string) bool {
+	switch pattern {
+	case "GET /api/accounts/me", "GET /api/accounts/catalog",
+		"PUT /api/accounts/password", "POST /api/auth/logout":
+		return true
+	}
+	return false
 }
 
 // requireInstance 读取 uuid 参数并解析出实例对象。

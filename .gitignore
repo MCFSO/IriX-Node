@@ -36,3 +36,4 @@ auth.hash
 logs/
 .mimosa/
 config.json
+accounts.db*

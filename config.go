@@ -49,24 +49,40 @@ type VaultConfig struct {
 	DefaultFilesMode   string `json:"defaultFilesMode"`   // 新实例文件区默认模式：plaintext | materialize
 }
 
+// AccountsConfig 配置文件 accounts 块：账户管理存储（docs/accounts-design.md）。
+// 默认 SQLite（{data}/accounts.db），可选 MySQL / PostgreSQL；Redis 可选
+// 缓存登录会话与权限热数据（不可用时自动回退数据库）。连接池参数均可调。
+type AccountsConfig struct {
+	Driver             string `json:"driver"`             // sqlite（默认）| mysql | postgres
+	DSN                string `json:"dsn"`                // 连接串；sqlite 为文件路径（空 = {data}/accounts.db）
+	MaxOpen            *int   `json:"maxOpen"`            // SQL 连接池最大连接数（默认 20）
+	MaxIdle            *int   `json:"maxIdle"`            // SQL 连接池最大空闲连接数（默认 10）
+	ConnMaxLifetimeMin *int   `json:"connMaxLifetimeMin"` // SQL 连接最大存活时间（分钟，默认 30）
+	RedisAddr          string `json:"redisAddr"`          // Redis 地址（空 = 不启用 Redis 缓存）
+	RedisPassword      string `json:"redisPassword"`      // Redis 密码
+	RedisDB            int    `json:"redisDB"`            // Redis 库号
+	RedisPoolSize      *int   `json:"redisPoolSize"`      // Redis 连接池大小（默认 16）
+}
+
 // Config config.json 配置文件结构。
 // 布尔/整数字段用指针：nil = 配置未写该字段（回退默认值）；
 // 非 nil = 显式设置（含 false/0，会覆盖内置默认值）。
 // 字符串字段零值（""）与「未设置」语义天然一致（bind 回退环境变量/默认值、
 // apiKey 空 = 配对码机制、data 空 = 当前目录），无需指针。
 type Config struct {
-	Bind              string       `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
-	Port              int          `json:"port"`              // 监听端口（1-65535；0 = 未设置）
-	Data              string       `json:"data"`              // 数据目录（空 = 当前目录）
-	APIKey            string       `json:"apiKey"`            // 固定 API 密钥（空 = 启用配对码机制）
-	InstanceLog       *bool        `json:"instanceLog"`       // 实例日志落盘开关
-	InstanceLogMax    *int         `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
-	AuditLog          *bool        `json:"auditLog"`          // 审计日志落盘开关
-	AuditLogMax       *int         `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
-	LoadTune          *bool        `json:"loadTune"`          // 负载自适应调谐开关
-	TransferAllowCIDR string       `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
-	TLS               *TLSConfig   `json:"tls"`               // TLS 传输加密（nil = 未配置）
-	Vault             *VaultConfig `json:"vault"`             // 加密保险库（nil = 未配置）
+	Bind              string          `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
+	Port              int             `json:"port"`              // 监听端口（1-65535；0 = 未设置）
+	Data              string          `json:"data"`              // 数据目录（空 = 当前目录）
+	APIKey            string          `json:"apiKey"`            // 固定 API 密钥（空 = 启用配对码机制）
+	InstanceLog       *bool           `json:"instanceLog"`       // 实例日志落盘开关
+	InstanceLogMax    *int            `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
+	AuditLog          *bool           `json:"auditLog"`          // 审计日志落盘开关
+	AuditLogMax       *int            `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
+	LoadTune          *bool           `json:"loadTune"`          // 负载自适应调谐开关
+	TransferAllowCIDR string          `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
+	TLS               *TLSConfig      `json:"tls"`               // TLS 传输加密（nil = 未配置）
+	Vault             *VaultConfig    `json:"vault"`             // 加密保险库（nil = 未配置）
+	Accounts          *AccountsConfig `json:"accounts"`          // 账户管理存储（nil = 默认 SQLite）
 }
 
 //go:embed config.example.json
@@ -139,6 +155,16 @@ type nodeOptions struct {
 	VaultBlockSizeKB      int
 	VaultScrubOnDelete    bool
 	VaultDefaultFilesMode string
+	// 账户管理（docs/accounts-design.md）
+	AccountsDriver             string
+	AccountsDSN                string
+	AccountsMaxOpen            int
+	AccountsMaxIdle            int
+	AccountsConnMaxLifetimeMin int
+	RedisAddr                  string
+	RedisPassword              string
+	RedisDB                    int
+	RedisPoolSize              int
 }
 
 // applyConfig 应用配置文件：仅覆盖未被命令行显式设置的项。
@@ -225,6 +251,35 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 		}
 		if !setFlags["vault-default-files-mode"] && cfg.Vault.DefaultFilesMode != "" {
 			o.VaultDefaultFilesMode = cfg.Vault.DefaultFilesMode
+		}
+	}
+	if cfg.Accounts != nil {
+		if !setFlags["accounts-driver"] && cfg.Accounts.Driver != "" {
+			o.AccountsDriver = cfg.Accounts.Driver
+		}
+		if !setFlags["accounts-dsn"] && cfg.Accounts.DSN != "" {
+			o.AccountsDSN = cfg.Accounts.DSN
+		}
+		if cfg.Accounts.MaxOpen != nil {
+			o.AccountsMaxOpen = *cfg.Accounts.MaxOpen
+		}
+		if cfg.Accounts.MaxIdle != nil {
+			o.AccountsMaxIdle = *cfg.Accounts.MaxIdle
+		}
+		if cfg.Accounts.ConnMaxLifetimeMin != nil {
+			o.AccountsConnMaxLifetimeMin = *cfg.Accounts.ConnMaxLifetimeMin
+		}
+		if !setFlags["redis-addr"] && cfg.Accounts.RedisAddr != "" {
+			o.RedisAddr = cfg.Accounts.RedisAddr
+		}
+		if !setFlags["redis-password"] && cfg.Accounts.RedisPassword != "" {
+			o.RedisPassword = cfg.Accounts.RedisPassword
+		}
+		if !setFlags["redis-db"] && cfg.Accounts.RedisDB != 0 {
+			o.RedisDB = cfg.Accounts.RedisDB
+		}
+		if cfg.Accounts.RedisPoolSize != nil {
+			o.RedisPoolSize = *cfg.Accounts.RedisPoolSize
 		}
 	}
 }

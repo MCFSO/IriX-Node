@@ -1,6 +1,8 @@
 # IriX Node Daemon
 
-IriX 客户端「节点」类型中的本地节点守护进程，使用 Go 语言实现、零第三方依赖。
+IriX 客户端「节点」类型中的本地节点守护进程，使用 Go 语言实现。
+核心仍以标准库为主；账户管理引入少量第三方依赖（SQLite/MySQL/PostgreSQL
+驱动、Redis 客户端与 x/crypto，见 `go.mod` 与 `docs/accounts-design.md`）。
 
 AI作品轻喷
 
@@ -27,6 +29,18 @@ go build -o irix-node .
 | `-audit-log` | 将用户操作审计日志落盘到 `{data}/logs/audit.log` | 开启 |
 | `-audit-log-max` | 审计日志单文件轮转上限（MB，超过后轮转为 `.1`） | `64` |
 | `-transfer-allow-cidr` | 集群拉取（`POST /api/cluster/transfer`）放行的内网 CIDR 列表（逗号分隔）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置，如 `192.168.0.0/16,10.0.0.0/8` | 空 |
+| `-accounts-driver` | 账户管理数据库驱动：`sqlite` / `mysql` / `postgres`（见 `docs/accounts-design.md`） | `sqlite` |
+| `-accounts-dsn` | 账户管理数据库连接串（sqlite 为文件路径，空 = `{data}/accounts.db`） | 空 |
+| `-redis-addr` | Redis 地址（空 = 不启用，账户会话与权限直接走数据库） | 空 |
+| `-redis-password` | Redis 密码 | 空 |
+| `-redis-db` | Redis 库号 | `0` |
+
+### 账户管理
+
+配对码登录即 **root 管理员**：首次用配对码登录时必须修改密码（此后配对码不再
+用于登录）；管理员可创建/删除账户，并对**每个 API 端点**独立开关权限（按模块
+分组，支持整组开关），默认 SQLite 存储、可选 MySQL/PostgreSQL（自带连接池）、
+Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 
 ### 配置文件
 
