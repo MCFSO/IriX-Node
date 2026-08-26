@@ -487,7 +487,7 @@ func TestClusterTransferSSRF(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newTestServer(d)
 	defer srv.Close()
-	base := srv.URL + "/api/cluster/transfer?"+qaKV()
+	base := srv.URL + "/api/cluster/transfer?" + qaKV()
 
 	blocked := map[string]string{
 		"环回 IPv4":         "127.0.0.1:12399",
@@ -636,9 +636,9 @@ func TestContainerUnavailable(t *testing.T) {
 	// Bastille 端点在非 FreeBSD 平台恒 501（HTTP 与 body.status 一致）
 	if runtime.GOOS != "freebsd" {
 		for _, p := range []string{
-			"/api/bastille/releases?"+qaKV(),
-			"/api/bastille/jails?"+qaKV(),
-			"/api/bastille/templates?"+qaKV(),
+			"/api/bastille/releases?" + qaKV(),
+			"/api/bastille/jails?" + qaKV(),
+			"/api/bastille/templates?" + qaKV(),
 		} {
 			code, body := doReq(t, srv.URL+p)
 			if code != http.StatusNotImplemented {
@@ -685,10 +685,10 @@ func TestContainerUnavailable(t *testing.T) {
 	// Docker 端点：本机运行时不可用（或非 Linux）时 501
 	if !runtimeOK || runtime.GOOS != "linux" {
 		for _, p := range []string{
-			"/api/container/ps?"+qaKV(),
-			"/api/image/list?"+qaKV(),
-			"/api/volume/list?"+qaKV(),
-			"/api/network/list?"+qaKV(),
+			"/api/container/ps?" + qaKV(),
+			"/api/image/list?" + qaKV(),
+			"/api/volume/list?" + qaKV(),
+			"/api/network/list?" + qaKV(),
 		} {
 			code, body := doReq(t, srv.URL+p)
 			if code != http.StatusNotImplemented {
