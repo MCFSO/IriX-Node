@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（Security Vulnerability）
+    url: https://github.com/MCFSO/IriX-Node/security/advisories/new
+    about: 请勿用公开 Issue 报告安全问题，请走私密漏洞报告渠道（详见 SECURITY.md）
+  - name: 讨论 / 问答（Discussion）
+    url: https://github.com/MCFSO/IriX-Node/discussions
+    about: 使用疑问、方案讨论、非缺陷类交流请到 Discussions

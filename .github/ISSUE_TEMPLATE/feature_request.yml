@@ -1,0 +1,32 @@
+name: 功能建议（Feature Request）
+description: 提议新功能或既有能力的改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: 需求背景
+      description: 为什么要这个功能？解决了什么实际场景或痛点？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 你期望的接口 / 配置 / 行为大致是怎样的？可附草图或示例
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 影响范围与约束
+      description: |
+        可能涉及哪些模块（账户/权限、Vault、集群、容器/Bastille、文件、审计…）？
+        是否触及依赖最小化红线（核心标准库、仅允许 DB 驱动/Redis/x-crypto）？
+        是否需要跨平台 `_windows`/`_linux`/`_bsd`/`_other` 补齐？
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充说明
+      description: 参考资料、替代方案、相关 Issue / 设计文档链接

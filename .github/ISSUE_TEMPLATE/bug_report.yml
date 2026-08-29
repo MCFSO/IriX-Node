@@ -1,0 +1,59 @@
+name: Bug 反馈（Bug Report）
+description: 报告 IriX Node 守护进程的缺陷或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请确认：
+        - 该问题非安全漏洞（安全漏洞请走 `SECURITY.md` 中的私密报告渠道，勿用公开 Issue）。
+        - 已在最新 `main` 分支复现或确认存在。
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境信息
+      description: 运行平台、版本与关键启动配置
+      placeholder: |
+        - 平台 / 系统：Windows 11 / Ubuntu 22.04 / FreeBSD 14
+        - 版本（commit 或发布版）：main @ c769ba3
+        - 关键配置：-apikey / -tls-mode / -vault / -transfer-allow-cidr / -bind / -port
+        - 账户驱动：-accounts-driver（sqlite/mysql/postgres）、是否启用 Redis
+    validations:
+      required: true
+  - type: textarea
+    id: desc
+    attributes:
+      label: 问题描述
+      description: 发生了什么异常？对预期行为的偏离是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 从启动到出现异常的具体操作步骤
+      placeholder: |
+        1. 以 `...` 配置启动节点
+        2. 调用 `...` 接口（或执行 `...` 操作）
+        3. 观察到 `...`
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 你认为正确的表现应是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与错误信息
+      description: 进程日志、接口返回体、panic 堆栈等（请脱敏：-apikey、token、密码、配对码、证书等）
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充说明
+      description: 截图、相关文档链接、可能的根因猜测等
