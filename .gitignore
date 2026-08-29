@@ -37,3 +37,9 @@ logs/
 .mimosa/
 config.json
 accounts.db*
+
+# 本地构建产物（交叉编译输出，如 irix-node / node 及带平台后缀的产物）
+/irix-node
+/node
+irix-node-*
+/node-*
