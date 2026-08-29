@@ -22,9 +22,6 @@ import (
 	"time"
 )
 
-// bastilleRoot Bastille 数据目录。
-const bastilleRoot = "/usr/local/bastille"
-
 // CLI 绝对路径：FreeBSD 上以服务方式启动时 PATH 常不含 /usr/local/bin 与 sbin，
 // 依赖 PATH 查找会报 "executable file not found"，全部固定绝对路径。
 const (
@@ -504,16 +501,6 @@ func bastilleUmount(name, dest string) error {
 // mountBin mount 命令绝对路径（FreeBSD 服务方式启动时 PATH 常缺 sbin）。
 const mountBin = "/sbin/mount"
 
-// bastilleFstabPath 返回 jail 的 fstab 路径。
-func bastilleFstabPath(name string) string {
-	return filepath.Join(bastilleRoot, "jails", name, "fstab")
-}
-
-// bastilleJailRoot 返回 jail 根目录的宿主路径（thin jail 为指向 releases 的符号链接）。
-func bastilleJailRoot(name string) string {
-	return filepath.Join(bastilleRoot, "jails", name, "root")
-}
-
 // bastilleJailHostPath 把 jail 内路径解析为宿主机绝对路径（NODE_API.md §6.1 文件管理）。
 // jail 名必须对应 jails/ 下的真实目录；thin jail 的 root 符号链接解析与
 // .. / 符号链接越界校验由 resolveJailHostPath 处理。
@@ -528,66 +515,18 @@ func bastilleJailHostPath(name, jailPath string) (string, error) {
 	return resolveJailHostPath(filepath.Join(jailDir, "root"), jailPath)
 }
 
-// fstabEntry 单条 fstab 挂载（device mountpoint fstype options dump pass）。
-type fstabEntry struct {
-	Device  string
-	Mount   string
-	Fstype  string
-	Options string
-}
-
-// readFstab 解析 jail 的 fstab 文件为条目列表（跳过注释与空行）。
-func readFstab(name string) ([]fstabEntry, error) {
-	data, err := os.ReadFile(bastilleFstabPath(name))
+// bastilleMountList 挂载列表（fstab 条目 + 当前实际挂载，permanent 区分来源）。
+// 条目: {src?, dst, fstype, options?, permanent}；procfs/devfs 的 src 为 null。
+// fstab 部分由 bastilleMountListFstab（无构建标签，纯逻辑）构造，本函数在其
+// 基础上再合并系统 mount 命令输出的当前实际挂载。
+func bastilleMountList(name string) ([]map[string]any, error) {
+	items, err := bastilleMountListFstab(name)
 	if err != nil {
 		return nil, err
 	}
-	var out []fstabEntry
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		opts := ""
-		if len(fields) >= 4 {
-			opts = strings.Trim(fields[3], `"'`)
-		}
-		out = append(out, fstabEntry{Device: fields[0], Mount: fields[1], Fstype: fields[2], Options: opts})
-	}
-	return out, nil
-}
-
-// writeFstab 整文件写回 fstab（保留原有注释与空行结构）。
-func writeFstab(name string, lines []string) error {
-	return os.WriteFile(bastilleFstabPath(name), []byte(strings.Join(lines, "\n")), 0o644)
-}
-
-// bastilleMountList 挂载列表（fstab 条目 + 当前实际挂载，permanent 区分来源）。
-// 条目: {src?, dst, fstype, options?, permanent}；procfs/devfs 的 src 为 null。
-func bastilleMountList(name string) ([]map[string]any, error) {
-	entries, err := readFstab(name)
-	if err != nil {
-		return nil, fmt.Errorf("读取 fstab 失败: %w", err)
-	}
-	items := make([]map[string]any, 0, len(entries)+2)
-	seen := map[string]bool{} // "fstype|dst" 去重
-	for _, e := range entries {
-		key := e.Fstype + "|" + e.Mount
-		seen[key] = true
-		item := map[string]any{
-			"dst":       e.Mount,
-			"fstype":    e.Fstype,
-			"options":   e.Options,
-			"permanent": true,
-		}
-		if e.Device != "proc" && e.Device != "devfs" {
-			item["src"] = e.Device
-		}
-		items = append(items, item)
+	seen := map[string]bool{} // "fstype|dst" 去重（基于 fstab 已归一化的 dst）
+	for _, it := range items {
+		seen[it["fstype"].(string)+"|"+it["dst"].(string)] = true
 	}
 	// 合并当前实际挂载（未写入 fstab 的即时挂载，permanent=false）
 	jailRoot := bastilleJailRoot(name)
@@ -623,30 +562,6 @@ func bastilleMountList(name string) ([]map[string]any, error) {
 }
 
 // parseMountLine 解析 mount 输出行 "device on mountpoint (fstype, options...)"。
-func parseMountLine(line string) (dev, mnt, fstype, opts string, ok bool) {
-	idx := strings.Index(line, " on ")
-	if idx < 0 {
-		return "", "", "", "", false
-	}
-	dev = strings.TrimSpace(line[:idx])
-	rest := line[idx+4:]
-	pi := strings.Index(rest, " (")
-	if pi < 0 {
-		return "", "", "", "", false
-	}
-	mnt = strings.TrimSpace(rest[:pi])
-	inner := strings.TrimSuffix(rest[pi+2:], ")")
-	parts := strings.SplitN(inner, ",", 2)
-	if len(parts) == 0 {
-		return "", "", "", "", false
-	}
-	fstype = strings.TrimSpace(parts[0])
-	if len(parts) == 2 {
-		opts = strings.TrimSpace(parts[1])
-	}
-	return dev, mnt, fstype, opts, true
-}
-
 // bastilleMountAdd 添加挂载（docs/irix-node-container-api.md §4.10）：
 //   - nullfs（默认）：bastille mount <name> <src> <dst>（写 fstab + 即时挂载）
 //   - procfs/devfs：追加 fstab 条目并立即挂载到宿主 <jailroot>/<dst>；
@@ -666,8 +581,37 @@ func bastilleMountAdd(name, src, dst, fstype, options string) error {
 		if src == "" {
 			return fmt.Errorf("nullfs 挂载必须提供 src 参数（宿主机源路径）")
 		}
-		_, err := cliRun(cliTimeout, bastilleBin, "mount", name, src, dst, "nullfs", options, "0", "0")
-		return err
+		// 防重复：fstab 中已有同 fstype+dst 条目则报错（与 procfs/devfs 分支一致）
+		data, err := os.ReadFile(bastilleFstabPath(name))
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("读取 fstab 失败: %w", err)
+		}
+		for _, ln := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(strings.TrimSpace(ln))
+			if len(fields) >= 3 && fields[2] == "nullfs" && fields[1] == dst {
+				return fmt.Errorf("挂载点已存在（fstab 已有 nullfs %s），请先删除", dst)
+			}
+		}
+		// 确保宿主源目录存在（bastille mount 不保证自动创建，缺失则失败）
+		if st, err := os.Stat(src); err != nil || !st.IsDir() {
+			return fmt.Errorf("宿主机源路径不存在或非目录: %s", src)
+		}
+		// 确保 jail 内挂载点目录存在：bastille mount 不保证自动创建挂载点，
+		// 卸载（umount）后目录可能消失，再次挂载会因 mountpoint 不存在而失败。
+		// 此处与 procfs/devfs 分支对齐，预先 MkdirAll 兜底。
+		hostPath := filepath.Join(bastilleJailRoot(name), strings.TrimPrefix(dst, "/"))
+		if err := os.MkdirAll(hostPath, 0o755); err != nil {
+			return fmt.Errorf("创建挂载点目录失败: %w", err)
+		}
+		if _, err := cliRun(cliTimeout, bastilleBin, "mount", name, src, dst, "nullfs", options, "0", "0"); err != nil {
+			// 挂载失败：若目录是本次新建且仍为空，回滚以免残留空挂载点；
+			// 非空目录（用户原有内容）不删，避免误删数据。
+			if entries, e := os.ReadDir(hostPath); e == nil && len(entries) == 0 {
+				_ = os.Remove(hostPath)
+			}
+			return err
+		}
+		return nil
 	case "procfs", "devfs":
 		// 防重复：fstab 中已有同 fstype+dst 条目则报错
 		data, err := os.ReadFile(bastilleFstabPath(name))
@@ -703,41 +647,21 @@ func bastilleMountAdd(name, src, dst, fstype, options string) error {
 	}
 }
 
-// mustReadFstab 读取 fstab 原文（bastilleMountAdd 内部使用，失败返回空串）。
-func mustReadFstab(name string) []byte {
-	data, err := os.ReadFile(bastilleFstabPath(name))
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
-// bastilleFstabRemove 从 fstab 移除匹配 mount 的条目（可选限定 fstype）；返回是否移除。
-func bastilleFstabRemove(name, mount, fstype string) bool {
-	lines := strings.Split(string(mustReadFstab(name)), "\n")
-	var kept []string
-	removed := false
-	for _, line := range lines {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 3 && fields[1] == mount && (fstype == "" || fields[2] == fstype) {
-			removed = true
-			continue
-		}
-		kept = append(kept, line)
-	}
-	if removed {
-		_ = writeFstab(name, kept)
-	}
-	return removed
-}
-
 // bastilleMountRemove 卸载并移除 fstab 条目（docs/irix-node-container-api.md §4.10）。
-// fstab 中找不到条目时仅卸载，不报错。
+// fstab 中找不到条目时仅卸载；卸载失败时如实返回错误（不静默吞掉，
+// 以免 fstab 已删但实际仍挂载/状态脏，导致下次挂载因残留而失败）。
 func bastilleMountRemove(name, dst string) error {
+	// 先尝试卸载（无论 fstab 是否有条目都尝试，失败的 mountpoint 也需清理）
+	umountErr := bastilleUmount(name, dst)
+	// 再移除 fstab 条目
 	removed := bastilleFstabRemove(name, dst, "")
-	err := bastilleUmount(name, dst)
-	if err != nil && !removed {
-		return err
+	if umountErr != nil {
+		// 卸载失败：若 fstab 也无此条目，说明本来就没挂，视为无需处理；
+		// 若 fstab 有条目则必须向上报错，提示用户排查（如设备忙）。
+		if !removed {
+			return nil
+		}
+		return fmt.Errorf("卸载失败（fstab 条目已移除，但挂载点仍占用）: %w", umountErr)
 	}
 	return nil
 }

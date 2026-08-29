@@ -395,6 +395,26 @@ DELETE /api/bastille/jails/{name}/mounts?dst=<jail内路径>
 > （fstab 条目会在 `bastille start` 时自动挂载）。`GET` 列表应合并
 > fstab 条目与当前 `mount` 输出，`permanent` 表示条目来自 fstab。
 
+### 4.10.1 挂载路径语义与排障
+
+- **`src` 是宿主机路径，`dst` 是 jail 内绝对路径**（如 `/data`）。二者视角不同：
+  `src=/data/instances/test50` + `dst=/data` 表示把宿主机目录挂到 jail 内的
+  `/data`，在 jail 里 `ls /data` 才能看到内容。若把 `dst` 写成宿主绝对路径或
+  实例 cwd 之外的路径，文件会挂进 jail 内一个「没人去读」的目录，表现为
+  "挂上但看不到文件"。
+- **fstab 持久化**：`bastille mount`（nullfs）与 procfs/devfs 都会把条目写入
+  jail 的 fstab（`/usr/local/bastille/jails/<name>/fstab`）。**重启 jail
+  （`bastille restart`/`start`）会按 fstab 自动重新挂载**，条目不丢。
+  `GET /mounts` 同时合并 fstab 条目（permanent=true）与当前 `mount` 输出
+  （permanent=false），二者 dst 统一归一化为 jail 内路径返回。
+- **卸载后挂载点目录会被清掉**：`bastille umount` 会移除 jail 内挂载点目录，
+  再次 `POST /mounts` 时服务端会先 `MkdirAll` 重建挂载点再挂载（兜底），
+  不应再出现"卸载后永远挂不上"。若卸载报错（如设备忙），服务端会如实返回，
+  不再静默吞掉导致 fstab 已删但挂载残留的半残状态。
+- **不要绕过 IriX 直接 `bastille mount`**：命令行直接挂的条目虽也写 fstab，
+  但 `GET /mounts` 与 `DELETE /mounts` 的 dst 匹配已同时兼容 jail 内路径与
+  宿主绝对路径两种写法；统一走 IriX API 可避免 fstab 与列表/卸载状态不一致。
+
 ---
 
 ## 4.11 运行会话（在 jail 内运行长任务进程，如 MC 服务端）
