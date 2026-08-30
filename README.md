@@ -69,12 +69,12 @@ Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
 
-### 在 ARM / x86 / PowerPC Linux 上运行
+### 在 ARM / x86 / PowerPC / s390x Linux 上运行
 
 树莓派、Orange Pi、NanoPi、瑞芯微 RK / 全志系等 ARM 开发板，奔腾/赛扬年代的
-**32 位 x86** 老机器，以及 **POWER 系** 服务器（如 IBM POWER8/9、Talos II、
-OpenPOWER 机器），都只是普通的 `linux` 目标——与 x86 服务器用同一套 `linux`
-编译产物，开箱即用。按 `uname -m` 选择：
+**32 位 x86** 老机器，**POWER 系** 服务器（IBM POWER8/9、Talos II、OpenPOWER），
+以及 **IBM Z（z/Architecture，s390x）** 大型机，都只是普通的 `linux` 目标——
+与 x86 服务器用同一套 `linux` 编译产物，开箱即用。按 `uname -m` 选择：
 
 | `uname -m` 输出 | 设备 | Release 产物 |
 | --- | --- | --- |
@@ -82,6 +82,7 @@ OpenPOWER 机器），都只是普通的 `linux` 目标——与 x86 服务器�
 | `armv7l` | 32 位 ARM 老开发板（树莓派 3、Orange Pi Zero 等） | `irix-node-linux-arm` |
 | `i686` / `i386` | 32 位 x86 老机器（奔腾/赛扬，跑轻量 Linux） | `irix-node-linux-386` |
 | `ppc64le` | 64 位小端 POWER（IBM POWER8/9、Talos II、OpenPOWER） | `irix-node-linux-ppc64le` |
+| `s390x` | IBM Z / 大型机（z/Architecture，如 z15 / LinuxONE） | `irix-node-linux-s390x` |
 
 ```bash
 wget https://github.com/<你的仓库>/releases/latest/download/irix-node-linux-arm64
