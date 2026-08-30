@@ -1,9 +1,9 @@
-//go:build solaris || illumos
+//go:build solaris || illumos || mips || mipsle || mips64 || mips64le
 
-// 账户管理的 SQLite 装配桩（solaris/illumos 平台）。
-// Go 的纯 Go SQLite 驱动 modernc.org/sqlite 未覆盖 solaris/illumos，无法编译；
-// 这两个平台不支持 SQLite 账户存储，openSqlite 直接返回错误，强制改用
-// postgres / mysql（-accounts-driver postgres 并配置 -accounts-dsn）。
+// 账户管理的 SQLite 装配桩（solaris/illumos/mips 系平台）。
+// Go 的纯 Go SQLite 驱动 modernc.org/sqlite 未覆盖这些平台，无法编译；
+// 这里 openSqlite 直接返回错误，强制改用 postgres / mysql
+// （-accounts-driver postgres 并配置 -accounts-dsn）。
 
 package main
 

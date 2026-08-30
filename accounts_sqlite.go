@@ -1,9 +1,10 @@
-//go:build !solaris && !illumos
+//go:build !solaris && !illumos && !mips && !mipsle && !mips64 && !mips64le
 
-// 账户管理的 SQLite 驱动装配（非 solaris/illumos 平台）。
+// 账户管理的 SQLite 驱动装配（非 solaris/illumos/mips 系平台）。
 // 用 build tag 把 modernc.org/sqlite 隔离在本文件：Solaris/illumos 下 Go 的
-// 纯 Go SQLite 驱动（modernc.org/sqlite）未覆盖该平台，无法编译；这两个平台
-// 走 accounts_nosqlite.go，强制改用 postgres/mysql。
+// 纯 Go SQLite 驱动（modernc.org/sqlite）未覆盖该平台，无法编译；MIPS 全系
+// （mips/mipsle/mips64/mips64le）同样未被驱动覆盖。这些平台走
+// accounts_nosqlite.go，强制改用 postgres/mysql。
 
 package main
 

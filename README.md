@@ -69,12 +69,13 @@ Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
 
-### 在 ARM / x86 / PowerPC / s390x Linux 上运行
+### 在 ARM / x86 / PowerPC / s390x / MIPS Linux 上运行
 
 树莓派、Orange Pi、NanoPi、瑞芯微 RK / 全志系等 ARM 开发板，奔腾/赛扬年代的
 **32 位 x86** 老机器，**POWER 系** 服务器（IBM POWER8/9、Talos II、OpenPOWER），
-以及 **IBM Z（z/Architecture，s390x）** 大型机，都只是普通的 `linux` 目标——
-与 x86 服务器用同一套 `linux` 编译产物，开箱即用。按 `uname -m` 选择：
+**IBM Z（z/Architecture，s390x）** 大型机，以及 **MIPS** 设备（路由器、老
+Loongson 等），都只是普通的 `linux` 目标——与 x86 服务器用同一套 `linux`
+编译产物。按 `uname -m` 选择：
 
 | `uname -m` 输出 | 设备 | Release 产物 |
 | --- | --- | --- |
@@ -83,6 +84,10 @@ Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/
 | `i686` / `i386` | 32 位 x86 老机器（奔腾/赛扬，跑轻量 Linux） | `irix-node-linux-386` |
 | `ppc64le` | 64 位小端 POWER（IBM POWER8/9、Talos II、OpenPOWER） | `irix-node-linux-ppc64le` |
 | `s390x` | IBM Z / 大型机（z/Architecture，如 z15 / LinuxONE） | `irix-node-linux-s390x` |
+| `mips` | 32 位大端 MIPS（老式网络设备） | `irix-node-linux-mips` |
+| `mipsel` | 32 位小端 MIPS（MT7620/7621 等路由器） | `irix-node-linux-mipsle` |
+| `mips64` | 64 位大端 MIPS（Cavium Octeon 等） | `irix-node-linux-mips64` |
+| `mips64el` | 64 位小端 MIPS（老 Loongson 3A 等） | `irix-node-linux-mips64le` |
 
 ```bash
 wget https://github.com/<你的仓库>/releases/latest/download/irix-node-linux-arm64
@@ -94,6 +99,12 @@ chmod +x irix-node-linux-arm64
 > 底层同为 `linux/arm(64)` 编译（二进制可互通），但命名区分用途：标准 Linux
 > 开发板请用 `linux-arm*`；Termux 用 `Android-*`；鸿蒙用 `OpenHarmony-*`。
 >
+> **MIPS 全系账户存储不支持 SQLite**：Go 的 SQLite 驱动 `modernc.org/sqlite`
+> 未覆盖任何 MIPS 变体，因此 MIPS 产物与 Solaris/illumos 同款——启动时必须
+> 指定 `-accounts-driver postgres`（或 mysql）并配置 `-accounts-dsn`，其余
+> 功能（实例/文件/集群等）与普通 Linux 完全一致。32 位 MIPS 产物为
+> **softfloat** 编译（`GOMIPS=softfloat`），可运行在无 FPU 的路由器 SoC 上。
+>
 > **PowerPC 大端（`ppc64`）暂不支持**：旧 IBM pSeries / 老 Mac G5 等大端 PowerPC
 > 因 Go 的 SQLite 驱动 `modernc.org/sqlite` 仅覆盖小端 `ppc64le` 而无法编译；
 > 这类机器若可改用 PostgreSQL/MySQL（与 Solaris/illumos 同款隔离方案）可解锁，
@@ -102,6 +113,11 @@ chmod +x irix-node-linux-arm64
 > 关于 **真·MS-DOS（16 位实模式）**：Go 运行时要求 32 位保护模式与 MMU，且本程序是
 > 监听 TCP 端口的常驻服务，纯 DOS 无此能力，**无法兼容**。DOS 时代的老机器只要能跑
 > 轻量 32 位 Linux，即可用上表的 `irix-node-linux-386`。
+>
+> 关于 **Xtensa（ESP32 系列）**：Go 编译器不支持 Xtensa 架构（`unsupported
+> GOOS/GOARCH`），且 ESP32 级 Xtensa 芯片跑的是 FreeRTOS 而非 Linux，无法运行
+> 常驻 HTTP 服务，**无法兼容**。乐鑫系里仅 RISC-V 架构（ESP32-C/D/P 系列）理论上
+> 可跑 Linux 的型号才有可能，属另一话题。
 
 ### 在 Android（Termux）上运行
 

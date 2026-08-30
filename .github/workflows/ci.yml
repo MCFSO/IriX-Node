@@ -82,6 +82,16 @@ jobs:
             goarch: ppc64le
           - goos: linux
             goarch: s390x
+          - goos: linux
+            goarch: mips
+            gomips: softfloat
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+          - goos: linux
+            goarch: mips64
+          - goos: linux
+            goarch: mips64le
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -113,6 +123,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
         run: go vet ./...
       - name: Build
         env:
@@ -120,6 +131,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
         run: |
           bin="irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
