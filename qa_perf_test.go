@@ -207,7 +207,7 @@ func BenchmarkLogWrite(b *testing.B) {
 // BenchmarkJSONEncodeResponse 单个响应 JSON 编码开销。
 func BenchmarkJSONEncodeResponse(b *testing.B) {
 	payload := map[string]any{
-		"status": 200, "time": 1700000000000,
+		"status": 200, "time": int64(1700000000000),
 		"data": map[string]any{"maxPage": 1, "page": 0, "total": 100, "data": []any{}},
 	}
 	var sb strings.Builder
