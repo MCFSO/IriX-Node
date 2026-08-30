@@ -69,6 +69,27 @@ Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
 
+### 在 ARM Linux 开发板上运行
+
+树莓派、Orange Pi、NanoPi、瑞芯微 RK / 全志系等**标准 Linux** 开发板（跑
+Armbian / Debian / Ubuntu 等）并非特殊环境——它们就是普通的 `linux` 目标，
+与 x86 服务器用同一套 `linux` 编译产物，开箱即用。按 `uname -m` 选择：
+
+| `uname -m` 输出 | 设备 | Release 产物 |
+| --- | --- | --- |
+| `aarch64` | 64 位开发板（树莓派 4/5、RK3566、Orange Pi 3 等） | `irix-node-linux-arm64` |
+| `armv7l` | 32 位老开发板（树莓派 3、Orange Pi Zero 等） | `irix-node-linux-arm` |
+
+```bash
+wget https://github.com/<你的仓库>/releases/latest/download/irix-node-linux-arm64
+chmod +x irix-node-linux-arm64
+./irix-node-linux-arm64 -bind 127.0.0.1 -port 12346 -data ~/irix-data
+```
+
+> 注意：`irix-node-linux-arm*` 与 `irix-node-Android-*` / `irix-node-OpenHarmony-*`
+> 底层同为 `linux/arm(64)` 编译（二进制可互通），但命名区分用途：标准 Linux
+> 开发板请用 `linux-arm*`；Termux 用 `Android-*`；鸿蒙用 `OpenHarmony-*`。
+
 ### 在 Android（Termux）上运行
 
 IriX Node 为静态链接的纯 Go 二进制，无需 NDK 或交叉工具链，可直接在 Termux 中运行。
