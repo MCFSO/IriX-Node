@@ -78,6 +78,8 @@ jobs:
             goarch: loong64
           - goos: linux
             goarch: riscv64
+          - goos: linux
+            goarch: ppc64le
           - goos: darwin
             goarch: amd64
           - goos: darwin

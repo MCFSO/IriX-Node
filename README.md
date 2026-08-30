@@ -69,18 +69,19 @@ Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
 
-### 在 ARM Linux 开发板与 32 位 x86 老硬件上运行
+### 在 ARM / x86 / PowerPC Linux 上运行
 
-树莓派、Orange Pi、NanoPi、瑞芯微 RK / 全志系等 ARM 开发板，以及奔腾/赛扬年代的
-**32 位 x86** 老机器（跑 Armbian / Debian / Ubuntu / Alpine 等轻量 Linux），都只是
-普通的 `linux` 目标——与 x86 服务器用同一套 `linux` 编译产物，开箱即用。按 `uname -m`
-选择：
+树莓派、Orange Pi、NanoPi、瑞芯微 RK / 全志系等 ARM 开发板，奔腾/赛扬年代的
+**32 位 x86** 老机器，以及 **POWER 系** 服务器（如 IBM POWER8/9、Talos II、
+OpenPOWER 机器），都只是普通的 `linux` 目标——与 x86 服务器用同一套 `linux`
+编译产物，开箱即用。按 `uname -m` 选择：
 
 | `uname -m` 输出 | 设备 | Release 产物 |
 | --- | --- | --- |
 | `aarch64` | 64 位 ARM 开发板（树莓派 4/5、RK3566、Orange Pi 3 等） | `irix-node-linux-arm64` |
 | `armv7l` | 32 位 ARM 老开发板（树莓派 3、Orange Pi Zero 等） | `irix-node-linux-arm` |
 | `i686` / `i386` | 32 位 x86 老机器（奔腾/赛扬，跑轻量 Linux） | `irix-node-linux-386` |
+| `ppc64le` | 64 位小端 POWER（IBM POWER8/9、Talos II、OpenPOWER） | `irix-node-linux-ppc64le` |
 
 ```bash
 wget https://github.com/<你的仓库>/releases/latest/download/irix-node-linux-arm64
@@ -91,6 +92,11 @@ chmod +x irix-node-linux-arm64
 > 注意：`irix-node-linux-arm*` 与 `irix-node-Android-*` / `irix-node-OpenHarmony-*`
 > 底层同为 `linux/arm(64)` 编译（二进制可互通），但命名区分用途：标准 Linux
 > 开发板请用 `linux-arm*`；Termux 用 `Android-*`；鸿蒙用 `OpenHarmony-*`。
+>
+> **PowerPC 大端（`ppc64`）暂不支持**：旧 IBM pSeries / 老 Mac G5 等大端 PowerPC
+> 因 Go 的 SQLite 驱动 `modernc.org/sqlite` 仅覆盖小端 `ppc64le` 而无法编译；
+> 这类机器若可改用 PostgreSQL/MySQL（与 Solaris/illumos 同款隔离方案）可解锁，
+> 或升级到小端 POWER 硬件。
 >
 > 关于 **真·MS-DOS（16 位实模式）**：Go 运行时要求 32 位保护模式与 MMU，且本程序是
 > 监听 TCP 端口的常驻服务，纯 DOS 无此能力，**无法兼容**。DOS 时代的老机器只要能跑
