@@ -83,6 +83,9 @@ func netCounters() (rx, tx uint64) {
 // osDistro 发行版版本：macOS 无发行版号概念，返回空串由调用方回退 release。
 func osDistro() string { return "" }
 
+// osTypePlatform 返回 macOS 平台标识。
+func osTypePlatform() string { return runtime.GOOS }
+
 // osVersion 读取内核版本。
 func osVersion() string {
 	v, err := sysctl("kern.osrelease")

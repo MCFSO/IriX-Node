@@ -160,5 +160,8 @@ func hostInfo() (osType, platform, release string) {
 	if runtime.GOOS == "windows" {
 		return "Windows_NT", "win32", osVersion()
 	}
-	return runtime.GOOS, runtime.GOOS, osVersion()
+	// 非 Windows 由平台相关函数给出 osType/platform（如 OpenHarmony 区别于 linux），
+	// release 统一用 osVersion()。
+	p := osTypePlatform()
+	return p, p, osVersion()
 }

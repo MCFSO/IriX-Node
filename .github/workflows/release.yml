@@ -26,6 +26,18 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+            label: Android-armv8a
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            label: Android-armv7a
+          - goos: linux
+            goarch: arm64
+            label: OpenHarmony-armv8a
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            label: OpenHarmony-armv7a
           - goos: linux
             goarch: loong64
           - goos: linux
@@ -42,6 +54,14 @@ jobs:
             goarch: amd64
           - goos: openbsd
             goarch: arm64
+          - goos: netbsd
+            goarch: amd64
+          - goos: solaris
+            goarch: amd64
+            label: Solaris-amd64
+          - goos: illumos
+            goarch: amd64
+            label: Illumos-amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -53,17 +73,18 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
         run: |
-          bin="irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          bin="irix-node-${{ matrix.label }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
           sha256sum "$bin" > "$bin.sha256"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: irix-node-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: irix-node-${{ matrix.label }}
           path: |
-            irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-            irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
+            irix-node-${{ matrix.label }}${{ matrix.ext }}
+            irix-node-${{ matrix.label }}${{ matrix.ext }}.sha256
           if-no-files-found: error
 
   release:

@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +28,6 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL 驱动（database/sql）
 	"github.com/redis/go-redis/v9"     // Redis 客户端（自带连接池）
 	"golang.org/x/crypto/bcrypt"
-	_ "modernc.org/sqlite" // SQLite 驱动（纯 Go，CGO_ENABLED=0 可交叉编译）
 )
 
 // 账户与会话常量。
@@ -84,25 +81,6 @@ type accountSystem struct {
 	rdDown time.Time // Redis 降级冷却截止时间（零值 = 未降级）
 }
 
-// sqliteDSN 构造 SQLite 连接串（WAL + busy_timeout，多连接并发读写友好）。
-// Windows 盘符路径需转成 file:///C:/… 形式（file:C:/… 会被当作 URI authority）。
-func sqliteDSN(path string) string {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = path
-	}
-	p := filepath.ToSlash(abs)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	u := &url.URL{Scheme: "file", Path: p}
-	q := u.Query()
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 // rebindSQL 将 ? 占位符改写为 PostgreSQL 的 $n（sqlite/mysql 原生 ?）。
 // 本项目的 SQL 均为固定语句，不含字符串字面量中的 ?，可安全改写。
 func rebindSQL(driver, q string) string {
@@ -130,12 +108,16 @@ func (d *Daemon) initAccounts(cfg accountsConfig) error {
 		driver = "sqlite"
 	}
 	dsn := strings.TrimSpace(cfg.DSN)
+	var err error
 	switch driver {
 	case "sqlite":
-		if dsn == "" {
-			dsn = filepath.Join(d.DataDir, "accounts.db")
+		// SQLite 驱动经 build tag 隔离（见 accounts_sqlite.go / accounts_nosqlite.go）：
+		// 非 solaris/illumos 平台引入 modernc.org/sqlite；solaris/illumos 下
+		// openSqlite 返回错误，强制改用 postgres/mysql（Go 的 SQLite 驱动未覆盖该平台）。
+		dsn, err = openSqlite(d.DataDir, dsn)
+		if err != nil {
+			return err
 		}
-		dsn = sqliteDSN(dsn)
 	case "mysql", "postgres":
 		if dsn == "" {
 			return fmt.Errorf("accounts.driver=%s 需要配置 accounts.dsn 连接串", driver)

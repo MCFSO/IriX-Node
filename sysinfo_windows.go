@@ -98,6 +98,10 @@ func netCounters() (rx, tx uint64) {
 // osDistro 发行版版本：Windows 无发行版概念，返回空串由调用方回退 release。
 func osDistro() string { return "" }
 
+// osTypePlatform 返回 Windows 平台标识（hostInfo 在 windows 下走专用分支，
+// 此处仅作编译期兜底定义）。
+func osTypePlatform() string { return "win32" }
+
 // osVersion 读取 Windows 版本号。
 func osVersion() string {
 	data, err := os.ReadFile("C:/Windows/System32/Release.txt")

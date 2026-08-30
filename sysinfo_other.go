@@ -21,5 +21,8 @@ func netCounters() (rx, tx uint64) { return 0, 0 }
 // osDistro 发行版版本。
 func osDistro() string { return "" }
 
+// osTypePlatform 返回其他平台的标识（runtime.GOOS）。
+func osTypePlatform() string { return runtime.GOOS }
+
 // osVersion 发行版本。
 func osVersion() string { return runtime.GOARCH }

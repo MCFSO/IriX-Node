@@ -69,6 +69,141 @@ Redis 可选缓存会话与权限热数据。详见 `docs/accounts-design.md`。
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
 
+### 在 Android（Termux）上运行
+
+IriX Node 为静态链接的纯 Go 二进制，无需 NDK 或交叉工具链，可直接在 Termux 中运行。
+SQLite 驱动 `modernc.org/sqlite` 纯 Go 实现（无 CGO），账户管理开箱即用。
+
+**方式一：下载预编译二进制**
+
+从 Release 页面按设备架构选择（Termux 里执行 `uname -m` 查看）：
+
+| `uname -m` 输出 | 设备 | Release 产物 |
+| --- | --- | --- |
+| `aarch64` | 绝大多数 64 位手机（armv8a） | `irix-node-Android-armv8a` |
+| `armv7l` | 32 位老设备（armv7a） | `irix-node-Android-armv7a` |
+
+```bash
+# 64 位设备示例
+pkg install wget         # 首次需装 wget
+wget https://github.com/<你的仓库>/releases/latest/download/irix-node-Android-armv8a
+chmod +x irix-node-Android-armv8a
+./irix-node-Android-armv8a -bind 127.0.0.1 -port 12346 -data ~/irix-data
+```
+
+**方式二：在 Termux 中直接编译**
+
+Termux 自带完整 Go 工具链，可本机编译（无需交叉编译）：
+
+```bash
+pkg install golang git
+git clone https://github.com/<你的仓库>.git
+cd IriX-Node
+go build -trimpath -ldflags "-s -w" -o irix-node .
+./irix-node -bind 127.0.0.1 -port 12346 -data ~/irix-data
+```
+
+**注意事项**
+
+- Termux 不支持 systemd，需常驻时用 `termux-wake-lock` 防止后台被杀，或配合
+  `Termux:Boot` 开机自启。
+- 默认监听 `127.0.0.1`，仅本机访问；如需局域网访问用 `-bind 0.0.0.0` 并设置
+  `-apikey`，同时注意 Android 仅对前台应用开放部分端口。
+- 数据目录建议放在 `$HOME` 下（如 `~/irix-data`），避免写入受外置存储权限限制的路径。
+
+### 在 OpenHarmony（鸿蒙原生 Linux 用户态）上运行
+
+OpenHarmony 标准系统内核为 Linux，因此 IriX Node 复用 `linux/arm64`（或 `linux/arm`）
+的**静态链接**二进制即可运行——Go 工具链目前没有 `ohos` 目标，无法单独交叉编译鸿蒙
+专用二进制。SQLite 驱动 `modernc.org/sqlite` 纯 Go 实现（无 CGO），账户管理开箱即用。
+节点会读取 `/etc/os-release` 自动识别 `OpenHarmony`，`GET /api/overview` 的 `type`/
+`platform` 字段返回 `OpenHarmony`（而非普通 `linux`）。
+
+**重要约束**
+
+- **必须是 `CGO_ENABLED=0` 的静态二进制**。OpenHarmony 标准系统使用 musl 系 C 库，
+  动态链接 glibc 的二进制可能启动失败；Release 产物均为静态链接，直接可用。
+- 需要设备具备**终端与 Root/Shell 权限**（如 oh 命令、`hdc shell` 进入的设备侧
+  shell，或带终端的开源移植）。纯 ArkTS 应用沙箱（无终端、无进程运行权限）无法以
+  进程形态运行本守护进程。
+- 容器能力（Docker/Bastille）在 OpenHarmony 上不可用，探测返回 `available=false`，
+  客户端自动隐藏容器 UI，不影响其余功能。
+
+**获取与启动**
+
+从 Release 页面按 `uname -m` 选择产物（与 Android 同源，但命名区分鸿蒙环境）：
+
+| `uname -m` 输出 | 设备 | Release 产物 |
+| --- | --- | --- |
+| `aarch64` | 64 位设备（armv8a） | `irix-node-OpenHarmony-armv8a` |
+| `armv7l` | 32 位设备（armv7a） | `irix-node-OpenHarmony-armv7a` |
+
+```bash
+# 以设备侧 shell 为例（需有写权限的目录）
+wget https://github.com/<你的仓库>/releases/latest/download/irix-node-OpenHarmony-armv8a
+chmod +x irix-node-OpenHarmony-armv8a
+./irix-node-OpenHarmony-armv8a -bind 127.0.0.1 -port 12346 -data /data/local/irix-data
+```
+
+- 常驻：OpenHarmony 无 systemd，可借助后台 shell / `nohup` 或在开机脚本中拉起；
+  注意系统对后台进程的资源回收策略。
+- 数据目录建议使用设备侧可写路径（如 `/data/local/irix-data`），避免沙箱受限目录。
+- 局域网访问同理用 `-bind 0.0.0.0` 并设置 `-apikey`。
+
+### 在 Solaris / illumos 上运行
+
+IriX Node 支持 Oracle Solaris（`solaris/amd64`）与开源 Solaris 系 illumos
+（SmartOS / OmniOS / Tribblix 等，`illumos/amd64`）。Release 产物：
+
+| 平台 | Release 产物 |
+| --- | --- |
+| Oracle Solaris（amd64） | `irix-node-Solaris-amd64` |
+| illumos（amd64） | `irix-node-Illumos-amd64` |
+
+**关键约束：账户存储不能使用 SQLite**
+
+Go 的纯 Go SQLite 驱动 `modernc.org/sqlite`（本项目默认账户存储）**未覆盖
+solaris/illumos 平台**，无法编译。因此该驱动的引入已被 `build tag` 隔离
+（见 `accounts_sqlite.go` / `accounts_nosqlite.go`）：solaris/illumos 下
+SQLite 选项直接返回错误，必须改用 **PostgreSQL 或 MySQL**：
+
+```bash
+./irix-node-Solaris-amd64 \
+  -accounts-driver postgres \
+  -accounts-dsn "postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable" \
+  -bind 127.0.0.1 -port 12346 -data /var/irix-node
+```
+
+- 未配置 `-accounts-driver postgres` 且用了默认的 `sqlite` 时，启动会直接报错
+  提示改用 postgres/mysql，不会静默失败。
+- MySQL / PostgreSQL 驱动（`go-sql-driver/mysql`、`jackc/pgx`）为纯 Go，
+  在 solaris/illumos 下可正常交叉编译，账户管理其余功能（会话、权限、Redis 缓存）
+  与 Linux 完全一致。
+- 容器能力（Docker/Bastille）在 solaris/illumos 上不可用，探测返回 `available=false`，
+  客户端自动隐藏容器 UI。
+- 主机信息（`GET /api/overview`）在 solaris/illumos 下部分字段（内存/磁盘/网络）
+  走兜底零值或基础探测，不影响节点基本功能。
+
+### 在 NetBSD 上运行
+
+NetBSD 是标准类 Unix 平台，Release 提供 `netbsd/amd64` 产物（`irix-node-netbsd-amd64`），
+账户管理默认 SQLite 即可使用，无需切换驱动：
+
+```bash
+./irix-node-netbsd-amd64 -bind 127.0.0.1 -port 12346 -data /var/irix-node
+```
+
+**约束**
+
+- 受 Go 的 SQLite 驱动 `modernc.org/sqlite` 覆盖限制，目前仅 `netbsd/amd64`
+  可编译（`netbsd/386`、`netbsd/arm`、`netbsd/arm64` 的 SQLite 驱动未覆盖，
+  需改用 PostgreSQL/MySQL，与 Solaris/illumos 同款隔离方案）；后续上游驱动补齐
+  对应架构后会自动解锁。
+- 主机信息采集（`osUptime`/`osMem` 等）在 NetBSD 下走兜底逻辑，`GET /api/overview`
+  的 `type`/`platform` 返回 `netbsd`，内存/磁盘/网络部分字段可能为兜底零值，
+  不影响节点基本功能；如需精确主机信息，后续可补 `sysinfo_netbsd.go`。
+- 容器能力（Docker/Bastille）在 NetBSD 上不可用，探测返回 `available=false`，
+  客户端自动隐藏容器 UI。
 
 不指定 `-apikey` 时启用**配对码机制**：
 
