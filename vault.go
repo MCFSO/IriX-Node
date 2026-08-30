@@ -166,7 +166,7 @@ func newVaultState(d *Daemon) *vaultState {
 		idleTimeout:      30 * time.Minute,
 		maxAttempts:      5,
 		lockoutDuration:  15 * time.Minute,
-		pbkdf2Iterations: defaultPBKDF2Iterations,
+		pbkdf2Iterations: defaultPBKDF2ForPlatform(), // 按架构自适应（arm64 600000；MIPS/armv7 更低）
 		passwordMinLen:   12,
 		passwordExpire:   90 * 24 * time.Hour,
 		blockSizeKB:      1024,

@@ -82,6 +82,13 @@ type loadTuner struct {
 	maxProcs  int // busy/normal 时的 GOMAXPROCS（= 启动时核数）
 	gcPercent int // 当前 GOGC
 
+	// memLimit 平台内存感知软上限（GOMEMLIMIT，Go 1.19+ 的 debug.SetMemoryLimit）。
+	// 它是唯一在 GOGC=off 时仍生效的 GC 控制：本调谐器启动即 SetGCPercent(-1)
+	// （GC 关），首轮状态切换前（最多约 15s）无 GC 兜底，memLimit 可在此空窗期
+	// 防堆爆炸→OOM，对 64–256MB 的 MIPS 路由器/小内存开发板尤为关键。
+	memLimit       uint64 // 0 = 未设（回退 Go 默认「无上限」）
+	memLimitActive bool   // 是否由本调谐器主动设置
+
 	// 最近采样（供 /api/load 展示）
 	cpuBusy    float64 // 进程 CPU 占比（0-1）
 	goroutines int
@@ -104,7 +111,34 @@ func newLoadTuner() *loadTuner {
 		startedAt:  time.Now(),
 	}
 	t.applyFn = t.applyReal
+	t.initMemoryLimit()
 	return t
+}
+
+// initMemoryLimit 按平台内存容量设置 GOMEMLIMIT 软上限。
+// 仅在嵌入式/低资源档位（自动检测或显式 -low-resource）下主动设限，
+// 留出物理内存的 10% 余量给子进程与内核，避免 OOM。非嵌入式档位不设，
+// 回退 Go 默认（无上限，由 GOGC 三态机控制）。
+func (t *loadTuner) initMemoryLimit() {
+	if !embedded.isEmbedded() {
+		return
+	}
+	total, _ := systemMem()
+	if total == 0 {
+		return
+	}
+	// 留 10% 余量（至少 8MB），上限不超过物理内存。
+	const headroom = 0.10
+	limit := uint64(float64(total) * (1 - headroom))
+	const minLimit = 8 * 1024 * 1024
+	if limit < minLimit {
+		limit = minLimit
+	}
+	debug.SetMemoryLimit(int64(limit))
+	t.memLimit = limit
+	t.memLimitActive = true
+	alog.Printf("负载调谐：嵌入式档位已设内存软上限 GOMEMLIMIT=%dMB（物理内存 %dMB，留 10%% 余量）",
+		limit>>20, total>>20)
 }
 
 // tuner 全局调谐器实例（main 启动 loop）。
@@ -234,18 +268,20 @@ func (t *loadTuner) sample() (float64, int, uint64) {
 }
 
 // handleLoad 当前负载状态与调谐参数。
-// GET /api/load → {state, since, gomaxprocs, gcPercent, cpuBusy, goroutines, heapAlloc, numCPU}
+// GET /api/load → {state, since, gomaxprocs, gcPercent, cpuBusy, goroutines, heapAlloc, numCPU, memLimit, memLimitActive}
 func (d *Daemon) handleLoad(w http.ResponseWriter, r *http.Request) {
 	tuner.mu.Lock()
 	defer tuner.mu.Unlock()
 	writeOK(w, map[string]any{
-		"state":      tuner.state.String(),
-		"since":      tuner.stateSince.UnixMilli(),
-		"gomaxprocs": runtime.GOMAXPROCS(0),
-		"gcPercent":  tuner.gcPercent,
-		"cpuBusy":    tuner.cpuBusy,
-		"goroutines": tuner.goroutines,
-		"heapAlloc":  tuner.heapAlloc,
-		"numCPU":     tuner.numCPU,
+		"state":          tuner.state.String(),
+		"since":          tuner.stateSince.UnixMilli(),
+		"gomaxprocs":     runtime.GOMAXPROCS(0),
+		"gcPercent":      tuner.gcPercent,
+		"cpuBusy":        tuner.cpuBusy,
+		"goroutines":     tuner.goroutines,
+		"heapAlloc":      tuner.heapAlloc,
+		"numCPU":         tuner.numCPU,
+		"memLimit":       tuner.memLimit,       // 内存软上限字节数（0 = 未设）
+		"memLimitActive": tuner.memLimitActive, // 是否由本调谐器主动设置
 	})
 }

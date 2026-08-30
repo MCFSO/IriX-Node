@@ -28,8 +28,10 @@ type metricSample struct {
 // defaultMetricsInterval 默认采样间隔 15 秒（Daemon.metricsInterval 初始值）。
 const defaultMetricsInterval = 15 * time.Second
 
-// metricsRingSize 环形保留条数（15 秒 × 60 = 15 分钟）。
-const metricsRingSize = 60
+// metricsRingSize 环形保留条数（默认 15 秒 × 60 = 15 分钟）。
+// 为包级变量以便嵌入式档位（≤2 核或 ≤512MB）在启动时下调为 30，
+// 降低每实例常驻内存；非嵌入式保持默认 60。
+var metricsRingSize = defaultMetricsRing
 
 // sampleAllMetrics 对全部运行中实例采样一次。
 func (d *Daemon) sampleAllMetrics() {

@@ -18,7 +18,10 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	diskTotal, diskUsed, diskUsage := diskInfo(d.DataDir)
-	netDown, netUp := netRates()
+	// 网络速率与系统 CPU 使用率复用后台采样缓存（cachedNetRates /
+	// cachedSysCPUUsage），避免每请求同步 sleep 数百毫秒——对慢速
+	// 顺序核（MIPS 路由器、老 ARM）减负明显，仪表盘轮询不再占用 CPU。
+	netDown, netUp := cachedNetRates()
 	system := map[string]any{
 		"type":            osType,
 		"hostname":        hostname,
@@ -28,7 +31,7 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"uptime":          uptimeSeconds(),
 		"totalmem":        totalMem(),
 		"freemem":         freeMem(),
-		"cpuUsage":        cpuUsage(),
+		"cpuUsage":        cachedSysCPUUsage(),
 		"memUsage":        memUsage(),
 		"diskusage":       diskUsage,
 		"disktotal":       diskTotal,

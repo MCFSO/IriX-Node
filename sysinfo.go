@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,58 @@ func cpuUsage() float64 {
 	}
 	idle := 500.0 * float64(runtime.NumCPU())
 	return (curr - prev) / (curr - prev + idle)
+}
+
+// ---------------------------------------------------------------------------
+// 系统总体 CPU 使用率缓存（后台采样，供 /api/overview 复用，避免每请求 sleep）
+// ---------------------------------------------------------------------------
+
+// sysCPUCache 全局系统 CPU 使用率缓存（后台采样）。
+var sysCPUCache = struct {
+	mu    sync.Mutex
+	usage float64
+	valid bool
+}{}
+
+var sysCPUOnce sync.Once
+
+// startSysCPULoop 后台采样系统 CPU 使用率：周期读取 /proc/stat 两次取差值，
+// 间隔约 1 秒（比单次 500ms 略宽，但不再阻塞 HTTP 请求线程）。非 Linux 平台
+// 无 /proc/stat，循环直接置 0 并退出（overview 回退到 0）。
+func startSysCPULoop() {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	const interval = 1 * time.Second
+	for {
+		prev := cpuJiffies()
+		time.Sleep(interval)
+		curr := cpuJiffies()
+		if curr < prev {
+			continue
+		}
+		// /proc/stat 第一行 cpu 为各态 jiffies 总和；空闲近似为采样间隔×核数，
+		// busy = (curr-prev) - idle，usage = busy/(curr-prev)。
+		busy := curr - prev
+		idle := interval.Seconds() * float64(runtime.NumCPU())
+		usage := busy / (busy + idle)
+		if usage > 1 {
+			usage = 1
+		}
+		sysCPUCache.mu.Lock()
+		sysCPUCache.usage = usage
+		sysCPUCache.valid = true
+		sysCPUCache.mu.Unlock()
+	}
+}
+
+// cachedSysCPUUsage 返回后台采样的系统 CPU 使用率（0-1，惰性启动采样）。
+// 首次调用时尚无缓存（后台刚启动）则回退到 0；后续请求即拿到最近一次采样值。
+func cachedSysCPUUsage() float64 {
+	sysCPUOnce.Do(func() { go startSysCPULoop() })
+	sysCPUCache.mu.Lock()
+	defer sysCPUCache.mu.Unlock()
+	return sysCPUCache.usage
 }
 
 // cpuJiffies 读取 /proc/stat 的 CPU 忙碌 jiffies。

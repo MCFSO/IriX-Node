@@ -211,6 +211,11 @@ type Daemon struct {
 	metricsOnce     sync.Once     // 实例指标采样循环惰性启动
 	metricsInterval time.Duration // 指标采样间隔（默认 15s；测试可单独缩短）
 
+	// 每实例内存缓冲上限（嵌入式档位自动调小，命令行/配置文件可覆盖）：
+	// LogBufferKB：内存日志环形缓冲上限（KB）；LogLines：断线重连补发行缓冲上限（行）。
+	LogBufferKB int
+	LogLines    int
+
 	// 集群协调状态（P2，见 docs/cluster-node-api.md），受 clusterMu 保护
 	clusterMu        sync.Mutex
 	clusterMonitor   string                  // 监控节点 id（空 = 尚无监控者）
@@ -249,11 +254,19 @@ func NewDaemon(dataDir, apiKey string) *Daemon {
 		StartedAt:       time.Now(),
 		LogMaxBytes:     64 << 20, // 默认 64MB
 		metricsInterval: defaultMetricsInterval,
-		clusterRole:     "worker",
-		clusterPeers:    []map[string]any{},
-		clusterEvents:   []map[string]any{},
-		transfers:       map[string]*transferJob{},
-		tasks:           newTaskStore(),
+		// 每实例内存缓冲上限默认值：嵌入式档位自动调小，否则按惯例 2MB / 1000 行。
+		// 启动后由 main 用 opts（命令行/配置文件/嵌入式预设合并后的值）覆盖。
+		LogBufferKB:   defaultLogBufferKB,
+		LogLines:      defaultLogLines,
+		clusterRole:   "worker",
+		clusterPeers:  []map[string]any{},
+		clusterEvents: []map[string]any{},
+		transfers:     map[string]*transferJob{},
+		tasks:         newTaskStore(),
+	}
+	// 嵌入式档位下进一步下调指标环形保留条数（降低每实例常驻内存）。
+	if embedded.isEmbedded() {
+		metricsRingSize = embeddedMetricsRing
 	}
 	d.vault = newVaultState(d)
 	return d
@@ -270,6 +283,8 @@ func (d *Daemon) logConfig() *logConfig {
 		maxSize:  d.LogMaxBytes,
 		keep:     5,
 		interval: 7 * 24 * time.Hour,
+		bufferKB: d.LogBufferKB, // 内存环形缓冲上限（KB）；<=0 时 NewLogBuffer 回退默认
+		logLines: d.LogLines,    // 断线补发行缓冲上限；<=0 时 newLogLines 回退默认
 	}
 }
 

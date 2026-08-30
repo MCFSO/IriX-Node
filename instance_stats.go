@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,25 +38,34 @@ var (
 )
 
 // parseServerLine 从一行服务器输出解析玩家数/TPS（启发式，失败静默）。
+// 性能：MC 服务器日志绝大多数行与玩家/TPS 无关，先用 strings.Contains 廉价
+// 守门（O(n) 无回溯），仅在命中关键词时才跑对应正则（回溯 VM，慢核上成本高），
+// 避免对每条日志行做 4 次正则回溯。
 func (p *Process) parseServerLine(line string) {
 	var players, maxPlayers int
 	var tps float64
 	gotPlayers, gotTPS := false, false
-	if m := rePlayersVanilla.FindStringSubmatch(line); m != nil {
-		players, _ = strconv.Atoi(m[1])
-		maxPlayers, _ = strconv.Atoi(m[2])
-		gotPlayers = true
-	} else if m := rePlayersSimple.FindStringSubmatch(line); m != nil {
-		players, _ = strconv.Atoi(m[1])
-		maxPlayers = -1
-		gotPlayers = true
+	// 玩家数正则只需在无 "players" 子串时跳过；大小写不敏感匹配（日志常含 "Players"）。
+	if strings.Contains(strings.ToLower(line), "players") {
+		if m := rePlayersVanilla.FindStringSubmatch(line); m != nil {
+			players, _ = strconv.Atoi(m[1])
+			maxPlayers, _ = strconv.Atoi(m[2])
+			gotPlayers = true
+		} else if m := rePlayersSimple.FindStringSubmatch(line); m != nil {
+			players, _ = strconv.Atoi(m[1])
+			maxPlayers = -1
+			gotPlayers = true
+		}
 	}
-	if m := reTPSTriple.FindStringSubmatch(line); m != nil {
-		tps, _ = strconv.ParseFloat(m[1], 64)
-		gotTPS = true
-	} else if m := reTPSSimple.FindStringSubmatch(line); m != nil {
-		tps, _ = strconv.ParseFloat(m[1], 64)
-		gotTPS = true
+	// TPS 正则只需在无 "tps" 子串时跳过。
+	if strings.Contains(strings.ToLower(line), "tps") {
+		if m := reTPSTriple.FindStringSubmatch(line); m != nil {
+			tps, _ = strconv.ParseFloat(m[1], 64)
+			gotTPS = true
+		} else if m := reTPSSimple.FindStringSubmatch(line); m != nil {
+			tps, _ = strconv.ParseFloat(m[1], 64)
+			gotTPS = true
+		}
 	}
 	if !gotPlayers && !gotTPS {
 		return

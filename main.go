@@ -35,9 +35,12 @@ func main() {
 		apiKey         = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 		instanceLog    = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
 		instanceLogMB  = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
+		logBufferKB    = flag.Int("log-buffer-kb", 0, "每实例内存日志环形缓冲上限（KB，0 = 用默认值；嵌入式档位默认 512KB，否则 2MB）")
+		logLines       = flag.Int("log-lines", 0, "每实例断线重连补发行缓冲上限（行，0 = 用默认值；嵌入式档位默认 300，否则 1000）")
 		auditLog       = flag.Bool("audit-log", true, "将用户操作审计日志异步落盘到 {data}/logs/audit.log（记录每次 API 请求的完整细节）")
 		auditLogMB     = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		loadTune       = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
+		lowResource    = flag.Bool("low-resource", false, "强制启用嵌入式预设（更小的每实例日志缓冲/内存软上限 GOMEMLIMIT/更低的 PBKDF2 默认迭代）；留空则按 CPU 核数与物理内存自动判定（≤2 核或 ≤512MB 即套用）")
 		transferCIDR   = flag.String("transfer-allow-cidr", "", "集群拉取（POST /api/cluster/transfer）额外放行的内网 CIDR 列表（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置（环回/链路本地/本机地址任何配置都不可放行）")
 		tlsMode        = flag.String("tls-mode", "off", "TLS 模式：off（默认，明文 HTTP，与既有部署兼容）/ auto（自动生成自签证书，启动日志打印指纹，客户端按指纹固定校验）/ manual（使用 -tls-cert / -tls-key 指定的正式证书）；开启加密保险库（-vault）时强制要求 TLS")
 		tlsCertFile    = flag.String("tls-cert", "", "manual 模式：TLS 证书文件路径（PEM）")
@@ -46,7 +49,7 @@ func main() {
 		vaultIdle      = flag.Int("vault-idle-timeout", 30, "保险库解锁会话空闲超时（分钟），到期自动锁定")
 		vaultAttempts  = flag.Int("vault-max-attempts", 5, "保险库 unlock/recovery/初始化验证的统一失败限速阈值（用户+IP 双维度）")
 		vaultLockout   = flag.Int("vault-lockout-minutes", 15, "保险库失败限速触发后的锁定时长（分钟）")
-		vaultKDFIter   = flag.Int("vault-pbkdf2-iterations", 600000, "保险库密码派生 KEK 的 PBKDF2 迭代次数")
+		vaultKDFIter   = flag.Int("vault-pbkdf2-iterations", 0, "保险库密码派生 KEK 的 PBKDF2 迭代次数（0 = 按平台架构自适应：arm64 等具硬件 SHA 用 600000，MIPS/armv7 无硬件加速用更低默认）")
 		vaultPwMinLen  = flag.Int("vault-password-min-length", 12, "保险库密码最小长度（须含大写、小写与数字）")
 		vaultPwExpire  = flag.Int("vault-password-expire-days", 90, "保险库密码有效期（天，0=不过期），到期解锁响应提示 passwordExpired")
 		vaultForceExp  = flag.Bool("vault-force-expire", false, "保险库密码到期强制改密：解锁请求必须携带 newPassword 同请求完成解锁+改密")
@@ -108,6 +111,8 @@ func main() {
 		AuditLog:              *auditLog,
 		AuditLogMax:           *auditLogMB,
 		LoadTune:              *loadTune,
+		LogBufferKB:           *logBufferKB,
+		LogLines:              *logLines,
 		TransferAllowCIDR:     *transferCIDR,
 		TLSMode:               *tlsMode,
 		TLSCert:               *tlsCertFile,
@@ -131,6 +136,23 @@ func main() {
 		RedisDB:               *redisDB,
 	}
 	opts.applyConfig(cfg, setFlags)
+
+	// 应用嵌入式/低资源预设开关：命令行显式设置时按用户意图强制开/关，
+	// 配置文件显式设置时同理；两者都未设则保持自动检测结果（nil）。
+	applyLowResourceExplicit := func() {
+		var forced *bool
+		switch {
+		case setFlags["low-resource"]:
+			v := *lowResource
+			forced = &v
+		case cfg != nil && cfg.LowResource != nil:
+			forced = cfg.LowResource
+		}
+		embedded.applyLowResourceOverride(forced)
+	}
+	applyLowResourceExplicit()
+	alog.Printf("嵌入式/低资源档位：%v（原因：%s，CPU=%d 核，内存=%dMB）",
+		embedded.isEmbedded(), embedded.reason, embedded.cpu, embedded.mem>>20)
 
 	if opts.Port <= 0 || opts.Port > 65535 {
 		log.Fatalf("端口无效: %d（须在 1-65535 之间；请检查命令行参数或配置文件 %s）", opts.Port, *configPath)
@@ -203,6 +225,14 @@ func main() {
 		d.LogDir = logDir
 		d.LogMaxBytes = int64(opts.InstanceLogMax) << 20
 	}
+	// 每实例内存缓冲上限：命令行/配置显式设置优先；未设则沿用 NewDaemon 中的
+	// 默认（嵌入式档位已自动调小，见 daemon.go）。
+	if opts.LogBufferKB > 0 {
+		d.LogBufferKB = opts.LogBufferKB
+	}
+	if opts.LogLines > 0 {
+		d.LogLines = opts.LogLines
+	}
 	if opts.AuditLog {
 		d.AuditLog = newFileLogger(logDir, "audit.log", int64(opts.AuditLogMax)<<20)
 		// 审计日志轮转归档（等保二级「审计记录保护与定期备份」）：
@@ -243,7 +273,11 @@ func main() {
 		d.vault.idleTimeout = time.Duration(opts.VaultIdleTimeout) * time.Minute
 		d.vault.maxAttempts = opts.VaultMaxAttempts
 		d.vault.lockoutDuration = time.Duration(opts.VaultLockoutMinutes) * time.Minute
-		d.vault.pbkdf2Iterations = opts.VaultPBKDF2Iterations
+		// PBKDF2 迭代：用户显式传 -vault-pbkdf2-iterations 时按用户意图，
+		// 否则保留 newVaultState 中按平台架构设定的默认（arm64 600000；MIPS/armv7 更低）。
+		if setFlags["vault-pbkdf2-iterations"] {
+			d.vault.pbkdf2Iterations = opts.VaultPBKDF2Iterations
+		}
 		d.vault.passwordMinLen = opts.VaultPasswordMinLen
 		d.vault.passwordExpire = time.Duration(opts.VaultPasswordExpire) * 24 * time.Hour
 		d.vault.forceExpire = opts.VaultForceExpire

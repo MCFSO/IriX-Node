@@ -79,6 +79,9 @@ type Config struct {
 	AuditLog          *bool           `json:"auditLog"`          // 审计日志落盘开关
 	AuditLogMax       *int            `json:"auditLogMax"`       // 审计日志单文件轮转上限（MB）
 	LoadTune          *bool           `json:"loadTune"`          // 负载自适应调谐开关
+	LowResource       *bool           `json:"lowResource"`       // 强制嵌入式预设（nil = 按硬件自动判定）
+	LogBufferKB       *int            `json:"logBufferKB"`       // 每实例日志环形缓冲上限（KB，nil = 用默认值）
+	LogLines          *int            `json:"logLines"`          // 每实例行缓冲上限（行，nil = 用默认值）
 	TransferAllowCIDR string          `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
 	TLS               *TLSConfig      `json:"tls"`               // TLS 传输加密（nil = 未配置）
 	Vault             *VaultConfig    `json:"vault"`             // 加密保险库（nil = 未配置）
@@ -138,6 +141,8 @@ type nodeOptions struct {
 	AuditLog          bool
 	AuditLogMax       int
 	LoadTune          bool
+	LogBufferKB       int // 每实例日志环形缓冲上限（KB，0 = 用默认值）
+	LogLines          int // 每实例行缓冲上限（行，0 = 用默认值）
 	TransferAllowCIDR string
 	TLSMode           string // off | auto | manual
 	TLSCert           string // manual：证书文件路径
@@ -200,6 +205,12 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 	}
 	if !setFlags["load-tune"] && cfg.LoadTune != nil {
 		o.LoadTune = *cfg.LoadTune
+	}
+	if !setFlags["log-buffer-kb"] && cfg.LogBufferKB != nil {
+		o.LogBufferKB = *cfg.LogBufferKB
+	}
+	if !setFlags["log-lines"] && cfg.LogLines != nil {
+		o.LogLines = *cfg.LogLines
 	}
 	if !setFlags["transfer-allow-cidr"] && cfg.TransferAllowCIDR != "" {
 		o.TransferAllowCIDR = cfg.TransferAllowCIDR

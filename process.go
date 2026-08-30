@@ -185,6 +185,8 @@ type logConfig struct {
 	maxSize  int64         // 单文件轮转上限（字节），<=0 取默认
 	keep     int           // 轮转保留份数（.1 … .keep），<=0 取 1
 	interval time.Duration // 时间轮转间隔（0 = 不启用）
+	bufferKB int           // 内存日志环形缓冲上限（KB，<=0 取默认）
+	logLines int           // 断线重连补发行缓冲上限（行，<=0 取默认）
 }
 
 // timedLine 带时间戳的一行输出（供断线补发，见 /api/instance/logs since 参数）。
@@ -330,6 +332,12 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 	cmd.Dir = cwd
 	cmd.SysProcAttr = sysProcAttr()
 
+	// logConf 为 nil（如 frp 隧道进程）时不落盘；但内存环形缓冲/行缓冲仍需
+	// 一个默认值来源，避免后续 logConf.bufferKB / logConf.logLines 空指针解引用。
+	if logConf == nil {
+		logConf = &logConfig{}
+	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -343,7 +351,7 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		return nil, err
 	}
 
-	logBuf := NewLogBuffer(0)
+	logBuf := NewLogBuffer(logConf.bufferKB << 10)
 	var fl *fileLogger
 	if logConf != nil && logConf.dir != "" {
 		if err := os.MkdirAll(logConf.dir, 0o755); err != nil {
@@ -362,7 +370,7 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		Log:      logBuf,
 		Stdin:    &stdinPipe{pipe: stdin},
 		log:      fl,
-		lines:    newLogLines(1000),
+		lines:    newLogLines(logConf.logLines),
 		srvStats: instanceStats{players: -1, maxPlayers: -1, tps: -1}, // 未知状态
 		started:  time.Now(),
 		done:     make(chan struct{}),
