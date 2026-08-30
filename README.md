@@ -237,26 +237,37 @@ SQLite 选项直接返回错误，必须改用 **PostgreSQL 或 MySQL**：
 - 主机信息（`GET /api/overview`）在 solaris/illumos 下部分字段（内存/磁盘/网络）
   走兜底零值或基础探测，不影响节点基本功能。
 
-### 在 NetBSD 上运行
+### 在 FreeBSD / OpenBSD / NetBSD 上运行（多架构）
 
-NetBSD 是标准类 Unix 平台，Release 提供 `netbsd/amd64` 产物（`irix-node-netbsd-amd64`），
-账户管理默认 SQLite 即可使用，无需切换驱动：
+三个 BSD 系系统全部按 Go 支持的架构提供产物。受 Go 的 SQLite 驱动
+`modernc.org/sqlite` 覆盖限制，部分架构的账户存储需改用 PostgreSQL/MySQL
+（与 Solaris/illumos 同款隔离方案），其余功能完全一致：
+
+| 系统 / 架构 | Release 产物 | 账户存储 |
+| --- | --- | --- |
+| freebsd/amd64、arm64、386、arm(GOARM=7) | `irix-node-freebsd-*` | SQLite 可用 |
+| openbsd/amd64、arm64 | `irix-node-openbsd-amd64` / `-arm64` | SQLite 可用 |
+| openbsd/386、arm(GOARM=7)、ppc64、riscv64 | `irix-node-openbsd-*` | 需 postgres/mysql |
+| netbsd/amd64 | `irix-node-netbsd-amd64` | SQLite 可用 |
+| netbsd/386、arm(GOARM=7)、arm64 | `irix-node-netbsd-*` | 需 postgres/mysql |
+| solaris/amd64、illumos/amd64 | `irix-node-Solaris-amd64` / `-Illumos-amd64` | 需 postgres/mysql |
 
 ```bash
 ./irix-node-netbsd-amd64 -bind 127.0.0.1 -port 12346 -data /var/irix-node
+# 需 postgres 的架构示例（openbsd/386、netbsd/arm64 等）
+./irix-node-openbsd-386 -accounts-driver postgres \
+  -accounts-dsn "postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable" \
+  -bind 127.0.0.1 -port 12346 -data /var/irix-node
 ```
 
 **约束**
 
-- 受 Go 的 SQLite 驱动 `modernc.org/sqlite` 覆盖限制，目前仅 `netbsd/amd64`
-  可编译（`netbsd/386`、`netbsd/arm`、`netbsd/arm64` 的 SQLite 驱动未覆盖，
-  需改用 PostgreSQL/MySQL，与 Solaris/illumos 同款隔离方案）；后续上游驱动补齐
-  对应架构后会自动解锁。
+- 需 postgres 的架构若未配置 `-accounts-driver`，启动会直接报错提示，不会静默失败。
 - 主机信息采集（`osUptime`/`osMem` 等）在 NetBSD 下走兜底逻辑，`GET /api/overview`
   的 `type`/`platform` 返回 `netbsd`，内存/磁盘/网络部分字段可能为兜底零值，
   不影响节点基本功能；如需精确主机信息，后续可补 `sysinfo_netbsd.go`。
-- 容器能力（Docker/Bastille）在 NetBSD 上不可用，探测返回 `available=false`，
-  客户端自动隐藏容器 UI。
+- 容器能力（Docker/Bastille）在 BSD 系上仅 FreeBSD 提供（Bastille），OpenBSD/NetBSD
+  探测返回 `available=false`，客户端自动隐藏容器 UI。
 
 不指定 `-apikey` 时启用**配对码机制**：
 
