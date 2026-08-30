@@ -110,11 +110,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
         run: |
-          bin="irix-node-${{ coalesce(matrix.label, format('{0}-{1}', matrix.goos, matrix.goarch)) }}${{ matrix.ext }}"
+          bin="irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: irix-node-${{ coalesce(matrix.label, format('{0}-{1}', matrix.goos, matrix.goarch)) }}
-          path: irix-node-${{ coalesce(matrix.label, format('{0}-{1}', matrix.goos, matrix.goarch)) }}${{ matrix.ext }}
+          name: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}
+          path: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}
           if-no-files-found: error

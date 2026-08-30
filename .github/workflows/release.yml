@@ -75,16 +75,16 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
         run: |
-          bin="irix-node-${{ matrix.label }}${{ matrix.ext }}"
+          bin="irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
           sha256sum "$bin" > "$bin.sha256"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: irix-node-${{ matrix.label }}
+          name: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}
           path: |
-            irix-node-${{ matrix.label }}${{ matrix.ext }}
-            irix-node-${{ matrix.label }}${{ matrix.ext }}.sha256
+            irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}
+            irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}.sha256
           if-no-files-found: error
 
   release:
