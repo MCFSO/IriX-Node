@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    name: Build (${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
