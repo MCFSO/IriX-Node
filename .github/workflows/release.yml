@@ -25,6 +25,8 @@ jobs:
           - goos: linux
             goarch: amd64
           - goos: linux
+            goarch: "386"
+          - goos: linux
             goarch: arm64
           - goos: linux
             goarch: arm64
