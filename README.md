@@ -19,6 +19,9 @@ go build -o irix-node .
 ./irix-node -bind 0.0.0.0 -port 23333 -apikey secret   # 监听全部网卡（局域网可访问）
 ```
 
+Windows 提供 `amd64` / `arm64` / `386` 三个架构的 Release 产物（`irix-node-windows-*.exe`），
+32 位系统用 `windows-386`；Go 不支持 32 位 ARM 的 Windows（`windows/arm`），故无对应产物。
+
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `-config` | 配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件，字段见 `config.example.json` | `config.json` |
