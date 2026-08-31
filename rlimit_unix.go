@@ -20,32 +20,30 @@ import (
 
 // raiseFDLimit 把 RLIMIT_NOFILE 软上限提升到硬上限，返回提升后的软上限。
 // 无可提升空间或失败时返回当前软上限（err 描述原因）。
+//
+// 注意跨平台类型差异：Linux 的 syscall.Rlimit.Cur/Max 为 uint64，而
+// FreeBSD/Darwin/NetBSD 等为 int64。因此内部一律直接操作结构体字段
+// （rl.Cur = rl.Max 为同类型赋值，任何平台都能编译），仅在返回边界处
+// 统一转换为 uint64（int64→uint64 折回转换对非负值安全且合法）。
 func raiseFDLimit() (soft uint64, err error) {
 	var rl syscall.Rlimit
 	if e := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); e != nil {
 		return 0, fmt.Errorf("读取 RLIMIT_NOFILE 失败: %w", e)
 	}
-	cur, max := rl.Cur, rl.Max
-	if cur >= max {
+	if rl.Cur >= rl.Max {
 		// 已达硬上限，无需也无权再提升。
-		return cur, nil
+		return uint64(rl.Cur), nil
 	}
-	// 软上限直接对齐硬上限；先尝试一个较大值，避免 1M 连接直接吃掉全部余量时仍不足。
-	target := max
-	if e := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: target, Max: max}); e != nil {
-		// 个别内核/容器对 Setrlimit 有额外约束，回退到硬上限的 90% 再试一次。
-		fallback := max - (max / 10)
-		if fallback < cur {
-			return cur, fmt.Errorf("提升 RLIMIT_NOFILE 失败（当前 %d，硬上限 %d）: %w", cur, max, e)
-		}
-		if e2 := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: fallback, Max: max}); e2 != nil {
-			return cur, fmt.Errorf("提升 RLIMIT_NOFILE 失败（当前 %d，硬上限 %d）: %w", cur, max, e)
-		}
-		target = fallback
+	// 软上限对齐硬上限（Cur ≤ Max 无需特权，恒可设置）。
+	// 直接赋值结构体字段，避免 uint64 字面量在 int64 字段平台上的类型不匹配。
+	rl.Cur = rl.Max
+	if e := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rl); e != nil {
+		return uint64(rl.Cur), fmt.Errorf("提升 RLIMIT_NOFILE 失败（当前 %d，硬上限 %d）: %w",
+			uint64(rl.Cur), uint64(rl.Max), e)
 	}
 	// 确认生效（部分平台 Getrlimit 返回的是旧值缓存，重新读一次）。
 	if e := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); e == nil {
-		cur = rl.Cur
+		return uint64(rl.Cur), nil
 	}
-	return cur, nil
+	return uint64(rl.Cur), nil
 }
