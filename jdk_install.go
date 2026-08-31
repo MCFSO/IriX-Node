@@ -365,6 +365,22 @@ func extractZip(archive, destDir string, task *task) error {
 	return nil
 }
 
+// safeSymlinkTarget 判断在 destDir 内创建指向 linkname 的符号链接是否安全：
+// 相对链接按链接所在目录解析，绝对链接直接拒绝；解析结果必须落在 destDir 内，
+// 否则视为越界（防止归档内恶意符号链接指向解压目录外的敏感文件）。
+func safeSymlinkTarget(destDir, linkPath, linkname string) bool {
+	if linkname == "" {
+		return false
+	}
+	// 绝对路径链接一律拒绝（即便指向 destDir 内，跨平台语义不一致且高风险）
+	if filepath.IsAbs(filepath.FromSlash(linkname)) {
+		return false
+	}
+	dir := filepath.Dir(linkPath)
+	resolved := filepath.Clean(filepath.Join(dir, filepath.FromSlash(linkname)))
+	return pathWithin(destDir, resolved)
+}
+
 // extractTarGz 解压 tar.gz 到 destDir（防路径穿越；保留可执行权限与符号链接）。
 func extractTarGz(archive, destDir string, task *task) error {
 	f, err := os.Open(archive)
@@ -416,6 +432,12 @@ func extractTarGz(archive, destDir string, task *task) error {
 		case tar.TypeSymlink:
 			if runtime.GOOS == "windows" {
 				continue // Windows 的 JDK zip 无符号链接；tar 包内链接跳过
+			}
+			// 符号链接目标必须解析进 destDir 内：拒绝绝对路径与指向
+			// destDir 外的相对链接，防止 tar 内恶意链接逃逸解压目录
+			// （CodeQL 审计 #12/#13）。
+			if !safeSymlinkTarget(destDir, target, hdr.Linkname) {
+				return fmt.Errorf("符号链接目标越界: %s → %s", hdr.Name, hdr.Linkname)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err

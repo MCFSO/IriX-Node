@@ -87,6 +87,7 @@ func waitCoreDone(t *testing.T, srvURL, jobID string) map[string]any {
 func TestDownloadCoreEndToEnd(t *testing.T) {
 	sum := sha512.Sum512(corePayload)
 	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
 	inst := sampleInst(1, dir)
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
@@ -119,6 +120,7 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 // TestDownloadCoreHashMismatch sha512 不匹配 → failed 且不留文件。
 func TestDownloadCoreHashMismatch(t *testing.T) {
 	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
 	inst := sampleInst(1, dir)
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
@@ -149,6 +151,7 @@ func TestDownloadCoreHashMismatch(t *testing.T) {
 // TestDownloadCoreNoHash 未提供 sha512 时跳过校验并完成。
 func TestDownloadCoreNoHash(t *testing.T) {
 	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
 	inst := sampleInst(1, dir)
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
@@ -172,6 +175,7 @@ func TestDownloadCoreNoHash(t *testing.T) {
 // TestDownloadCorePathTraversal fileName 带路径穿越被 Base 净化后落在 cwd 内。
 func TestDownloadCorePathTraversal(t *testing.T) {
 	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
 	parent := filepath.Dir(dir)
 	inst := sampleInst(1, dir)
 	if err := d.Add(inst); err != nil {
@@ -213,6 +217,7 @@ func TestDownloadCorePathTraversal(t *testing.T) {
 // TestDownloadCoreHTTPError 源返回错误时任务失败。
 func TestDownloadCoreHTTPError(t *testing.T) {
 	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
 	inst := sampleInst(1, dir)
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)

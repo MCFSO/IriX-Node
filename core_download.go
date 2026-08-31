@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +27,8 @@ import (
 
 // validateCoreURL 校验核心下载链接：仅允许 http/https（MCSM 同款行为，
 // 用户可配置自建镜像/内网源；本接口受 apikey 保护）。
+// host 为字面量环回/未指定地址时直接拒绝（防 SSRF 到本机）；
+// 实际解析的 IP 在拨号时由 coreDownloadDialContext 再校验（防 DNS rebinding）。
 func validateCoreURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -38,6 +41,45 @@ func validateCoreURL(raw string) error {
 		return fmt.Errorf("下载链接缺少主机名: %s", raw)
 	}
 	return nil
+}
+
+// coreDownloadDialContext 构造拨号函数：解析主机名后按 IP 校验
+// （拒绝环回/未指定/链路本地/组播/本机地址，以及未放行的 RFC1918 内网），
+// 复用集群传输同一套 checkTransferIP 规则，消除 DNS rebinding SSRF
+// （CodeQL 审计 #7）。
+func (d *Daemon) coreDownloadDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return nil, fmt.Errorf("无法解析主机 %s: %v", host, err)
+		}
+		var lastErr error
+		for _, ip := range ips {
+			// 与集群传输一致：仅测试用的 transferAllowLoopback 放行环回；
+			// 生产保持 false，核心下载禁打本机/内网（防 SSRF）。
+			if !d.transferAllowLoopback {
+				if err := d.checkTransferIP(ip); err != nil {
+					lastErr = err
+					continue
+				}
+			}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			return conn, nil
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("无可用目标地址")
+		}
+		return nil, lastErr
+	}
 }
 
 // handleDownloadCore 发起核心下载任务。
@@ -105,15 +147,22 @@ func (d *Daemon) runDownloadCore(taskID string, task *task, url, dest, sha512Hex
 	defer cancel()
 
 	task.set(taskStatusRunning, 0.01, "开始下载…", "")
-	client := jdkHTTPClient(2 * time.Minute) // 逐跳校验 http/https
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if err := validateCoreURL(req.URL.String()); err != nil {
-			return err
-		}
-		if len(via) >= 10 {
-			return fmt.Errorf("重定向次数过多")
-		}
-		return nil
+	// 拨号前按解析 IP 校验（防 SSRF 到内网/本机、防 DNS rebinding），
+	// 与集群传输同一套 checkTransferIP 规则（CodeQL 审计 #7）。
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = d.coreDownloadDialContext()
+	client := &http.Client{
+		Timeout:   2 * time.Minute,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if err := validateCoreURL(req.URL.String()); err != nil {
+				return err
+			}
+			if len(via) >= 10 {
+				return fmt.Errorf("重定向次数过多")
+			}
+			return nil
+		},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

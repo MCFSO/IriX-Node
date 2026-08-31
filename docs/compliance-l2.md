@@ -16,6 +16,7 @@
 | 审计落盘 | `-audit-log` 保持默认开启；审计轮转归档到 `{data}/backup/audit/`（防覆盖丢失） |
 | 备份 | 定期 `POST /api/vault/backup` 导出加密备份包；恢复令牌物理保管（丢失 = 数据不可恢复） |
 | 监听范围 | 建议仅监听 127.0.0.1；局域网访问设置强 `-apikey` 并配合防火墙 |
+| 运行时权限收敛（OpenBSD） | OpenBSD 部署启用进程自限制：`pledge` 收敛 syscall 到最小集（inet/dns/rpath/wpath/cpath/flock/unix/proc/exec 等）、`unveil` 锁定文件系统可见范围为数据目录 + 系统二进制目录；其他平台无 pledge/unveil，依赖部署侧降权与 systemd 加固 |
 
 ## 2. 技术控制项自查
 

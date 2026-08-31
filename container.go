@@ -1474,6 +1474,11 @@ func safeArchiveName(name string) (string, error) {
 // POST /api/container/archive body: {path, archive?} → {path}
 // archive 缺省自动命名为 "<basename>_<时间戳>.zip"。
 func (d *Daemon) handleArchiveCreate(w http.ResponseWriter, r *http.Request) {
+	// 节点级归档可压缩任意宿主机路径，属高危操作：仅管理员可用，
+	// 防止非管理员账户借此读取节点敏感文件（CodeQL 审计 #30）。
+	if !requireAdmin(w, r) {
+		return
+	}
 	var body struct {
 		Path    string `json:"path"`
 		Archive string `json:"archive"`
@@ -1587,6 +1592,11 @@ func (d *Daemon) handleArchiveUpload(w http.ResponseWriter, r *http.Request) {
 // handleArchiveRestore 解压归档到目标路径（覆盖式恢复，防 zip-slip）。
 // POST /api/container/archive/restore body: {file, destPath}
 func (d *Daemon) handleArchiveRestore(w http.ResponseWriter, r *http.Request) {
+	// 节点级归档可解压到任意宿主机路径，属高危操作：仅管理员可用，
+	// 防止非管理员账户借此向节点任意位置写文件（CodeQL 审计 #31）。
+	if !requireAdmin(w, r) {
+		return
+	}
 	var body struct {
 		File     string `json:"file"`
 		DestPath string `json:"destPath"`

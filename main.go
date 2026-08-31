@@ -353,6 +353,13 @@ func main() {
 		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
 	}
 
+	// 权限自限制（OpenBSD 上 pledge+unveil 收敛进程能力；其他平台为空操作）。
+	// 必须在 net.Listen 之前、数据目录与 TLS 证书就绪之后调用：unveil 锁定后
+	// 仅数据目录与系统二进制目录可见，pledge 收敛 syscall 到最小集。
+	if err := restrictPrivileges(opts.DataDir); err != nil {
+		log.Fatalf("权限自限制失败: %v", err)
+	}
+
 	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
