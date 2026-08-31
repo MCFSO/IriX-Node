@@ -210,7 +210,10 @@ func (d *Daemon) auditMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		var ab *auditBody
-		if r.Body != nil {
+		// 仅当请求确实携带正文（POST/PUT/PATCH 等）时才包装 body 旁路捕获；
+		// GET/HEAD 等无正文请求（如 /api/overview 轮询）直接跳过，省去一次
+		// 结构体分配与零长度读取，降低百万级并发下的每请求分配压力。
+		if r.Body != nil && r.ContentLength != 0 {
 			ab = &auditBody{ReadCloser: r.Body}
 			r.Body = ab
 		}

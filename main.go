@@ -360,6 +360,15 @@ func main() {
 		log.Fatalf("权限自限制失败: %v", err)
 	}
 
+	// 提升文件描述符上限（Unix 平台）到硬上限：百万级并发连接压测下，
+	// 连接数受 RLIMIT_NOFILE 软上限制约，耗尽即 Accept 返回 EMFILE → 客户端
+	// 大量 connection refused。监听端口前把软上限拉满，是接受海量连接的前提。
+	if soft, rerr := raiseFDLimit(); rerr != nil {
+		alog.Printf("提示: 文件描述符上限未提升（%v），高并发连接可能受 fd 上限制约", rerr)
+	} else if soft > 0 {
+		alog.Printf("文件描述符上限已提升：RLIMIT_NOFILE 软上限 %d", soft)
+	}
+
 	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -390,6 +399,9 @@ func main() {
 		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		// API 类流量请求头很小：默认 1MB 上限偏大，下调到 64KB 既防
+		// 超长请求头占用连接缓冲，也减少每连接读缓冲常驻内存（百万连接时显著）。
+		MaxHeaderBytes: 64 << 10, // 64 KiB
 	}
 
 	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
@@ -450,16 +462,22 @@ func main() {
 	alog.Close()
 }
 
-// connLogListener 包装 net.Listener：记录每次接受到的连接来源与 Accept 错误。
+// connLogListener 包装 net.Listener：仅在 Accept 出错（如句柄耗尽）时记录。
 // 审计中间件只覆盖到达 HTTP 层的请求；连接层失败（SYN 未到达节点、被防火墙
-// 丢弃、半开等）在日志中天然不可见，排查「客户端网络错误」时全靠猜。
-// 包装后「客户端是否连到节点」在审计日志中一眼可见。
+// 丢弃、半开等）在日志中天然不可见，排查「客户端连不上」时全靠 Accept 错误日志。
+// 注：每连接成功日志已被刻意移除——高并发下它拖慢唯一的 Accept 循环，
+// 导致 accept 队列溢出、客户端大量 connection refused（见 Accept 注释）。
 type connLogListener struct {
 	net.Listener
 	d *Daemon
 }
 
-// Accept 接受连接并记录来源；Accept 出错时记录非关闭类错误（如句柄耗尽）。
+// Accept 接受连接。
+// 设计取舍：高并发（百万级连接）压测下，若对每一次 Accept 都写审计日志，
+// 会把 http.Server.Serve 唯一的 Accept 循环拖慢——连接到达速率超过接受速率时，
+// 内核 SYN/accept 队列溢出，客户端表现为大量 connection refused。
+// 因此每连接成功日志被移除（来源 IP 信息价值低且淹没在噪声中），
+// 仅记录 Accept 出错（如句柄耗尽），这才是「客户端连不上」的关键诊断信号。
 func (l *connLogListener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
 	if err != nil {
@@ -468,7 +486,6 @@ func (l *connLogListener) Accept() (net.Conn, error) {
 		}
 		return nil, err
 	}
-	l.d.auditLogf("接受到来自 %s 的连接", c.RemoteAddr())
 	return c, err
 }
 
