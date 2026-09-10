@@ -1,4 +1,4 @@
-//go:build !windows && !linux && !freebsd && !openbsd && !darwin
+//go:build !windows && !linux && !android && !freebsd && !openbsd && !dragonfly && !darwin
 
 // 其他平台系统信息采集：暂不支持，返回零值。
 

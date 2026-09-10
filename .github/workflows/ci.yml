@@ -136,6 +136,42 @@ jobs:
           - goos: illumos
             goarch: amd64
             label: Illumos-amd64
+          # 以下为扩展平台：账户存储不可用 SQLite（modernc.org/sqlite 未覆盖），
+          # 需 -accounts-driver postgres/mysql，见 docs/platform-deploy.md。
+          - goos: linux
+            goarch: ppc64
+            label: Linux-ppc64
+          - goos: aix
+            goarch: ppc64
+            label: AIX-ppc64
+          - goos: dragonfly
+            goarch: amd64
+            label: DragonFly-amd64
+          - goos: plan9
+            goarch: amd64
+            label: Plan9-amd64
+          - goos: plan9
+            goarch: "386"
+            label: Plan9-386
+          - goos: plan9
+            goarch: arm
+            goarm: "7"
+            label: Plan9-arm
+          # GOOS=android 原生二进制（可 adb shell 直跑）；Termux 用户仍用上面的
+          # linux/arm64 产物（Android-armv8a），此处命名 AndroidNative-* 区分。
+          - goos: android
+            goarch: arm64
+            label: AndroidNative-arm64
+          # WebAssembly 仅做可编译性验证：wasm 运行时无 TCP 监听能力，无法
+          # 作为常驻节点服务运行，产物不上传（noartifact）。
+          - goos: js
+            goarch: wasm
+            label: Wasm-js
+            noartifact: true
+          - goos: wasip1
+            goarch: wasm
+            label: Wasm-wasip1
+            noartifact: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -160,6 +196,7 @@ jobs:
           bin="irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
       - name: Upload artifact
+        if: ${{ matrix.noartifact != true }}
         uses: actions/upload-artifact@v4
         with:
           name: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}

@@ -1,4 +1,4 @@
-//go:build linux || darwin || freebsd
+//go:build linux || darwin || freebsd || dragonfly
 
 // disk_free_unix.go — Unix 磁盘余量探测（syscall.Statfs，标准库）。
 // 这些平台的 Statfs_t 字段名为 Bsize/Bavail（OpenBSD 用 F_ 前缀，见

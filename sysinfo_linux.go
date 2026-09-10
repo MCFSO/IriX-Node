@@ -109,9 +109,13 @@ func detectOpenHarmony() bool {
 	return low == "openharmony" || strings.Contains(low, "openharmony")
 }
 
-// osTypePlatform 返回用于 hostInfo 的系统类型/平台标识：OpenHarmony 返回
-// "OpenHarmony"，否则回退 "linux"。供 GET /api/overview 区分鸿蒙设备与普通 Linux。
+// osTypePlatform 返回用于 hostInfo 的系统类型/平台标识：Android（GOOS=android）
+// 返回 "android"；OpenHarmony 返回 "OpenHarmony"；否则回退 "linux"。
+// 供 GET /api/overview 区分鸿蒙设备、Android 原生二进制与普通 Linux。
 func osTypePlatform() string {
+	if runtime.GOOS == "android" {
+		return "android"
+	}
 	if detectOpenHarmony() {
 		return "OpenHarmony"
 	}

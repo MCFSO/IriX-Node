@@ -107,6 +107,32 @@ jobs:
           - goos: illumos
             goarch: amd64
             label: Illumos-amd64
+          # 以下为扩展平台（aix / DragonFly BSD / Plan 9 / 大端 ppc64 / Android 原生）：
+          # 除 Android 原生 arm64 外，账户存储均不可用 SQLite，需 postgres/mysql，
+          # 见 docs/platform-deploy.md。js/wasip1 仅 CI 验证可编译，不发布产物
+          # （wasm 无法监听 TCP，不能作为常驻节点运行）。
+          - goos: linux
+            goarch: ppc64
+            label: Linux-ppc64
+          - goos: aix
+            goarch: ppc64
+            label: AIX-ppc64
+          - goos: dragonfly
+            goarch: amd64
+            label: DragonFly-amd64
+          - goos: plan9
+            goarch: amd64
+            label: Plan9-amd64
+          - goos: plan9
+            goarch: "386"
+            label: Plan9-386
+          - goos: plan9
+            goarch: arm
+            goarm: "7"
+            label: Plan9-arm
+          - goos: android
+            goarch: arm64
+            label: AndroidNative-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

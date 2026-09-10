@@ -14,7 +14,7 @@ MCSM 节点与本节点。
 | 主题 | 说明 |
 | --- | --- |
 | [构建与运行](docs/getting-started.md) | 编译命令、启动参数表、JSON 配置文件、账户管理概述 |
-| [多平台部署](docs/platform-deploy.md) | ARM/x86/POWER/s390x/MIPS Linux、Android(Termux)、OpenHarmony、Solaris/illumos、FreeBSD/OpenBSD/NetBSD，以及配对码机制 |
+| [多平台部署](docs/platform-deploy.md) | ARM/x86/POWER/s390x/MIPS Linux、Android(Termux/原生)、OpenHarmony、Solaris/illumos、FreeBSD/OpenBSD/NetBSD、AIX、DragonFly BSD、Plan 9，以及配对码机制 |
 | [功能与数据目录](docs/features.md) | 能力概览、`{data}` 目录结构 |
 | [容器环境](docs/container.md) | Docker（Linux）/ Bastille（FreeBSD）支持与 PF 注意事项 |
 | [高并发压测调优](docs/perf-tuning.md) | 百万级连接的 OS 资源上限与代码侧优化 |

@@ -7,6 +7,13 @@
 - [在 OpenHarmony（鸿蒙原生 Linux 用户态）上运行](#在-openharmony鸿蒙原生-linux-用户态上运行)
 - [在 Solaris / illumos 上运行](#在-solaris--illumos-上运行)
 - [在 FreeBSD / OpenBSD / NetBSD 上运行（多架构）](#在-freebsd--openbsd--netbsd-上运行多架构)
+- [在 IBM AIX 上运行](#在-ibm-aix-上运行)
+- [在 DragonFly BSD 上运行](#在-dragonfly-bsd-上运行)
+- [在 Plan 9 / Plan 9front 上运行](#在-plan-9--plan-9front-上运行)
+- [Android 原生二进制（GOOS=android）](#android-原生二进制goosandroid)
+- [关于 SGI IRIX](#关于-sgi-irix)
+- [关于 WebAssembly（js/wasm、wasip1）](#关于-webassemblyjswasip1)
+- [关于 iOS（ios/arm64）与 32 位 windows/arm](#关于-iosiosarm64与-32-位-windowsarm)
 - [配对码机制](#配对码机制)
 
 ## 在 ARM / x86 / PowerPC / s390x / MIPS Linux 上运行
@@ -45,10 +52,10 @@ chmod +x irix-node-linux-arm64
 > 功能（实例/文件/集群等）与普通 Linux 完全一致。32 位 MIPS 产物为
 > **softfloat** 编译（`GOMIPS=softfloat`），可运行在无 FPU 的路由器 SoC 上。
 >
-> **PowerPC 大端（`ppc64`）暂不支持**：旧 IBM pSeries / 老 Mac G5 等大端 PowerPC
-> 因 Go 的 SQLite 驱动 `modernc.org/sqlite` 仅覆盖小端 `ppc64le` 而无法编译；
-> 这类机器若可改用 PostgreSQL/MySQL（与 Solaris/illumos 同款隔离方案）可解锁，
-> 或升级到小端 POWER 硬件。
+> **PowerPC 大端（`ppc64`）**：旧 IBM pSeries / 老 Mac G5 等大端 PowerPC 使用
+> `irix-node-Linux-ppc64` 产物。因 Go 的 SQLite 驱动 `modernc.org/sqlite` 仅覆盖
+> 小端 `ppc64le`，大端 ppc64 与 Solaris/illumos 同款——账户存储需改用
+> PostgreSQL/MySQL，其余功能完全一致。
 >
 > 关于 **真·MS-DOS（16 位实模式）**：Go 运行时要求 32 位保护模式与 MMU，且本程序是
 > 监听 TCP 端口的常驻服务，纯 DOS 无此能力，**无法兼容**。DOS 时代的老机器只要能跑
@@ -187,6 +194,7 @@ SQLite 选项直接返回错误，必须改用 **PostgreSQL 或 MySQL**：
 | openbsd/386、arm(GOARM=7)、ppc64、riscv64 | `irix-node-openbsd-*` | 需 postgres/mysql |
 | netbsd/amd64 | `irix-node-netbsd-amd64` | SQLite 可用 |
 | netbsd/386、arm(GOARM=7)、arm64 | `irix-node-netbsd-*` | 需 postgres/mysql |
+| dragonfly/amd64 | `irix-node-DragonFly-amd64` | 需 postgres/mysql |
 | solaris/amd64、illumos/amd64 | `irix-node-Solaris-amd64` / `-Illumos-amd64` | 需 postgres/mysql |
 
 ```bash
@@ -205,6 +213,109 @@ SQLite 选项直接返回错误，必须改用 **PostgreSQL 或 MySQL**：
   不影响节点基本功能；如需精确主机信息，后续可补 `sysinfo_netbsd.go`。
 - 容器能力（Docker/Bastille）在 BSD 系上仅 FreeBSD 提供（Bastille），OpenBSD/NetBSD
   探测返回 `available=false`，客户端自动隐藏容器 UI。
+
+## 在 IBM AIX 上运行
+
+支持 IBM AIX 7.2+（`aix/ppc64`，64 位 PowerPC，Release 产物
+`irix-node-AIX-ppc64`）。静态链接纯 Go 二进制，AIX 7.2+ 直接运行。
+
+**账户存储不能用 SQLite**（驱动底层 libc 未覆盖 AIX，与 Solaris/illumos 同款
+隔离方案），启动时必须指定 PostgreSQL 或 MySQL：
+
+```bash
+./irix-node-AIX-ppc64 \
+  -accounts-driver postgres \
+  -accounts-dsn "postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable" \
+  -bind 127.0.0.1 -port 12346 -data /var/irix-node
+```
+
+- 其余功能（实例/文件/集群/保险库）与 Linux 完全一致；主机信息采集部分字段
+  （内存/磁盘/网络）走兜底零值。
+- 容器能力不可用，探测返回 `available=false`，客户端自动隐藏容器 UI。
+
+## 在 DragonFly BSD 上运行
+
+支持 DragonFly BSD（`dragonfly/amd64`，Release 产物
+`irix-node-DragonFly-amd64`）。主机信息（内存/运行时间/磁盘/网络）走
+sysctl/statfs 采集，与其他 BSD 一致。
+
+**账户存储不能用 SQLite**（驱动底层 libc 未覆盖 DragonFly），启动时必须
+指定 PostgreSQL 或 MySQL（与 Solaris/illumos 同款）：
+
+```bash
+./irix-node-DragonFly-amd64 \
+  -accounts-driver postgres \
+  -accounts-dsn "postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable" \
+  -bind 127.0.0.1 -port 12346 -data /var/irix-node
+```
+
+- 未配置 `-accounts-driver` 时启动直接报错提示，不会静默失败。
+- 容器能力不可用（探测返回 `available=false`）。
+- PF 防火墙注意事项见[容器环境](container.md)。
+
+## 在 Plan 9 / Plan 9front 上运行
+
+支持 Plan 9（`plan9/amd64`、`plan9/386`、`plan9/arm`，Release 产物
+`irix-node-Plan9-*`），可在 9front 等发行版上运行。
+
+**约束**
+
+- **账户存储不能用 SQLite**（驱动未覆盖 Plan 9），需 PostgreSQL/MySQL，
+  与 Solaris/illumos 同款隔离方案。
+- 信号模型不同：仍支持 Interrupt（delete 键）触发优雅关停，SIGHUP 处理为
+  平台空操作。
+- 主机信息采集走兜底零值；无进程级 CPU/内存采样。
+
+```bash
+./irix-node-Plan9-amd64 -bind 127.0.0.1 -port 12346 -data /usr/glenda/irix-data \
+  -accounts-driver postgres \
+  -accounts-dsn "postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable"
+```
+
+## Android 原生二进制（GOOS=android）
+
+除 Termux 用的 `linux/arm64` 产物外，另提供 **GOOS=android 原生编译**的
+`irix-node-AndroidNative-arm64`：可直接被 `adb shell` 在 `/data/local/tmp`
+下执行（PIE 静态二进制，无需 Termux）。
+
+```bash
+adb push irix-node-AndroidNative-arm64 /data/local/tmp/irix-node
+adb shell "chmod +x /data/local/tmp/irix-node"
+adb shell "/data/local/tmp/irix-node -bind 127.0.0.1 -port 12346 -data /data/local/tmp/irix-data"
+```
+
+- 仅提供 arm64（Go 工具链要求 386/amd64/arm 走 cgo 外链，无法静态交叉编译）。
+- 常驻需配合 `nohup` 或 root 化的开机脚本；Android 对后台进程有激进的资源回收。
+- SQLite 账户存储可用（驱动覆盖 android/arm64）。
+
+**注意**：Termux 用户请继续使用 `linux/arm64` 产物（见上节），无需此原生二进制。
+
+## 关于 WebAssembly（js/wasm、wasip1）
+
+Go 支持 `js/wasm` 与 `wasip1/wasm` 两个 WebAssembly 目标，本项目在 CI 中
+**持续验证其可编译性**（保证代码不引入平台绑定的破坏性依赖），但**不发布
+产物、不声称可运行**：WebAssembly 运行时（浏览器 / Node / WASI Preview 1）
+没有 TCP 监听能力，无法运行常驻 HTTP 服务。若未来 WASI 完善套接字支持
+（如 WASIX / wasi-preview2），可重新评估。
+
+## 关于 iOS（ios/arm64）与 32 位 windows/arm
+
+- **iOS（ios/arm64）**：Go 工具链要求 iOS 目标必须以 cgo 外链方式在 macOS
+  上编译（Linux CI 无法交叉编译），且 iOS 应用沙箱不允许进程常驻监听端口，
+  **无法兼容**。若需在 iOS 侧管理节点，请使用 IriX 客户端本身。
+- **32 位 windows/arm**：Go 工具链不支持该 GOOS/GOARCH 组合（`unsupported
+  GOOS/GOARCH`），**无法兼容**；ARM 架构的 Windows 设备请使用
+  `irix-node-windows-arm64`（64 位，Surface Pro X 等机型可直接运行）。
+
+## 关于 SGI IRIX
+
+SGI 的 IRIX 操作系统（MIPS 工作站上的 Unix）：Go **没有 `irix` 目标**
+（无运行时移植与系统调用层，`go build` 直接报 `unsupported GOOS`），
+**无法兼容**。同机房的 IRIX 机器如果只当管理对象使用，可以在旁边的
+Linux/Windows 机器上跑本节点，通过 `-bind` + 集群 API 远程纳管。
+同为 MIPS 的老设备若能改装 Linux（linux-mips 项目支持 SGI IP22/IP28/IP32
+等机型），可直接用上表 `irix-node-linux-mips64` 产物（账户存储需
+PostgreSQL/MySQL，见 MIPS 小节说明）。
 
 ## 配对码机制
 

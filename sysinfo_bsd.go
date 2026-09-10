@@ -1,6 +1,8 @@
-//go:build freebsd || openbsd
+//go:build freebsd || openbsd || dragonfly
 
-// BSD 系统信息采集（sysctl，零依赖、无 cgo）。
+// BSD 系统信息采集（sysctl，零依赖、无 cgo）。DragonFly BSD 与 FreeBSD 同源，
+// kern.boottime / hw.physmem / vm.stats.vm.v_free_count / netstat -ib 接口一致，
+// 复用本文件的实现。
 
 package main
 
@@ -26,6 +28,7 @@ func freePagesName() string {
 	if runtime.GOOS == "openbsd" {
 		return "uvmexp.free"
 	}
+	// freebsd / dragonfly 同为 vm.stats.vm.v_free_count
 	return "vm.stats.vm.v_free_count"
 }
 
@@ -87,7 +90,7 @@ func netCounters() (rx, tx uint64) {
 // osDistro 发行版版本：BSD 无发行版号概念，返回空串由调用方回退 release。
 func osDistro() string { return "" }
 
-// osTypePlatform 返回 BSD 平台标识（freebsd/openbsd 下为各自 GOOS）。
+// osTypePlatform 返回 BSD 平台标识（freebsd/openbsd/dragonfly 下为各自 GOOS）。
 func osTypePlatform() string { return runtime.GOOS }
 
 // osVersion 读取发行版本。

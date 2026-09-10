@@ -17,12 +17,10 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -439,14 +437,12 @@ func main() {
 		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 
-	// 忽略 SIGHUP：SSH/终端前台启动的节点在会话断开时不应被杀
-	// （否则端口静默关闭，客户端表现为「网络错误」且服务器无任何日志）。
-	// systemd/rc.d 等服务管理器不会发送 SIGHUP，忽略它不影响优雅关停。
-	signal.Ignore(syscall.SIGHUP)
-	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程
+	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程。
+	// 信号注册（忽略 SIGHUP + Interrupt/SIGTERM）拆到平台文件，js/wasm
+	// 无 Unix 信号机制（signals_js.go 为空操作）。
 	stopped := make(chan struct{})
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	setupSignalHandler(signals)
 	go func() {
 		sig := <-signals
 		alog.Printf("收到信号 %v，开始优雅关停…", sig)

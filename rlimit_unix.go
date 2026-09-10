@@ -1,7 +1,6 @@
-//go:build !windows && !openbsd
+//go:build unix && !openbsd
 
-// Unix（Linux/FreeBSD/NetBSD/Darwin 等）平台：启动时把进程可打开文件数
-// （RLIMIT_NOFILE）软上限提升到硬上限。
+// Unix（Linux/FreeBSD/NetBSD/Darwin/AIX/DragonFly 等）平台：启动时把进程可打开文件数
 //
 // 动机：高并发（百万级连接）压测下，若节点自身文件描述符软上限过低
 // （系统常见默认 1024），每个 TCP 连接占用一个 fd，很快耗尽——

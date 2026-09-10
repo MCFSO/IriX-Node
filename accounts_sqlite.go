@@ -1,10 +1,12 @@
-//go:build !solaris && !illumos && !mips && !mipsle && !mips64 && !mips64le && !(netbsd && (386 || arm || arm64)) && !(openbsd && (386 || arm || ppc64 || riscv64))
+//go:build !solaris && !illumos && !mips && !mipsle && !mips64 && !mips64le && !ppc64 && !aix && !dragonfly && !plan9 && !js && !wasip1 && !(netbsd && (386 || arm || arm64)) && !(openbsd && (386 || arm || ppc64 || riscv64))
 
 // 账户管理的 SQLite 驱动装配（SQLite 驱动可用的平台）。
 // 用 build tag 把 modernc.org/sqlite 隔离在本文件：以下平台未被该纯 Go 驱动
 // 覆盖、无法编译，走 accounts_nosqlite.go 强制改用 postgres/mysql——
 //   - solaris / illumos（全系）
 //   - mips / mipsle / mips64 / mips64le（全系）
+//   - ppc64（大端 PowerPC；小端 ppc64le 可用）
+//   - aix / dragonfly / plan9 / js / wasip1（驱动底层 libc 未覆盖）
 //   - netbsd 除 amd64 外（386 / arm / arm64）
 //   - openbsd 除 amd64 / arm64 外（386 / arm / ppc64 / riscv64）
 

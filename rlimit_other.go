@@ -1,6 +1,7 @@
-//go:build windows || openbsd
+//go:build !unix || openbsd
 
-// Windows / OpenBSD 平台：无可移植的 RLIMIT_NOFILE 提升路径。
+// 无可移植 RLIMIT_NOFILE 提升路径的平台：Windows、OpenBSD、Plan 9、
+// WebAssembly（js/wasip1）等。
 //
 // Windows 无类 Unix 的 per-process fd 软/硬上限概念，连接数受非分页池与
 // 端口范围制约，应用层无法直接调高（需部署侧调整 TCP 注册表参数）。

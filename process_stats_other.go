@@ -1,4 +1,4 @@
-//go:build !linux && !windows
+//go:build !linux && !android && !windows
 
 // 进程级采样（其他平台：暂无 CPU/内存采集，返回 0/不可用）。
 

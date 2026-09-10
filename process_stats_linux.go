@@ -1,6 +1,6 @@
-//go:build linux
+//go:build linux || android
 
-// 进程级采样（Linux：/proc/<pid>/stat + statm）。
+// 进程级采样（Linux/Android：/proc/<pid>/stat + statm）。
 
 package main
 

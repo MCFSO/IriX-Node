@@ -191,11 +191,11 @@ var netRateCache = struct {
 
 var netRateOnce sync.Once
 
-// startNetRateLoop 后台采样网络速率：Linux 读 /proc 开销小用 2s；
+// startNetRateLoop 后台采样网络速率：Linux/Android 读 /proc 开销小用 2s；
 // 其他平台 netstat 外部进程开销大用 5s。
 func startNetRateLoop() {
 	interval := 2 * time.Second
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		interval = 5 * time.Second
 	}
 	rx1, tx1 := netCounters()

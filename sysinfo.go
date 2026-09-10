@@ -44,9 +44,9 @@ func memUsage() float64 {
 	return float64(total-free) / float64(total)
 }
 
-// cpuUsage CPU 使用率（Linux 下采样 500ms 的近似值，其他平台返回 0）。
+// cpuUsage CPU 使用率（Linux/Android 下采样 500ms 的近似值，其他平台返回 0）。
 func cpuUsage() float64 {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		return 0
 	}
 	prev := cpuJiffies()
@@ -76,10 +76,11 @@ var sysCPUCache = struct {
 var sysCPUOnce sync.Once
 
 // startSysCPULoop 后台采样系统 CPU 使用率：周期读取 /proc/stat 两次取差值，
-// 间隔约 1 秒（比单次 500ms 略宽，但不再阻塞 HTTP 请求线程）。非 Linux 平台
-// 无 /proc/stat，循环直接置 0 并退出（overview 回退到 0）。
+// 间隔约 1 秒（比单次 500ms 略宽，但不再阻塞 HTTP 请求线程）。Android 与
+// Linux 同为 /proc/stat；其余平台无 /proc/stat，循环直接置 0 并退出
+// （overview 回退到 0）。
 func startSysCPULoop() {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
 		return
 	}
 	const interval = 1 * time.Second
