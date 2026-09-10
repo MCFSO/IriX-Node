@@ -146,12 +146,6 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 username 参数")
 		return
 	}
-	// 登录失败限速（防爆破 + 防 bcrypt 打满 CPU）：锁定期内直接拒绝
-	loginKey := clientIP(r) + "|" + body.Username
-	if d.accounts.loginLimited(loginKey) {
-		writeError(w, http.StatusTooManyRequests, "尝试过于频繁，请稍后再试")
-		return
-	}
 	d.accounts.purgeExpiredSessions()
 
 	var (
@@ -163,13 +157,11 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		// 已设置独立密码：只认新密码；否则只认配对码/固定 apikey（首次登录）
 		if d.accounts.rootPasswordSet() {
 			if _, ok := d.accounts.checkPassword(accountRoot, body.Password); !ok {
-				d.accounts.loginFail(loginKey)
 				writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 				return
 			}
 		} else {
 			if !d.checkRootPassword(body.Password) {
-				d.accounts.loginFail(loginKey)
 				writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 				return
 			}

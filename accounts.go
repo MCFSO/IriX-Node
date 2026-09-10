@@ -104,10 +104,6 @@ type accountSystem struct {
 	rootPwSet    bool
 	rootPwCached bool
 	rootPwExpire time.Time
-
-	// 登录失败限速（loginMu 保护）：key = 来源 IP + 用户名
-	loginMu    sync.Mutex
-	loginFails map[string]*loginFailState
 }
 
 // sessCacheEntry 会话缓存条目。
@@ -686,69 +682,6 @@ func (s *accountSystem) invalidateUserSessions(username string) {
 		}
 	}
 	s.cacheMu.Unlock()
-}
-
-// ---------- 登录失败限速 ----------
-
-// 登录失败限速：同一「来源 IP + 用户名」在窗口内失败达上限即锁定。
-// 两个目的：
-//  1. 防密码爆破——登录入口此前完全没有失败限速（保险库的 unlock/recovery 有）；
-//  2. 防 CPU 打满——每次登录都要走 bcrypt（DefaultCost，单次约 100ms CPU 密集），
-//     无限制时少量并发登录请求就能把节点 CPU 吃光，拖垮实例。
-const (
-	loginMaxAttempts   = 10
-	loginLockoutPeriod = 5 * time.Minute
-)
-
-// loginFailState 单个限速 key 的失败计数与锁定状态。
-type loginFailState struct {
-	count       int       // 当前窗口内失败次数
-	windowStart time.Time // 窗口起点
-	lockedUntil time.Time // 锁定截止时刻（零值 = 未锁定）
-}
-
-// loginLimited 判断该 key 是否处于锁定中；窗口过期则顺带清理计数。
-func (s *accountSystem) loginLimited(key string) bool {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	f := s.loginFails[key]
-	if f == nil {
-		return false
-	}
-	now := time.Now()
-	if now.Before(f.lockedUntil) {
-		return true
-	}
-	if now.Sub(f.windowStart) > loginLockoutPeriod {
-		delete(s.loginFails, key) // 窗口已过，重新计数
-	}
-	return false
-}
-
-// loginFail 记录一次登录失败，达到上限即进入锁定。
-func (s *accountSystem) loginFail(key string) {
-	s.loginMu.Lock()
-	defer s.loginMu.Unlock()
-	if s.loginFails == nil {
-		s.loginFails = map[string]*loginFailState{}
-	}
-	now := time.Now()
-	f := s.loginFails[key]
-	if f == nil || now.Sub(f.windowStart) > loginLockoutPeriod {
-		f = &loginFailState{windowStart: now}
-		s.loginFails[key] = f
-	}
-	f.count++
-	if f.count >= loginMaxAttempts {
-		f.lockedUntil = now.Add(loginLockoutPeriod)
-	}
-}
-
-// loginReset 登录成功：清零该 key 的失败计数。
-func (s *accountSystem) loginReset(key string) {
-	s.loginMu.Lock()
-	delete(s.loginFails, key)
-	s.loginMu.Unlock()
 }
 
 // ---------- Redis 缓存与降级 ----------
