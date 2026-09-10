@@ -983,6 +983,10 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 	}
 	// 持久化必须与内存一致：初始 1 个 + 偶数 goroutine(4 个) 各创建 100 个 = 401
 	want := 1 + 4*100
+	// 异步落盘语义：兜底落盘（模拟优雅关停）后再校验磁盘
+	if err := d.FlushDirty(); err != nil {
+		t.Fatalf("FlushDirty 失败: %v", err)
+	}
 	disk := loadInstanceCount(t, dir)
 	d.mu.Lock()
 	mem := len(d.Instances)
