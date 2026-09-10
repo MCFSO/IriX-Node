@@ -32,14 +32,14 @@ import (
 
 // 账户与会话常量。
 const (
-	accountNameMaxLen  = 64               // 用户名最大长度
-	accountPassMinLen  = 8                // 密码最小长度
-	accountSessionTTL  = 24 * time.Hour   // 会话有效期
-	accountPermTTL     = time.Minute      // 权限热缓存 TTL
-	accountRedisCoold  = 30 * time.Second // Redis 降级冷却期
-	accountTokenBytes  = 32               // 会话 token 随机字节数（hex 后 64 字符）
-	accountRoot        = "root"           // 内置管理员账户名（配对码登录）
-	accountRedisPrefix = "irix:acct:"     // Redis 键前缀
+	accountNameMaxLen  = 64                  // 用户名最大长度
+	accountPassMinLen  = 8                   // 密码最小长度
+	accountSessionTTL  = 30 * 24 * time.Hour // 会话有效期（滑动续期：活跃会话半程自动续）
+	accountPermTTL     = time.Minute         // 权限热缓存 TTL
+	accountRedisCoold  = 30 * time.Second    // Redis 降级冷却期
+	accountTokenBytes  = 32                  // 会话 token 随机字节数（hex 后 64 字符）
+	accountRoot        = "root"              // 内置管理员账户名（配对码登录）
+	accountRedisPrefix = "irix:acct:"        // Redis 键前缀
 )
 
 // 进程内热缓存 TTL（鉴权高频路径：每个 API 请求都要查会话与权限）。

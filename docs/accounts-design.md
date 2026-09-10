@@ -15,8 +15,8 @@
 | 会话 token | `Authorization: Bearer <token>` 或 `X-Auth-Token` 头 | 账户 | 按端点开关逐条判定 |
 | 直连票据 | `/download/`、`/upload/` 路径中的票据密码 | 无 | 票据自身授权（10 分钟过期），维持不变 |
 
-会话 token：`crypto/rand` 32 字节（hex 64 字符），有效期 24 小时，
-剩余不足一半时滑动续期（每天最多写一次存储）。
+会话 token：`crypto/rand` 32 字节（hex 64 字符），有效期 30 天，
+剩余不足一半时滑动续期（每 15 天最多写一次存储）。
 
 ## 2. root 管理员与首次登录强制改密
 
