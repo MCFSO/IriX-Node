@@ -42,6 +42,16 @@ const (
 	accountRedisPrefix = "irix:acct:"     // Redis 键前缀
 )
 
+// 进程内热缓存 TTL（鉴权高频路径：每个 API 请求都要查会话与权限）。
+// 未配 Redis 的默认 SQLite 部署下，每次请求要打 2~3 次 SQL；进程内缓存
+// 命中后降为零查询。TTL 不宜过长——写路径（登出/改权限/改密）会主动失效
+// 对应键，TTL 只是兜底，防止节点间直改数据库导致本节点长期停在旧值。
+const (
+	accountSessCacheTTL = 10 * time.Second // 会话缓存（登出 delSession 立即失效）
+	accountPermCacheTTL = 30 * time.Second // 端点权限缓存（改权限立即失效）
+	accountRootCacheTTL = 10 * time.Second // root 是否已设独立密码
+)
+
 // account 账户记录（root 为内置虚拟账户，不存表）。
 type account struct {
 	Username    string          `json:"username"`
@@ -71,7 +81,11 @@ type accountsConfig struct {
 	RedisPoolSize      int    // Redis 连接池大小（≤0 取 16）
 }
 
-// accountSystem 账户子系统：SQL 权威存储 + 可选 Redis 热缓存。
+// accountSystem 账户子系统：SQL 权威存储 + 可选 Redis 热缓存 + 进程内热缓存。
+//
+// 三级读取顺序（以会话为例）：进程内缓存 → Redis → SQL。前两级都是加速层，
+// 写路径（登出/续期/改权限/改密/删账户）会同步失效进程内缓存键，
+// 保证「登出后立即不可访问」这类安全语义不被缓存 TTL 拖慢。
 type accountSystem struct {
 	db     *sql.DB
 	driver string // sqlite | mysql | postgres
@@ -79,6 +93,33 @@ type accountSystem struct {
 
 	rdMu   sync.Mutex
 	rdDown time.Time // Redis 降级冷却截止时间（零值 = 未降级）
+
+	// 进程内热缓存（cacheMu 保护）。条目自带过期时刻，命中即无需任何 I/O。
+	cacheMu sync.RWMutex
+	// sessCache token → 会话缓存条目（登出/续期主动失效）
+	sessCache map[string]sessCacheEntry
+	// permCache username → 端点开关（改权限/删账户主动失效）
+	permCache map[string]permCacheEntry
+	// rootPwSet root 是否已设置独立密码；rootPwCached=false 表示尚未缓存
+	rootPwSet    bool
+	rootPwCached bool
+	rootPwExpire time.Time
+
+	// 登录失败限速（loginMu 保护）：key = 来源 IP + 用户名
+	loginMu    sync.Mutex
+	loginFails map[string]*loginFailState
+}
+
+// sessCacheEntry 会话缓存条目。
+type sessCacheEntry struct {
+	sess    accountSession
+	expires time.Time // 缓存条目过期时刻（非会话过期时刻）
+}
+
+// permCacheEntry 权限缓存条目。
+type permCacheEntry struct {
+	perms   map[string]bool
+	expires time.Time
 }
 
 // rebindSQL 将 ? 占位符改写为 PostgreSQL 的 $n（sqlite/mysql 原生 ?）。
@@ -241,6 +282,11 @@ func (s *accountSystem) createAccount(username, password string, isAdmin bool) e
 		`INSERT INTO accounts (username, password_hash, is_admin, permissions, created_at, updated_at)
 		 VALUES (?, ?, ?, '{}', ?, ?)`),
 		username, string(hash), boolInt(isAdmin), now, now)
+	// 清掉该账户可能存在的负缓存（此前查询过的不存在账户会缓存空权限）
+	s.invalidatePerms(username)
+	if username == accountRoot {
+		s.invalidateRootPasswordSet()
+	}
 	return err
 }
 
@@ -305,6 +351,7 @@ func (s *accountSystem) setPermissions(username string, perms map[string]bool) e
 		return errors.New("账户不存在")
 	}
 	s.redisDelPerms(username)
+	s.invalidatePerms(username) // 进程内缓存同步失效：权限收紧必须立即生效
 	return nil
 }
 
@@ -332,14 +379,24 @@ func (s *accountSystem) putPassword(username, password string) error {
 			 ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`),
 			username, string(hash), isAdmin, now, now)
 	}
+	// root 行由「不存在」变为「存在」，rootPasswordSet 的缓存结果随之改变
+	if username == accountRoot {
+		s.invalidateRootPasswordSet()
+	}
 	return err
 }
 
 // rootPasswordSet root 是否已设置独立登录密码（accounts 表存在 root 行）。
 // 未设置时 root 的登录凭据为配对码/固定 apikey，登录响应强制改密。
+// 每个 root 会话请求都会调用，结果走进程内短 TTL 缓存（改密时失效）。
 func (s *accountSystem) rootPasswordSet() bool {
+	if v, ok := s.cachedRootPasswordSet(); ok {
+		return v
+	}
 	a, err := s.getAccount(accountRoot)
-	return err == nil && a != nil
+	v := err == nil && a != nil
+	s.cacheRootPasswordSet(v)
+	return v
 }
 
 // checkPassword 校验账户密码并返回账户（bcrypt 比较）。
@@ -371,7 +428,123 @@ func (s *accountSystem) deleteAccount(username string) error {
 	}
 	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE username = ?`), username)
 	s.redisDelPerms(username)
+	// SQL 已删其全部会话：进程内会话缓存必须同步清除，否则旧 token 在
+	// 缓存过期前仍可通过鉴权（删账户后残留访问权限是严重越权）。
+	s.invalidateUserSessions(username)
+	s.invalidatePerms(username)
+	if username == accountRoot {
+		s.invalidateRootPasswordSet()
+	}
 	return nil
+}
+
+// ---------- 进程内热缓存（鉴权高频路径） ----------
+//
+// 每个 API 请求都要查会话（非 apikey 通道）与端点权限，默认 SQLite 部署下
+// 即 2~3 次 SQL。这里用有 TTL 的进程内缓存把命中路径降为零 I/O；
+// 写路径（登出/续期/改权限/改密/删账户）主动失效对应键，避免安全语义被
+// TTL 拖慢（如「登出后仍可访问 10 秒」）。
+
+// cachedSession 读取会话缓存；未命中或已过期返回 false。
+// 会话本身在缓存期内到期时同样视为未命中，并顺手清除条目。
+func (s *accountSystem) cachedSession(token string) (accountSession, bool) {
+	now := time.Now()
+	s.cacheMu.RLock()
+	e, ok := s.sessCache[token]
+	s.cacheMu.RUnlock()
+	if !ok || now.After(e.expires) {
+		return accountSession{}, false
+	}
+	if e.sess.ExpiresAt <= now.UnixMilli() {
+		s.invalidateSession(token)
+		return accountSession{}, false
+	}
+	return e.sess, true
+}
+
+// cacheSession 写入会话缓存（惰性建 map，兼容直接构造的 accountSystem）。
+// root 恒 admin：写入前统一修正，保证进程内缓存与 SQL 层的判定一致。
+func (s *accountSystem) cacheSession(token string, sess accountSession) {
+	if sess.Username == accountRoot {
+		sess.IsAdmin = true
+	}
+	s.cacheMu.Lock()
+	if s.sessCache == nil {
+		s.sessCache = map[string]sessCacheEntry{}
+	}
+	s.sessCache[token] = sessCacheEntry{sess: sess, expires: time.Now().Add(accountSessCacheTTL)}
+	s.cacheMu.Unlock()
+}
+
+// invalidateSession 使单个会话缓存失效（登出时必须调用，保证立即不可访问）。
+func (s *accountSystem) invalidateSession(token string) {
+	s.cacheMu.Lock()
+	delete(s.sessCache, token)
+	s.cacheMu.Unlock()
+}
+
+// cachedPerms 读取权限缓存；返回副本，避免调用方改动污染共享缓存。
+func (s *accountSystem) cachedPerms(username string) (map[string]bool, bool) {
+	s.cacheMu.RLock()
+	e, ok := s.permCache[username]
+	s.cacheMu.RUnlock()
+	if !ok || time.Now().After(e.expires) {
+		return nil, false
+	}
+	out := make(map[string]bool, len(e.perms))
+	for k, v := range e.perms {
+		out[k] = v
+	}
+	return out, true
+}
+
+// cachePerms 写入权限缓存（存副本，防止外部后续改动影响缓存）。
+func (s *accountSystem) cachePerms(username string, perms map[string]bool) {
+	cp := make(map[string]bool, len(perms))
+	for k, v := range perms {
+		cp[k] = v
+	}
+	s.cacheMu.Lock()
+	if s.permCache == nil {
+		s.permCache = map[string]permCacheEntry{}
+	}
+	s.permCache[username] = permCacheEntry{perms: cp, expires: time.Now().Add(accountPermCacheTTL)}
+	s.cacheMu.Unlock()
+}
+
+// invalidatePerms 使单个账户的权限缓存失效（改权限/删账户时调用）。
+func (s *accountSystem) invalidatePerms(username string) {
+	s.cacheMu.Lock()
+	delete(s.permCache, username)
+	s.cacheMu.Unlock()
+}
+
+// cachedRootPasswordSet 读取 root 是否已设独立密码的缓存结果。
+// 第二返回值为 false 表示尚未缓存（需回源查询）。
+func (s *accountSystem) cachedRootPasswordSet() (bool, bool) {
+	s.cacheMu.RLock()
+	cached, val, exp := s.rootPwCached, s.rootPwSet, s.rootPwExpire
+	s.cacheMu.RUnlock()
+	if !cached || time.Now().After(exp) {
+		return false, false
+	}
+	return val, true
+}
+
+// cacheRootPasswordSet 写入 root 密码状态缓存。
+func (s *accountSystem) cacheRootPasswordSet(v bool) {
+	s.cacheMu.Lock()
+	s.rootPwSet, s.rootPwCached = v, true
+	s.rootPwExpire = time.Now().Add(accountRootCacheTTL)
+	s.cacheMu.Unlock()
+}
+
+// invalidateRootPasswordSet 使 root 密码状态缓存失效（root 改密/删账户后）。
+func (s *accountSystem) invalidateRootPasswordSet() {
+	s.cacheMu.Lock()
+	s.rootPwCached = false
+	s.rootPwExpire = time.Time{}
+	s.cacheMu.Unlock()
 }
 
 // ---------- 会话（SQL 权威 + Redis 缓存） ----------
@@ -413,15 +586,25 @@ func (s *accountSystem) putSession(token string, sess accountSession, ttl time.D
 			}
 		}
 	}
+	// 写库成功即刷新进程内缓存：滑动续期后新过期时间要立即对后续请求可见
+	s.cacheSession(token, sess)
 }
 
-// lookupSession 查找会话：优先 Redis 热缓存，未命中/不可用回退 SQL。
+// lookupSession 查找会话：进程内缓存 → Redis 热缓存 → SQL 权威。
+// 每个 API 请求（非 apikey 通道）都会调用一次，命中进程内缓存时零 I/O。
 func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
+	// 1) 进程内热缓存（零 I/O）
+	if sess, ok := s.cachedSession(token); ok {
+		return sess, true
+	}
+	// 2) Redis 热缓存
 	if s.redisReady() {
 		if sess, ok := s.redisGetSession(token); ok {
+			s.cacheSession(token, sess)
 			return sess, true
 		}
 	}
+	// 3) SQL 权威层
 	var (
 		sess      accountSession
 		expiresAt int64
@@ -446,11 +629,13 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 			sess.IsAdmin = a.IsAdmin
 		}
 	}
+	s.cacheSession(token, sess)   // 回填进程内缓存
 	s.redisSetSession(token, sess) // 尽力回填（Redis 不可用时内部自动降级）
 	return sess, true
 }
 
-// delSession 删除单个会话（SQL + Redis）。
+// delSession 删除单个会话（SQL + Redis + 进程内缓存）。
+// 进程内缓存必须同步失效：否则登出后仍能凭旧 token 访问到缓存过期为止。
 func (s *accountSystem) delSession(token string) {
 	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE token = ?`), token)
 	if s.redisReady() {
@@ -458,6 +643,7 @@ func (s *accountSystem) delSession(token string) {
 			s.redisFailed()
 		}
 	}
+	s.invalidateSession(token)
 }
 
 // purgeExpiredSessions 清理过期会话（登录时顺手执行，避免独立后台任务）。
@@ -467,19 +653,102 @@ func (s *accountSystem) purgeExpiredSessions() {
 
 // ---------- 权限热缓存（Redis） ----------
 
-// loadPermissions 读取账户端点开关：优先 Redis 热缓存，回退 SQL 并回填。
+// loadPermissions 读取账户端点开关：进程内缓存 → Redis → SQL，逐级回填。
+// 每个 API 请求（非管理员通道）都会调用，命中进程内缓存时零 I/O。
 func (s *accountSystem) loadPermissions(username string) map[string]bool {
+	if m, ok := s.cachedPerms(username); ok {
+		return m
+	}
 	if s.redisReady() {
 		if m, ok := s.redisGetPerms(username); ok {
+			s.cachePerms(username, m)
 			return m
 		}
 	}
 	a, err := s.getAccount(username)
 	if err != nil || a == nil {
+		// 负缓存：账户不存在时避免每次请求都查库（新建账户时主动失效）
+		s.cachePerms(username, map[string]bool{})
 		return map[string]bool{}
 	}
+	s.cachePerms(username, a.Permissions)   // 存副本，返回原始值
 	s.redisSetPerms(username, a.Permissions) // 尽力回填
 	return a.Permissions
+}
+
+// invalidateUserSessions 清除某用户在进程内缓存中的全部会话
+// （删账户时调用：SQL 已删其全部会话，缓存不能留下可用 token）。
+func (s *accountSystem) invalidateUserSessions(username string) {
+	s.cacheMu.Lock()
+	for tok, e := range s.sessCache {
+		if e.sess.Username == username {
+			delete(s.sessCache, tok)
+		}
+	}
+	s.cacheMu.Unlock()
+}
+
+// ---------- 登录失败限速 ----------
+
+// 登录失败限速：同一「来源 IP + 用户名」在窗口内失败达上限即锁定。
+// 两个目的：
+//  1. 防密码爆破——登录入口此前完全没有失败限速（保险库的 unlock/recovery 有）；
+//  2. 防 CPU 打满——每次登录都要走 bcrypt（DefaultCost，单次约 100ms CPU 密集），
+//     无限制时少量并发登录请求就能把节点 CPU 吃光，拖垮实例。
+const (
+	loginMaxAttempts   = 10
+	loginLockoutPeriod = 5 * time.Minute
+)
+
+// loginFailState 单个限速 key 的失败计数与锁定状态。
+type loginFailState struct {
+	count       int       // 当前窗口内失败次数
+	windowStart time.Time // 窗口起点
+	lockedUntil time.Time // 锁定截止时刻（零值 = 未锁定）
+}
+
+// loginLimited 判断该 key 是否处于锁定中；窗口过期则顺带清理计数。
+func (s *accountSystem) loginLimited(key string) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	f := s.loginFails[key]
+	if f == nil {
+		return false
+	}
+	now := time.Now()
+	if now.Before(f.lockedUntil) {
+		return true
+	}
+	if now.Sub(f.windowStart) > loginLockoutPeriod {
+		delete(s.loginFails, key) // 窗口已过，重新计数
+	}
+	return false
+}
+
+// loginFail 记录一次登录失败，达到上限即进入锁定。
+func (s *accountSystem) loginFail(key string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	if s.loginFails == nil {
+		s.loginFails = map[string]*loginFailState{}
+	}
+	now := time.Now()
+	f := s.loginFails[key]
+	if f == nil || now.Sub(f.windowStart) > loginLockoutPeriod {
+		f = &loginFailState{windowStart: now}
+		s.loginFails[key] = f
+	}
+	f.count++
+	if f.count >= loginMaxAttempts {
+		f.lockedUntil = now.Add(loginLockoutPeriod)
+	}
+}
+
+// loginReset 登录成功：清零该 key 的失败计数。
+func (s *accountSystem) loginReset(key string) {
+	s.loginMu.Lock()
+	delete(s.loginFails, key)
+	s.loginMu.Unlock()
 }
 
 // ---------- Redis 缓存与降级 ----------

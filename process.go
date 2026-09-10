@@ -545,8 +545,12 @@ func (p *Process) Info() map[string]any {
 		ppid = parentPID(pid)
 	}
 	return map[string]any{
-		"cpu":       0,
-		"memory":    processMemory(pid),
+		// 此前 cpu 硬编码 0、memory 走恒返回 0 的 processMemory()，
+		// 导致实例列表/详情里所有进程指标恒为 0（面板看不到内存占用）。
+		// 改用真实采样：CPU 自带 500ms 节流（sampleCPUPercent），
+		// 内存读各平台实现 procMemoryBytes（process_stats_*.go）。
+		"cpu":       p.sampleCPUPercent(),
+		"memory":    procMemoryBytes(pid),
 		"ppid":      ppid,
 		"pid":       pid,
 		"ctime":     p.started.UnixMilli(),
@@ -566,13 +570,8 @@ func parentPID(pid int) int {
 	return 0
 }
 
-// processMemory 获取进程内存占用（字节）。
-func processMemory(pid int) int64 {
-	if pid <= 0 {
-		return 0
-	}
-	return 0
-}
+// processMemory 已移除：它恒返回 0，使实例进程内存永远显示为 0。
+// 改用 process_stats_{linux,windows,other}.go 的 procMemoryBytes（真实采样）。
 
 // DirSize 递归统计目录大小。
 func DirSize(dir string) (int64, error) {

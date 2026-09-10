@@ -202,10 +202,39 @@ func parseNetstatIB(out string) (rx, tx uint64) {
 }
 
 // processAlloc 当前进程堆内存占用（字节）。
+// 注意：runtime.ReadMemStats 是 stop-the-world 操作，高频调用会反复暂停
+// 世界（堆越大代价越高）。请求路径请用带缓存的 processAllocCached。
 func processAlloc() uint64 {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	return ms.Alloc
+}
+
+// allocCacheTTL 进程堆内存缓存时长（仪表盘展示无需亚秒精度）。
+const allocCacheTTL = time.Second
+
+// allocCache 进程堆内存缓存（避免 /api/overview 每次请求都 STW 一次）。
+var allocCache = struct {
+	mu sync.Mutex
+	v  uint64
+	at time.Time
+}{}
+
+// processAllocCached 返回缓存的进程堆内存（字节），一秒内复用同一次采样。
+func processAllocCached() uint64 {
+	now := time.Now()
+	allocCache.mu.Lock()
+	if now.Sub(allocCache.at) < allocCacheTTL {
+		v := allocCache.v
+		allocCache.mu.Unlock()
+		return v
+	}
+	allocCache.mu.Unlock()
+	v := processAlloc() // 采样不持锁：STW 期间不应堵住其他请求
+	allocCache.mu.Lock()
+	allocCache.v, allocCache.at = v, now
+	allocCache.mu.Unlock()
+	return v
 }
 
 // hostInfo 返回 (系统类型, 平台, 发行版本)。
@@ -217,4 +246,104 @@ func hostInfo() (osType, platform, release string) {
 	// release 统一用 osVersion()。
 	p := osTypePlatform()
 	return p, p, osVersion()
+}
+
+// ---------------------------------------------------------------------------
+// /api/overview 高频轮询缓存：静态信息 / 内存 / 磁盘
+// ---------------------------------------------------------------------------
+//
+// /api/overview 是面板轮询最频繁的接口（秒级），此前每次请求都要：
+//   - 读磁盘取版本信息（Windows 上 osVersion 读 C:/Windows/System32/Release.txt，
+//     Linux 上 osDistro/osTypePlatform 各读一次 /etc/os-release）；
+//   - 调三次 systemMem()（totalMem / freeMem / memUsage 各自采样一次）；
+//   - 每次 statfs 查磁盘容量。
+// 这些值要么进程生命周期内恒定，要么秒级内无意义地重复采样，全部改为缓存。
+
+// hostStatic 进程生命周期内不变的系统静态信息（首次访问时采集一次）。
+var hostStatic = struct {
+	once     sync.Once
+	hostname string
+	osType   string
+	platform string
+	release  string
+	distro   string
+}{}
+
+// hostStaticInfo 返回缓存的系统静态信息（主机名/系统类型/平台/内核版本/发行版）。
+func hostStaticInfo() (hostname, osType, platform, release, distro string) {
+	hostStatic.once.Do(func() {
+		hostStatic.hostname, _ = os.Hostname()
+		hostStatic.osType, hostStatic.platform, hostStatic.release = hostInfo()
+		hostStatic.distro = osDistro()
+	})
+	return hostStatic.hostname, hostStatic.osType, hostStatic.platform, hostStatic.release, hostStatic.distro
+}
+
+// memSnapshotTTL 内存快照缓存时长（仪表盘秒级刷新无需更精确）。
+const memSnapshotTTL = 2 * time.Second
+
+// memCache 系统内存快照缓存（总/可用），供一次请求内多处复用。
+var memCache = struct {
+	mu    sync.Mutex
+	total uint64
+	free  uint64
+	at    time.Time
+}{}
+
+// memSnapshot 返回系统内存快照（总字节、可用字节、使用率 0-1）。
+// 合并原先 totalMem/freeMem/memUsage 各自采样（一次请求三遍 /proc/meminfo）
+// 为一次采样三处复用。
+func memSnapshot() (total, free uint64, usage float64) {
+	now := time.Now()
+	memCache.mu.Lock()
+	if now.Sub(memCache.at) < memSnapshotTTL {
+		t, f := memCache.total, memCache.free
+		memCache.mu.Unlock()
+		return t, f, memUsageOf(t, f)
+	}
+	// 采样本身不持锁：osMem 可能读文件/调系统调用，避免拉长临界区
+	memCache.mu.Unlock()
+	t, f := systemMem()
+	memCache.mu.Lock()
+	memCache.total, memCache.free, memCache.at = t, f, now
+	memCache.mu.Unlock()
+	return t, f, memUsageOf(t, f)
+}
+
+// memUsageOf 由总内存与可用内存计算使用率（0-1）。
+func memUsageOf(total, free uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(total-free) / float64(total)
+}
+
+// diskSnapshotTTL 磁盘容量缓存时长（容量变化以分钟计，无需每次 statfs）。
+const diskSnapshotTTL = 5 * time.Second
+
+// diskCacheStat 磁盘容量缓存（按路径键缓存，通常只有数据目录一个键）。
+var diskCacheStat = struct {
+	mu          sync.Mutex
+	path        string
+	total, used uint64
+	usage       float64
+	at          time.Time
+}{}
+
+// cachedDiskInfo 返回路径所在文件系统的容量信息（带 TTL 缓存）。
+func cachedDiskInfo(path string) (total, used uint64, usage float64) {
+	now := time.Now()
+	diskCacheStat.mu.Lock()
+	if diskCacheStat.path == path && now.Sub(diskCacheStat.at) < diskSnapshotTTL {
+		t, u, g := diskCacheStat.total, diskCacheStat.used, diskCacheStat.usage
+		diskCacheStat.mu.Unlock()
+		return t, u, g
+	}
+	diskCacheStat.mu.Unlock()
+	t, u, g := diskInfo(path)
+	diskCacheStat.mu.Lock()
+	diskCacheStat.path, diskCacheStat.total, diskCacheStat.used = path, t, u
+	diskCacheStat.usage, diskCacheStat.at = g, now
+	diskCacheStat.mu.Unlock()
+	return t, u, g
 }

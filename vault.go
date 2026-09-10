@@ -487,6 +487,13 @@ func (d *Daemon) registerVaultRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/vault/backup", d.auth(d.handleVaultBackup))
 }
 
+// vaultRenewInterval 保险库会话滑动续期的节流间隔：距上次活跃时间超过该值
+// 才取写锁更新 lastActive/expiresAt。
+// 原实现每个数据面请求都取 v.mu 写锁，等于把全部 API 串行化；改为「读锁校验
+// + 定时续期」后，绝大多数请求只竞争读锁，可并发通过。
+// 空闲超时默认 30 分钟，10 秒续一次不会影响会话有效性判断。
+const vaultRenewInterval = 10 * time.Second
+
 // vaultGate 数据面门禁（docs/vault-design.md §7.3/§8.8）：
 // vault 未启用 → 放行；启用后未初始化 → 403 vault not initialized；
 // 锁定 → 403 vault locked；解锁 → 校验 X-Vault-Token 会话并滑动续期。
@@ -528,17 +535,28 @@ func (d *Daemon) vaultGate(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, "vault locked")
 			return
 		}
-		// 解锁状态：校验会话令牌并滑动续期
-		v.mu.Lock()
-		s := v.sessionFor(r)
-		if s == nil || s.recovery {
-			v.mu.Unlock()
+		// 解锁状态：校验会话令牌并滑动续期。
+		// 读锁完成校验，续期按 vaultRenewInterval 节流后才取写锁：
+		// 每个请求都抢写锁会把全部数据面 API 串行化，高并发下吞吐骤降。
+		now := time.Now()
+		v.mu.RLock()
+		s := v.sessionFor(r) // 只读：map 查找 + 字段读取，读锁下安全
+		allowed := s != nil && !s.recovery
+		needRenew := allowed && now.Sub(s.lastActive) >= vaultRenewInterval
+		v.mu.RUnlock()
+		if !allowed {
 			writeError(w, http.StatusForbidden, "vault locked")
 			return
 		}
-		s.lastActive = time.Now()
-		s.expiresAt = time.Now().Add(v.idleTimeout)
-		v.mu.Unlock()
+		if needRenew {
+			v.mu.Lock()
+			// 重新解析一次：读锁释放后会话可能已被登出/过期清理替换
+			if s2 := v.sessionFor(r); s2 == s {
+				s.lastActive = now
+				s.expiresAt = now.Add(v.idleTimeout)
+			}
+			v.mu.Unlock()
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -101,18 +101,52 @@ type loadTuner struct {
 }
 
 // newLoadTuner 创建调谐器（读当前 GOMAXPROCS/GOGC 作为基线）。
+//
+// 注意：此处**不能**关闭 GC（SetGCPercent(-1)）。此前实现在初始化即关 GC，
+// 期望「首轮状态切换（约 15s）后由三态机接管」；但 tick() 在候选状态等于
+// 当前状态时直接 return，不调用 applyFn——而初始状态就是 loadNormal，
+// 节点长期处于 normal 区间（goroutine 21~1999、CPU 5%~60%，跑着实例的
+// 节点几乎必然落在此区间）时状态永不切换，GC 也就永远不会被重新打开，
+// 堆只增不减直至 OOM。因此这里只读取基线值、保持 GC 正常工作，
+// 三态机仅在状态切换时调整 GOGC（低内存设备另有 GOMEMLIMIT 兜底）。
 func newLoadTuner() *loadTuner {
 	t := &loadTuner{
 		state:      loadNormal,
 		stateSince: time.Now(),
 		maxProcs:   runtime.GOMAXPROCS(0),
-		gcPercent:  debug.SetGCPercent(-1),
+		gcPercent:  currentGCPercent(),
 		numCPU:     runtime.NumCPU(),
 		startedAt:  time.Now(),
 	}
 	t.applyFn = t.applyReal
 	t.initMemoryLimit()
 	return t
+}
+
+// currentGCPercent 读取当前 GOGC 取值（只读，不修改运行时状态）。
+// 指标不可用或取值异常（如 GOGC=off 时的极大值）时回退 normalGCPercent。
+// 注：Go 1.24+ 的 metrics.Read 对单元素数组会返回 KindBad，必须使用与
+// metrics.All() 对齐的完整样本数组（同 processCPUUsage 的处理）。
+func currentGCPercent() int {
+	const key = "/gc/gogc:percent"
+	descs := metrics.All()
+	samples := make([]metrics.Sample, len(descs))
+	for i := range samples {
+		samples[i].Name = descs[i].Name
+	}
+	metrics.Read(samples)
+	for i, d := range descs {
+		if d.Name != key || samples[i].Value.Kind() != metrics.KindUint64 {
+			continue
+		}
+		v := int(samples[i].Value.Uint64())
+		// GOGC=off 时该指标为极大值，视为不可用
+		if v > 0 && v <= 1000 {
+			return v
+		}
+		return normalGCPercent
+	}
+	return normalGCPercent
 }
 
 // initMemoryLimit 按平台内存容量设置 GOMEMLIMIT 软上限。

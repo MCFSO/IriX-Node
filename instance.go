@@ -604,7 +604,10 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	inst.Busy = true
 	inst.Status = StatusStarting
 	// 在锁内取出启动所需配置：并发 PUT /api/instance 会整体替换 Config
+	// （VaultFiles 也必须在此一并取出——此前在解锁后读 inst.Config.VaultFiles，
+	// 与并发更新构成数据竞争，违反 AGENTS.md「访问 Config 前必须加锁」）
 	startCommand, cwd := inst.Config.StartCommand, inst.Config.Cwd
+	vaultFiles := inst.Config.VaultFiles
 	inst.mu.Unlock()
 	defer func() {
 		inst.mu.Lock()
@@ -617,7 +620,7 @@ func (d *Daemon) startInstance(inst *Instance) error {
 		lc.name = inst.InstanceUuid + ".log"
 	}
 	// vaultFiles 物化（D9）：崩溃残留回收（幂等）→ 余量预检 → 解密物化到工作目录
-	if inst.Config.VaultFiles {
+	if vaultFiles {
 		if err := d.vaultMaterialize(inst, cwd); err != nil {
 			inst.SetStatus(StatusStopped)
 			return fmt.Errorf("文件区物化失败: %w", err)

@@ -5,7 +5,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"runtime"
 	"time"
 )
@@ -13,11 +12,16 @@ import (
 // handleOverview 获取节点概览。
 // GET /api/overview
 func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
-	hostname, _ := os.Hostname()
-	osType, platform, release := hostInfo()
+	// 系统静态信息（主机名/系统类型/平台/内核版本/发行版）进程内只采集一次：
+	// 此前每次请求都要读磁盘取版本信息（Windows 读 C:/Windows/System32/Release.txt，
+	// Linux 各读一次 /etc/os-release），而这些值运行期内恒定不变。
+	hostname, osType, platform, release, distro := hostStaticInfo()
 
 	now := time.Now()
-	diskTotal, diskUsed, diskUsage := diskInfo(d.DataDir)
+	// 磁盘容量与内存均带短 TTL 缓存：仪表盘秒级刷新无需每次 statfs /
+	// 重复采样（原先 totalMem/freeMem/memUsage 各自采样一次，共三遍）。
+	diskTotal, diskUsed, diskUsage := cachedDiskInfo(d.DataDir)
+	memTotal, memFree, memUse := memSnapshot()
 	// 网络速率与系统 CPU 使用率复用后台采样缓存（cachedNetRates /
 	// cachedSysCPUUsage），避免每请求同步 sleep 数百毫秒——对慢速
 	// 顺序核（MIPS 路由器、老 ARM）减负明显，仪表盘轮询不再占用 CPU。
@@ -27,12 +31,12 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"hostname":        hostname,
 		"platform":        platform,
 		"release":         release,
-		"version":         osDistro(), // 发行版版本号（如 "22.04"）；空则由应用侧回退 release
+		"version":         distro, // 发行版版本号（如 "22.04"）；空则由应用侧回退 release
 		"uptime":          uptimeSeconds(),
-		"totalmem":        totalMem(),
-		"freemem":         freeMem(),
+		"totalmem":        memTotal,
+		"freemem":         memFree,
 		"cpuUsage":        cachedSysCPUUsage(),
-		"memUsage":        memUsage(),
+		"memUsage":        memUse,
 		"diskusage":       diskUsage,
 		"disktotal":       diskTotal,
 		"diskused":        diskUsed,
@@ -47,7 +51,7 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	processInfo := map[string]any{
 		"cpu":    0,
-		"memory": processAlloc(),
+		"memory": processAllocCached(), // 缓存版：ReadMemStats 会 STW，不能每请求调用
 		"cwd":    d.DataDir,
 	}
 
