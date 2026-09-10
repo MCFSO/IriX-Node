@@ -129,7 +129,11 @@ func TestConcurrentInstanceCRUD(t *testing.T) {
 		t.Errorf("内存实例数 %d != 期望 %d（并发丢失更新）", inMem, goroutines*perGoroutine)
 	}
 
-	// 磁盘必须与内存一致（Save 已原子写 + 串行化，不允许丢失更新）
+	// 磁盘必须与内存一致（异步落盘语义：CRUD 只打脏标记，先 FlushDirty
+	// 合并落盘；Save 原子写 + 串行化，不允许丢失更新）
+	if err := d.FlushDirty(); err != nil {
+		t.Fatalf("FlushDirty 失败: %v", err)
+	}
 	disk := loadInstanceCount(t, dir)
 	if disk != inMem {
 		t.Errorf("磁盘实例数 %d != 内存 %d：持久化丢失更新", disk, inMem)
@@ -355,13 +359,17 @@ func loadInstanceCount(t *testing.T, dir string) int {
 	return len(list)
 }
 
-// TestPersistenceRoundTrip 持久化往返：Add -> Save -> 模拟重启（新 Daemon Load）-> 数据完整。
+// TestPersistenceRoundTrip 持久化往返：Add -> FlushDirty（兜底落盘）-> 模拟重启（新 Daemon Load）-> 数据完整。
 func TestPersistenceRoundTrip(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	for i := 0; i < 50; i++ {
 		if err := d.Add(sampleInst(i, dir)); err != nil {
 			t.Fatalf("Add 失败: %v", err)
 		}
+	}
+	// 异步落盘语义：模拟「优雅关停时的兜底落盘」后再重启
+	if err := d.FlushDirty(); err != nil {
+		t.Fatalf("FlushDirty 失败: %v", err)
 	}
 	// 模拟进程重启：重新 NewDaemon + Load
 	d2 := NewDaemon(dir, "test-key")

@@ -255,6 +255,12 @@ func main() {
 	if err := d.Load(); err != nil {
 		log.Fatalf("加载实例数据失败: %v", err)
 	}
+	// 异步合并落盘：实例增删改只打脏标记，由后台循环按防抖窗口合并写盘
+	// （每窗口至多一次全量序列化+fsync，请求路径零磁盘 I/O）。
+	if d.SaveDebounce > 0 {
+		go d.saveLoop()
+		alog.Printf("实例配置异步落盘已启用（防抖窗口 %v，优雅关停时兜底落盘）", d.SaveDebounce)
+	}
 	d.frpLoad() // 加载 FRP 隧道列表（进程态重置为停止，由用户手动启动）
 
 	// 账户管理初始化（docs/accounts-design.md）：默认 SQLite {data}/accounts.db，
@@ -448,6 +454,12 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			alog.Printf("HTTP 关停未在超时内完成: %v", err)
+		}
+		// 先停后台落盘循环再做兜底落盘：此后不再有新的配置变更
+		// （HTTP 已停止接受请求）， FlushDirty 把防抖窗口内的最后变更写盘。
+		d.StopAutoSave()
+		if err := d.FlushDirty(); err != nil {
+			alog.Printf("关停前实例配置兜底落盘失败: %v", err)
 		}
 		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
 		d.StopAll(30 * time.Second)

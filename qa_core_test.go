@@ -110,7 +110,10 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 	if string(got) != string(corePayload) {
 		t.Fatalf("核心内容不一致")
 	}
-	// 无 .part 临时文件残留
+	// 无 .part 临时文件残留（异步落盘语义：先兜底落盘让 instances.json 就位）
+	if err := d.FlushDirty(); err != nil {
+		t.Fatalf("FlushDirty 失败: %v", err)
+	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 2 { // server.jar + instances.json
 		t.Fatalf("目录内容异常（应只有 server.jar 与 instances.json）: %v", entries)
 	}
