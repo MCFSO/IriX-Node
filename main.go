@@ -205,7 +205,20 @@ func main() {
 		if err != nil {
 			log.Fatalf("无法获取当前目录: %v", err)
 		}
-		opts.DataDir = wd
+		// Windows 上默认位置（当前工作目录）若位于系统盘，自动改用可用空间
+		// 最大的非系统固定盘，避免实例文件/日志/账户库把系统盘撑满
+		// （datadir_windows.go；其他平台恒返回原目录）。
+		if picked, moved := avoidSystemDrive(wd); moved {
+			alog.Printf("数据目录默认位置 %s 位于系统盘 %s，已改用 %s（可用 -data 显式指定）",
+				wd, systemDrive(), picked)
+			opts.DataDir = picked
+		} else {
+			opts.DataDir = wd
+		}
+	} else if onSystemDrive(opts.DataDir) {
+		// 显式指定的目录落在系统盘：尊重用户意图，仅告警
+		alog.Printf("警告: 数据目录 %s 位于系统盘 %s，实例文件/日志/账户库都会写入系统盘，建议改用其他盘",
+			opts.DataDir, systemDrive())
 	}
 	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
 		log.Fatalf("无法创建数据目录 %s: %v", opts.DataDir, err)
