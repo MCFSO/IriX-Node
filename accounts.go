@@ -629,7 +629,7 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 			sess.IsAdmin = a.IsAdmin
 		}
 	}
-	s.cacheSession(token, sess)   // 回填进程内缓存
+	s.cacheSession(token, sess)    // 回填进程内缓存
 	s.redisSetSession(token, sess) // 尽力回填（Redis 不可用时内部自动降级）
 	return sess, true
 }
@@ -671,7 +671,7 @@ func (s *accountSystem) loadPermissions(username string) map[string]bool {
 		s.cachePerms(username, map[string]bool{})
 		return map[string]bool{}
 	}
-	s.cachePerms(username, a.Permissions)   // 存副本，返回原始值
+	s.cachePerms(username, a.Permissions)    // 存副本，返回原始值
 	s.redisSetPerms(username, a.Permissions) // 尽力回填
 	return a.Permissions
 }
