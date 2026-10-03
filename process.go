@@ -159,8 +159,10 @@ func (s *stdinPipe) Close() {
 // Process 封装一个运行中的服务器进程。
 type Process struct {
 	cmd      *exec.Cmd
+	record   processRecord // 启动时落盘的进程身份，之后保持不变
 	Log      *LogBuffer
 	Stdin    *stdinPipe
+	job      io.Closer     // 平台进程容器：主进程退出时清理子进程树
 	log      *fileLogger   // 异步落盘（可能为 nil）
 	lines    *logLines     // 带时间戳的行缓冲（断线补发）
 	splitOut *lineSplitter // stdout 行拆分器
@@ -399,6 +401,11 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 		}
 		return nil, err
 	}
+	if job, err := attachProcessContainment(cmd.Process.Pid); err != nil {
+		log.Printf("警告: 无法将进程 %d 加入系统进程容器（仍会持久化身份供下次启动清理）: %v", cmd.Process.Pid, err)
+	} else {
+		proc.job = job
+	}
 
 	// 等待进程退出并关闭通道
 	go func() {
@@ -411,6 +418,9 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 			}
 		}
 		proc.Stdin.Close()
+		if proc.job != nil {
+			_ = proc.job.Close()
+		}
 		// 等输出复制结束（含超时兜底：孙进程继承 fd 时管道可能不关闭，
 		// 不能让 done 永久不关闭导致 IsRunning 永远为 true）
 		timer := time.NewTimer(3 * time.Second)
@@ -524,13 +534,26 @@ func (p *Process) Kill() error {
 		return nil
 	}
 	proc := p.cmd.Process
-	// 先尝试终止进程树（Windows 下 taskkill /T /F）
-	if err := proc.Kill(); err != nil {
+	if !p.IsRunning() {
+		return nil
+	}
+	identity, err := processIdentity(proc.Pid)
+	if err == nil {
+		err = terminateRecordedProcess(processRecord{PID: proc.Pid, Identity: identity})
+	} else {
+		// 进程可能在读取身份时退出，由 Wait 负责回收。
+		if !p.IsRunning() {
+			return nil
+		}
+		err = proc.Kill()
+	}
+	if err != nil {
 		return err
 	}
 	select {
 	case <-p.done:
 	case <-time.After(5 * time.Second):
+		return fmt.Errorf("进程 %d 未在期限内退出", proc.Pid)
 	}
 	return nil
 }

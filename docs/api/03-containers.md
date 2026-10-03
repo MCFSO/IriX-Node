@@ -1015,7 +1015,7 @@ GET    /api/bastille/rdr?jail=<name>
 响应 `data`：
 
 ```json
-{ "sessionId": "s-1" }
+{ "sessionId": "s-8f6f64e8-93cd-4bc9-a8e9-bc5575ef158d" }
 ```
 
 #### `GET /api/bastille/jails/{name}/run/{session}`
@@ -1038,7 +1038,10 @@ GET    /api/bastille/rdr?jail=<name>
 | `offset` | int | 本次末尾日志字节偏移（客户端增量游标，下轮作 `since`） |
 | `log` | string | 自 `since` 后的新增内容；`since` 缺省时返回最后 `tail` 行 |
 
-> 节点重启后会话不在内存，服务端回退读磁盘日志：`running=false`、无 `exitCode`、`offset` 为日志字节数。
+> 会话进程身份同步保存在节点 `{data}/processes/`。节点优雅关停时停止受管会话；
+> 异常退出后，重启前按 PID、创建时间和 jail JID 核对并清理遗留进程组，`watch=true`
+> 时也会停止原 jail。恢复完成后会话不在内存，服务端回退读磁盘日志：
+> `running=false`、无 `exitCode`、`offset` 为日志字节数。
 
 #### `POST /api/bastille/jails/{name}/run/{session}/stdin`
 

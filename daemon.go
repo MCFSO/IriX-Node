@@ -546,6 +546,9 @@ func (d *Daemon) Remove(uuid string, deleteFiles bool) error {
 		if err := proc.Kill(); err != nil {
 			return fmt.Errorf("终止进程失败: %w", err)
 		}
+		if err := d.forgetProcessFor(uuid, proc); err != nil {
+			return fmt.Errorf("清理进程记录失败: %w", err)
+		}
 	}
 	d.mu.Lock()
 	for i, x := range d.Instances {

@@ -215,6 +215,56 @@ func bastilleRunningSet() map[string]bool {
 	return set
 }
 
+var errBastilleJailNotRunning = errors.New("jail 未运行")
+
+// bastilleJID 返回当前 jail 的内核标识，恢复时用它排除同名重建的 jail。
+func bastilleJID(name string) (int, error) {
+	out, err := cliRun(cliTimeout, jlsBin)
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == name {
+			if jid, err := strconv.Atoi(fields[0]); err == nil && jid > 0 {
+				return jid, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("%w: %s", errBastilleJailNotRunning, name)
+}
+
+// recoverBastilleRecord 清理上次运行时留在同一 jail 中的会话进程组。
+func recoverBastilleRecord(record processRecord) error {
+	if record.Jail == "" || record.JID <= 0 {
+		return fmt.Errorf("Bastille 会话记录缺少 jail 标识")
+	}
+	jid, err := bastilleJID(record.Jail)
+	if errors.Is(err, errBastilleJailNotRunning) || err == nil && jid != record.JID {
+		return nil // jail 已停或同名 jail 被重新创建，不能触碰新 jail
+	}
+	if err != nil {
+		return err
+	}
+	out, err := exec.Command("/bin/ps", "-J", strconv.Itoa(jid), "-o", "pgid=").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("列出 jail 进程组失败: %w: %s", err, out)
+	}
+	for _, field := range strings.Fields(string(out)) {
+		pgid, parseErr := strconv.Atoi(field)
+		if parseErr == nil && pgid == record.PID {
+			if err := syscall.Kill(-record.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				return fmt.Errorf("清理 jail 会话进程组失败: %w", err)
+			}
+			break
+		}
+	}
+	if record.Watch {
+		return bastilleAction(record.Jail, "stop", false)
+	}
+	return nil
+}
+
 // bastilleCreate 创建 jail（docs/container-support.md §3.3 契约）。
 // type 映射：thin=默认(无标志) / thick(-T) / clone(-C) / empty(-E, 仅 NAME) / linux(-L)。
 // vnetMode：none=共享宿主网络(默认) / vnet(-V INTERFACE，物理网卡) / bridge(-B INTERFACE，桥接网卡)。
@@ -1210,6 +1260,7 @@ type bastilleSession struct {
 	done     chan struct{}
 	endedAt  time.Time
 	logPath  string
+	record   processRecord
 }
 
 // isRunning 会话进程是否仍在运行。
@@ -1223,7 +1274,6 @@ func (s *bastilleSession) isRunning() bool {
 type sessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*bastilleSession
-	counter  int
 }
 
 // bastilleSessions 全局长任务会话注册表。
@@ -1243,8 +1293,7 @@ func (s *sessionStore) create() string {
 	if running >= maxBastilleSessions {
 		return ""
 	}
-	s.counter++
-	return fmt.Sprintf("s-%d", s.counter)
+	return "s-" + newUUID()
 }
 
 // register 登记会话。
@@ -1289,7 +1338,7 @@ func (s *sessionStore) sweepLocked() {
 // command 以 shell 语义执行（sh -c 包装）；cwd 非空时前置 cd；
 // watch=true 时进程退出自动执行 bastille stop <name>。
 // 返回会话 id；失败返回错误（含中文原因）。
-func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
+func (d *Daemon) bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 	if command == "" {
 		return "", errors.New("缺少 command 参数")
 	}
@@ -1298,6 +1347,10 @@ func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 	}
 	if !bastilleRunningSet()[name] {
 		return "", fmt.Errorf("jail %s 未运行，无法启动会话（请先调用 start）", name)
+	}
+	jid, err := bastilleJID(name)
+	if err != nil {
+		return "", fmt.Errorf("读取 jail 标识失败: %w", err)
 	}
 	id := bastilleSessions.create()
 	if id == "" {
@@ -1308,6 +1361,7 @@ func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 		fullCmd = fmt.Sprintf("cd %s && %s", cwd, command)
 	}
 	cmd := exec.Command(bastilleBin, "cmd", name, "sh", "-c", fullCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return "", fmt.Errorf("创建 stdin 管道失败: %w", err)
@@ -1340,6 +1394,15 @@ func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 		_ = os.Remove(logPath)
 		return "", fmt.Errorf("启动会话进程失败: %w", err)
 	}
+	record, err := d.recordCommandProcess("bastille:"+name+":"+id, cmd, name, jid, watch)
+	if err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		_ = logFile.Close()
+		_ = os.Remove(logPath)
+		return "", fmt.Errorf("保存 Bastille 会话进程身份失败: %w", err)
+	}
+	sess.record = record
 	bastilleSessions.register(sess)
 	// 输出复制：stdout/stderr 都写入同一 sink（内部加锁，互不丢失）
 	copyStream := func(rd io.Reader) {
@@ -1350,6 +1413,11 @@ func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 	// 结束收尾：记录退出码；watch 看门狗停止 jail
 	go func() {
 		waitErr := cmd.Wait()
+		// bastille CLI 退出后，同组的 jail 内命令仍可能存活。
+		groupErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if groupErr != nil && groupErr != syscall.ESRCH {
+			_, _ = sink.Write([]byte(fmt.Sprintf("\n[irix-node] 清理会话进程组失败: %v\n", groupErr)))
+		}
 		sess.mu.Lock()
 		sess.running = false
 		if waitErr != nil && cmd.ProcessState != nil {
@@ -1359,14 +1427,20 @@ func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 		}
 		sess.endedAt = time.Now()
 		sess.mu.Unlock()
-		close(sess.done)
+		var watchErr error
 		if watch {
-			if err := bastilleAction(name, "stop", false); err != nil {
-				_, _ = sink.Write([]byte(fmt.Sprintf("\n[irix-node] 看门狗：进程退出后停止 jail 失败: %v\n", err)))
+			if watchErr = bastilleAction(name, "stop", false); watchErr != nil {
+				_, _ = sink.Write([]byte(fmt.Sprintf("\n[irix-node] 看门狗：进程退出后停止 jail 失败: %v\n", watchErr)))
 			} else {
 				_, _ = sink.Write([]byte("\n[irix-node] 看门狗：进程已退出，jail 已停止\n"))
 			}
 		}
+		if (groupErr == nil || groupErr == syscall.ESRCH) && watchErr == nil {
+			if err := d.forgetProcess(record); err != nil {
+				_, _ = sink.Write([]byte(fmt.Sprintf("\n[irix-node] 清理会话进程记录失败: %v\n", err)))
+			}
+		}
+		close(sess.done)
 	}()
 	return id, nil
 }
@@ -1435,15 +1509,20 @@ func bastilleRunStop(name, session string) error {
 	if !sess.isRunning() {
 		return nil
 	}
-	if err := sess.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-sess.cmd.Process.Pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 		return fmt.Errorf("发送 SIGTERM 失败: %w", err)
 	}
 	select {
 	case <-sess.done:
 		return nil
 	case <-time.After(sessionStopTimeout):
-		if err := sess.cmd.Process.Kill(); err != nil {
+		if err := syscall.Kill(-sess.cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 			return fmt.Errorf("SIGTERM 超时后强杀失败: %w", err)
+		}
+		select {
+		case <-sess.done:
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("会话进程未在期限内退出")
 		}
 	}
 	return nil
@@ -1457,11 +1536,48 @@ func bastilleRunDelete(name, session string) error {
 			return fmt.Errorf("会话 %s 不属于 jail %s", session, name)
 		}
 		if sess.isRunning() {
-			_ = sess.cmd.Process.Kill()
+			if err := syscall.Kill(-sess.cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+				return fmt.Errorf("终止会话进程组失败: %w", err)
+			}
+			select {
+			case <-sess.done:
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("会话进程未在期限内退出")
+			}
 		}
 		bastilleSessions.remove(session)
 	}
 	logPath := filepath.Join(bastilleRoot, "run", name, session+".log")
 	_ = os.Remove(logPath)
 	return nil
+}
+
+// bastilleStopAll 在节点优雅关停时停止全部受管 jail 运行会话。
+func bastilleStopAll() error {
+	bastilleSessions.mu.Lock()
+	sessions := make([]*bastilleSession, 0, len(bastilleSessions.sessions))
+	for _, sess := range bastilleSessions.sessions {
+		if sess.isRunning() {
+			sessions = append(sessions, sess)
+		}
+	}
+	bastilleSessions.mu.Unlock()
+	var wg sync.WaitGroup
+	errs := make(chan error, len(sessions))
+	for _, sess := range sessions {
+		wg.Add(1)
+		go func(sess *bastilleSession) {
+			defer wg.Done()
+			if err := bastilleRunStop(sess.jail, sess.id); err != nil {
+				errs <- fmt.Errorf("停止 Bastille 会话 %s 失败: %w", sess.id, err)
+			}
+		}(sess)
+	}
+	wg.Wait()
+	close(errs)
+	var all []error
+	for err := range errs {
+		all = append(all, err)
+	}
+	return errors.Join(all...)
 }

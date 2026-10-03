@@ -145,6 +145,9 @@ func (r *nodeRuntime) shutdown(ctx context.Context) error {
 		if err := r.daemon.stopAll(30 * time.Second); err != nil {
 			errs = append(errs, err)
 		}
+		if err := bastilleStopAll(); err != nil {
+			errs = append(errs, err)
+		}
 		if err := r.daemon.frpStopAll(); err != nil {
 			errs = append(errs, err)
 		}

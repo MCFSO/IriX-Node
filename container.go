@@ -1380,7 +1380,7 @@ func (d *Daemon) handleBastilleRunStart(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "缺少 command 参数")
 		return
 	}
-	sessionID, err := bastilleRunStart(r.PathValue("name"), body.Command, body.Cwd, body.Watch)
+	sessionID, err := d.bastilleRunStart(r.PathValue("name"), body.Command, body.Cwd, body.Watch)
 	if err != nil {
 		containerErr(w, err)
 		return

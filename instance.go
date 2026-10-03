@@ -526,8 +526,12 @@ func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
 				inst.Proc = proc
 			}
 			inst.mu.Unlock()
-			inst.SetStatus(StatusStopped)
+			inst.SetStatus(StatusRunning)
 			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := d.forgetProcessFor(inst.InstanceUuid, proc); err != nil {
+			writeError(w, http.StatusInternalServerError, "清理进程记录失败: "+err.Error())
 			return
 		}
 	}
@@ -635,6 +639,13 @@ func (d *Daemon) startInstance(inst *Instance) error {
 		inst.SetStatus(StatusStopped)
 		return fmt.Errorf("启动失败: %w", err)
 	}
+	record, err := d.recordProcess(inst.InstanceUuid, proc)
+	if err != nil && proc.IsRunning() {
+		_ = proc.Kill()
+		inst.SetStatus(StatusStopped)
+		return fmt.Errorf("保存进程身份失败，已终止进程: %w", err)
+	}
+	proc.record = record
 
 	inst.mu.Lock()
 	inst.Proc = proc
@@ -658,6 +669,9 @@ func (d *Daemon) startInstance(inst *Instance) error {
 		case <-proc.done:
 		case <-d.workers.ctx.Done():
 			return
+		}
+		if err := d.forgetProcess(record); err != nil {
+			alog.Printf("清理实例 %s 进程记录失败: %v", inst.InstanceUuid, err)
 		}
 		inst.mu.Lock()
 		wasProc := inst.Proc == proc
@@ -741,6 +755,8 @@ func (d *Daemon) stopAll(timeout time.Duration) error {
 			alog.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, nickname)
 			if err := proc.Stop(stopCmd, timeout); err != nil {
 				stopErrors <- fmt.Errorf("停止实例 %s 失败: %w", inst.InstanceUuid, err)
+			} else if err := d.forgetProcessFor(inst.InstanceUuid, proc); err != nil {
+				stopErrors <- fmt.Errorf("清理实例 %s 进程记录失败: %w", inst.InstanceUuid, err)
 			}
 			inst.SetStatus(StatusStopped)
 		}(inst, proc, stopCmd, nickname)
@@ -797,6 +813,18 @@ func (d *Daemon) stopInstance(inst *Instance) error {
 	}()
 
 	err := proc.Stop(stopCmd, 30*time.Second)
+	if err != nil && proc.IsRunning() {
+		inst.mu.Lock()
+		inst.Proc = proc
+		inst.Status = StatusRunning
+		inst.mu.Unlock()
+		return err
+	}
+	if err == nil {
+		if forgetErr := d.forgetProcessFor(inst.InstanceUuid, proc); forgetErr != nil {
+			err = forgetErr
+		}
+	}
 	inst.SetStatus(StatusStopped)
 	_ = d.Save()
 	// vaultFiles 回收（D9）：停止后整树加密入库并删除明文

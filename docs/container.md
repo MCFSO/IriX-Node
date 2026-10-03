@@ -4,6 +4,8 @@
   含构建长任务与克隆 / 限额），端点见 `NODE_API.md` §6.1。
 - **FreeBSD 节点**：暴露 Bastille 全功能（jail 创建 / 启停 / 克隆 / 导入导出 /
   rdr 端口转发 / setup 环境初始化），服务端包装 `bastille` CLI。
+  `/run` 创建的 jail 内会话有节点侧进程身份记录；节点关停或异常重启时会清理
+  对应进程组，`watch=true` 的会话还会停止原 jail。
 - 能力探测 `GET /api/container/info`：CLI 缺失时 `available=false`，客户端自动隐藏容器 UI。
 - 客户端契约细节见 `docs/container-support.md`（字段级契约，实现须逐条对齐）。
 

@@ -77,7 +77,7 @@ func bastilleApply(jail, template string, args map[string]string) (string, error
 	return "", errContainerUnsupported
 }
 
-func bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
+func (d *Daemon) bastilleRunStart(name, command, cwd string, watch bool) (string, error) {
 	return "", errContainerUnsupported
 }
 
@@ -94,3 +94,7 @@ func bastilleRunStdin(name, session, input string) error { return errContainerUn
 func bastilleRunStop(name, session string) error { return errContainerUnsupported }
 
 func bastilleRunDelete(name, session string) error { return errContainerUnsupported }
+
+func recoverBastilleRecord(record processRecord) error { return errContainerUnsupported }
+
+func bastilleStopAll() error { return nil }

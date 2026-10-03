@@ -330,6 +330,9 @@ func runNode() error {
 	if err := d.Load(); err != nil {
 		return fmt.Errorf("加载实例数据失败: %w", err)
 	}
+	if err := d.recoverOrphanProcesses(); err != nil {
+		return fmt.Errorf("恢复上次运行的实例进程失败: %w", err)
+	}
 	d.frpLoad()
 	if opts.APIKey == "" {
 		code, isNew, err := d.LoadPairing()
