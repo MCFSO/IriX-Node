@@ -25,6 +25,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -76,7 +77,7 @@ type vaultStore struct {
 	blockSize  int
 }
 
-// newVaultStore 创建加密存储层并启动脏索引落盘循环。
+// newVaultStore 创建加密存储层；脏索引落盘循环由节点运行时启动。
 func newVaultStore(d *Daemon, objectsDir, indexFile string, blockSize int) *vaultStore {
 	s := &vaultStore{
 		d:          d,
@@ -85,7 +86,6 @@ func newVaultStore(d *Daemon, objectsDir, indexFile string, blockSize int) *vaul
 		indexFile:  indexFile,
 		blockSize:  blockSize,
 	}
-	go s.flushLoop()
 	return s
 }
 
@@ -821,9 +821,11 @@ func (s *vaultStore) flush() error {
 }
 
 // flushLoop 脏标记延迟落盘（D12：≤1s；崩溃最多丢最近 1s 索引变更，孤儿回收兜底）。
-func (s *vaultStore) flushLoop() {
-	for {
-		time.Sleep(indexFlushTick)
+// ctx 由节点运行时持有，关停时取消并等待最后一次显式 flush。
+func (s *vaultStore) flushLoop(ctx context.Context) {
+	ticker := time.NewTicker(indexFlushTick)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		s.mu.RLock()
 		dirty := s.dirty && s.indexDEK != nil
 		s.mu.RUnlock()

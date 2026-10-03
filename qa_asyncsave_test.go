@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -23,6 +24,48 @@ func waitDirtyFlushed(t *testing.T, dir string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("防抖窗口内 instances.json 未落盘")
+}
+
+// 停止信号发出时写盘可能仍在进行，StopAutoSave 必须等待这次写入完成。
+func TestAsyncSaveStopWaitsForInFlightWrite(t *testing.T) {
+	dir := t.TempDir()
+	d := NewDaemon(dir, "test-key")
+	d.SaveDebounce = time.Millisecond
+	d.saveMu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(func() { d.saveMu.Unlock() }) }
+	defer unlock()
+	inst := NewInstance("", InstanceConfig{Nickname: "停止时写盘", Cwd: dir})
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	d.StartAutoSave()
+	// 脏标记被消费说明 FlushDirty 已进入 Save；saveMu 让实际写入暂时阻塞。
+	deadline := time.Now().Add(3 * time.Second)
+	for d.dirty.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if d.dirty.Load() {
+		t.Fatal("后台写盘没有开始")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		d.StopAutoSave()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("写盘仍受阻时 StopAutoSave 已返回")
+	case <-time.After(30 * time.Millisecond):
+	}
+	unlock()
+	lifecycleWait(t, stopped)
+	d.StartAutoSave() // 停止后重启为空操作
+	d.StopAutoSave()
+	restarted := NewDaemon(dir, "test-key")
+	if err := restarted.Load(); err != nil || restarted.Find(inst.InstanceUuid) == nil {
+		t.Fatalf("停止前已经开始的写入未完成: %v", err)
+	}
 }
 
 func TestAsyncSaveDirtyAndFlush(t *testing.T) {
@@ -109,7 +152,7 @@ func TestAsyncSaveLoopDebounce(t *testing.T) {
 	dir := t.TempDir()
 	d := NewDaemon(dir, "test-key")
 	d.SaveDebounce = 20 * time.Millisecond
-	go d.saveLoop()
+	d.StartAutoSave()
 	defer d.StopAutoSave()
 
 	inst := NewInstance("", InstanceConfig{Nickname: "loop", Cwd: dir})

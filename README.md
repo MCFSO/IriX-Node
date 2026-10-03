@@ -20,6 +20,7 @@ MCSM 节点与本节点。
 | [高并发压测调优](docs/perf-tuning.md) | 百万级连接的 OS 资源上限与代码侧优化 |
 | [加密保险库](docs/vault.md) | TOTP+密码+证书三重保护的数据加密存储 |
 | [安全说明](docs/security.md) | 认证、路径越界防护、SSRF 防护与部署建议 |
+| [架构设计](docs/architecture.md) | 分层边界、请求生命周期、持久化一致性与优雅关停 |
 
 ### 设计文档（`docs/`）
 

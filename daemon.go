@@ -192,8 +192,18 @@ type Daemon struct {
 	// 进程被强杀（非优雅关停/断电）时最多丢一个窗口内的配置变更。
 	dirty        atomic.Bool   // 有未落盘的实例配置变更
 	saveStop     chan struct{} // 关停信号（saveLoop 退出）
-	saveStopOnce sync.Once
+	saveLoopMu   sync.Mutex    // 串行化后台落盘的启动与停止
+	saveDone     chan struct{} // nil 表示未启动；关闭表示循环已退出
+	saveStopped  bool
 	SaveDebounce time.Duration // 落盘防抖窗口（默认 500ms；≤0 = 不启用后台循环）
+
+	workers         *backgroundWorkers // 周期清理、指标与负载采样的取消/等待边界
+	httpRequests    operationGate      // 包含审计写入的在途 HTTP 请求
+	processStarts   operationGate      // 实例/FRP 启动操作，关停前禁止新启动并等待
+	processWatchers sync.WaitGroup     // 进程退出监听，所有启动完成后才允许等待
+	consoleMu       sync.Mutex
+	consoles        map[*wsConn]struct{} // HTTP 已劫持的控制台连接，需要显式关闭
+	consoleClosed   bool
 
 	DataDir     string
 	APIKey      string
@@ -272,8 +282,10 @@ func NewDaemon(dataDir, apiKey string) *Daemon {
 		clusterEvents: []map[string]any{},
 		transfers:     map[string]*transferJob{},
 		tasks:         newTaskStore(),
-		SaveDebounce:  500 * time.Millisecond, // 异步合并落盘窗口；main 据此决定是否启动 saveLoop
+		SaveDebounce:  500 * time.Millisecond,
 		saveStop:      make(chan struct{}),
+		workers:       newBackgroundWorkers(),
+		consoles:      make(map[*wsConn]struct{}),
 	}
 	// 嵌入式档位下进一步下调指标环形保留条数（降低每实例常驻内存）。
 	if embedded.isEmbedded() {
@@ -384,7 +396,9 @@ func (d *Daemon) Save() error {
 		if err := d.vault.store.writeFile(d.vault, systemInstancesPath, data); err != nil {
 			return fmt.Errorf("加密持久化实例列表失败: %w", err)
 		}
-		_ = d.vault.store.flush()
+		if err := d.vault.store.flush(); err != nil {
+			return fmt.Errorf("加密实例索引落盘失败: %w", err)
+		}
 		return nil
 	}
 	tmp := d.instanceFile() + ".tmp"
@@ -427,15 +441,31 @@ func (d *Daemon) FlushDirty() error {
 	return nil
 }
 
-// saveLoop 后台合并落盘循环：每个防抖窗口至多写盘一次，把窗口内的全部
-// 增删改合并成一次「全量序列化 + fsync + rename」。仅在 main 启动
-// （SaveDebounce > 0 时），随进程退出结束。
-func (d *Daemon) saveLoop() {
-	t := time.NewTicker(d.SaveDebounce)
+// StartAutoSave 启动配置合并落盘循环。重复调用或停止后调用均为空操作；
+// 防抖间隔在启动时固定，启动后修改 SaveDebounce 不影响本次循环。
+func (d *Daemon) StartAutoSave() {
+	d.saveLoopMu.Lock()
+	defer d.saveLoopMu.Unlock()
+	if d.saveStopped || d.saveDone != nil || d.SaveDebounce <= 0 {
+		return
+	}
+	d.saveDone = make(chan struct{})
+	go d.saveLoop(d.SaveDebounce, d.saveDone)
+}
+
+// saveLoop 后台合并落盘循环，由 StartAutoSave 登记后启动。
+func (d *Daemon) saveLoop(interval time.Duration, done chan struct{}) {
+	defer close(done)
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
+			select {
+			case <-d.saveStop:
+				return
+			default:
+			}
 			if err := d.FlushDirty(); err != nil {
 				alog.Printf("实例配置异步落盘失败（保留脏标记，将重试）: %v", err)
 			}
@@ -445,10 +475,19 @@ func (d *Daemon) saveLoop() {
 	}
 }
 
-// StopAutoSave 停止后台落盘循环（优雅关停时先停循环再 FlushDirty，
-// 避免二者竞写；重复调用安全）。
+// StopAutoSave 通知并等待后台落盘循环退出。未启动、重复调用和并发调用
+// 均安全；返回后再 FlushDirty，保证最后一次写盘不与后台循环竞写。
 func (d *Daemon) StopAutoSave() {
-	d.saveStopOnce.Do(func() { close(d.saveStop) })
+	d.saveLoopMu.Lock()
+	if !d.saveStopped {
+		d.saveStopped = true
+		close(d.saveStop)
+	}
+	done := d.saveDone
+	d.saveLoopMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 // Find 按 uuid 查找实例。

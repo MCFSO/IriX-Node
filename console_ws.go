@@ -58,6 +58,10 @@ func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 		arw.code = http.StatusSwitchingProtocols
 	}
 	defer conn.Close()
+	if !d.registerConsole(conn) {
+		return
+	}
+	defer d.unregisterConsole(conn)
 
 	inst.mu.Lock()
 	proc := inst.Proc

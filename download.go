@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -46,9 +47,7 @@ type ticketStore struct {
 
 // NewTicketStore 创建票据存储。
 func NewTicketStore() *ticketStore {
-	ts := &ticketStore{tickets: map[string]*transferTicket{}}
-	go ts.cleanupLoop()
-	return ts
+	return &ticketStore{tickets: map[string]*transferTicket{}}
 }
 
 // maxTickets 票据上限，防止恶意刷票据耗尽内存。
@@ -106,10 +105,11 @@ func (ts *ticketStore) Get(password string) *transferTicket {
 	return t
 }
 
-// cleanupLoop 定期清理过期票据。
-func (ts *ticketStore) cleanupLoop() {
-	for {
-		time.Sleep(time.Minute)
+// cleanupLoop 定期清理过期票据，生命周期由节点运行时管理。
+func (ts *ticketStore) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		ts.mu.Lock()
 		now := time.Now()
 		for k, v := range ts.tickets {

@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
@@ -182,7 +183,6 @@ func newVaultState(d *Daemon) *vaultState {
 			filepath.Join(vaultDir, "index.json.enc"),
 			1024*1024),
 	}
-	go v.janitor() // 定期清理过期会话/挑战/令牌/限速条目
 	return v
 }
 
@@ -268,9 +268,10 @@ func (v *vaultState) save() error {
 
 // janitor 定期清理：过期会话（最后一个解锁会话过期 → 清零 masterKey）、
 // 过期挑战、过期初始化令牌、限速条目。
-func (v *vaultState) janitor() {
-	for {
-		time.Sleep(time.Minute)
+func (v *vaultState) janitor(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		v.mu.Lock()
 		now := time.Now()
 		unlockedAny := false

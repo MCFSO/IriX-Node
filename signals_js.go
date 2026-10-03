@@ -8,4 +8,4 @@ package main
 import "os"
 
 // setupSignalHandler 在 js/wasm 下为空操作（无信号机制可注册）。
-func setupSignalHandler(signals chan os.Signal) {}
+func setupSignalHandler(signals chan os.Signal) func() { return func() {} }

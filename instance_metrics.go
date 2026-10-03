@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -65,10 +66,15 @@ func (d *Daemon) sampleAllMetrics() {
 }
 
 // metricsLoop 后台采样循环（首次访问 metrics 接口时惰性启动）。
-// 间隔读取 Daemon.metricsInterval（测试可为单个守护进程缩短，互不干扰）。
-func (d *Daemon) metricsLoop() {
-	for {
-		time.Sleep(d.metricsInterval)
+// 间隔在启动时读取（测试可为单个守护进程缩短，互不干扰）。
+func (d *Daemon) metricsLoop(ctx context.Context) {
+	interval := d.metricsInterval
+	if interval <= 0 {
+		interval = defaultMetricsInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		d.sampleAllMetrics()
 	}
 }
@@ -81,7 +87,7 @@ func (d *Daemon) handleInstanceMetrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	d.metricsOnce.Do(func() { go d.metricsLoop() }) // 循环永不返回，必须 goroutine 启动
+	d.metricsOnce.Do(func() { d.workers.start(d.metricsLoop) })
 
 	minutes := atoiDefault(queryParam(r, "minutes"), 15)
 	if minutes <= 0 {

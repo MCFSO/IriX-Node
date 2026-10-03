@@ -233,14 +233,20 @@ func (d *Daemon) initAccounts(cfg accountsConfig) error {
 }
 
 // closeAccounts 关闭账户数据库与 Redis 连接（优雅关停时调用）。
-func (d *Daemon) closeAccounts() {
+func (d *Daemon) closeAccounts() error {
 	if d.accounts == nil {
-		return
+		return nil
 	}
+	var errs []error
 	if d.accounts.redis != nil {
-		_ = d.accounts.redis.Close()
+		if err := d.accounts.redis.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("关闭账户缓存失败: %w", err))
+		}
 	}
-	_ = d.accounts.db.Close()
+	if err := d.accounts.db.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("关闭账户数据库失败: %w", err))
+	}
+	return errors.Join(errs...)
 }
 
 // accountsSchemaTables 建表语句（sqlite/mysql/postgres 通用子集）。

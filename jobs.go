@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -84,10 +85,9 @@ const maxTasks = 1024
 // taskTTL 已完成/失败任务的保留时长；运行中任务不受过期清理影响。
 const taskTTL = 2 * time.Hour
 
-// newTaskStore 创建任务表并启动清理循环。
+// newTaskStore 只创建任务表；清理循环由节点运行时启动和停止。
 func newTaskStore() *taskStore {
 	s := &taskStore{tasks: map[string]*task{}}
-	go s.cleanupLoop()
 	return s
 }
 
@@ -128,9 +128,10 @@ func (s *taskStore) get(id string) *task {
 }
 
 // cleanupLoop 定期清理过期的已完成/失败任务。
-func (s *taskStore) cleanupLoop() {
-	for {
-		time.Sleep(10 * time.Minute)
+func (s *taskStore) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		s.cleanupOnce(time.Now())
 	}
 }

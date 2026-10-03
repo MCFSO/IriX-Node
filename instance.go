@@ -592,6 +592,10 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	if inst == nil {
 		return fmt.Errorf("实例不存在")
 	}
+	if !d.processStarts.enter() {
+		return fmt.Errorf("节点正在关停，无法启动实例")
+	}
+	defer d.processStarts.leave()
 	inst.mu.Lock()
 	if inst.Busy {
 		inst.mu.Unlock()
@@ -647,8 +651,14 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	inst.mu.Unlock()
 
 	// 监听进程退出：意外退出且启用 AutoRestart 时自动重启（带防抖）
+	d.processWatchers.Add(1)
 	go func() {
-		<-proc.done
+		defer d.processWatchers.Done()
+		select {
+		case <-proc.done:
+		case <-d.workers.ctx.Done():
+			return
+		}
 		inst.mu.Lock()
 		wasProc := inst.Proc == proc
 		if wasProc {
@@ -694,12 +704,20 @@ func (d *Daemon) autoRestart(inst *Instance) {
 // 并行执行：先按各自的停止命令优雅停止，超过 timeout 后强制终止，
 // 避免守护进程退出后留下无人管理的孤儿进程。
 func (d *Daemon) StopAll(timeout time.Duration) {
+	if err := d.stopAll(timeout); err != nil {
+		alog.Printf("关停实例存在失败步骤: %v", err)
+	}
+}
+
+// stopAll 将停止和持久化错误交给运行时汇总，保证其余实例仍然得到清理。
+func (d *Daemon) stopAll(timeout time.Duration) error {
 	d.mu.Lock()
 	insts := make([]*Instance, len(d.Instances))
 	copy(insts, d.Instances)
 	d.mu.Unlock()
 
 	var wg sync.WaitGroup
+	stopErrors := make(chan error, len(insts))
 	type recycler struct {
 		inst *Instance
 		cwd  string
@@ -712,6 +730,7 @@ func (d *Daemon) StopAll(timeout time.Duration) {
 		inst.Proc = nil
 		// 昵称必须在锁内取出：goroutine 里读 inst.Config 与并发 Update 竞争
 		stopCmd, nickname, cwd := inst.Config.StopCommand, inst.Config.Nickname, inst.Config.Cwd
+		vaultFiles := inst.Config.VaultFiles
 		inst.mu.Unlock()
 		if proc == nil || !proc.IsRunning() {
 			continue
@@ -721,24 +740,30 @@ func (d *Daemon) StopAll(timeout time.Duration) {
 			defer wg.Done()
 			alog.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, nickname)
 			if err := proc.Stop(stopCmd, timeout); err != nil {
-				alog.Printf("停止实例 %s 失败: %v", inst.InstanceUuid, err)
+				stopErrors <- fmt.Errorf("停止实例 %s 失败: %w", inst.InstanceUuid, err)
 			}
 			inst.SetStatus(StatusStopped)
 		}(inst, proc, stopCmd, nickname)
-		if inst.Config.VaultFiles {
+		if vaultFiles {
 			toRecycle = append(toRecycle, recycler{inst, cwd})
 		}
 	}
 	wg.Wait()
+	close(stopErrors)
+	var errs []error
+	for err := range stopErrors {
+		errs = append(errs, err)
+	}
 	// vaultFiles 回收（D9）：优雅关停时整树加密入库（串行，避免并发回收竞态）
 	for _, rc := range toRecycle {
 		if err := d.vaultRecycle(rc.inst, rc.cwd); err != nil {
-			alog.Printf("实例 %s 文件树回收失败（解锁后自动重试）: %v", rc.inst.InstanceUuid, err)
+			errs = append(errs, fmt.Errorf("实例 %s 文件树回收失败（解锁后自动重试）: %w", rc.inst.InstanceUuid, err))
 		}
 	}
 	if err := d.Save(); err != nil {
-		alog.Printf("关停时保存实例状态失败: %v", err)
+		errs = append(errs, fmt.Errorf("关停时保存实例状态失败: %w", err))
 	}
+	return errors.Join(errs...)
 }
 
 // errNotRunning 实例未在运行的哨兵错误；restart 据此区分「本就没运行」与真实故障。

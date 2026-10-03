@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "IriX Node 架构",
+    "subtitle": "模块化单体 · HTTP 控制平面 · 可控生命周期 · 本地与外部存储",
+    "output": "architecture.html",
+    "viewBox": [
+      1560,
+      740
+    ]
+  },
+  "components": [
+    {
+      "id": "config",
+      "type": "external",
+      "label": "启动配置",
+      "sublabel": "命令行 > JSON > 默认值",
+      "pos": [
+        40,
+        85
+      ],
+      "size": [
+        150,
+        70
+      ]
+    },
+    {
+      "id": "client",
+      "type": "frontend",
+      "label": "IriX 客户端",
+      "sublabel": "MCSM 风格 API",
+      "pos": [
+        40,
+        310
+      ],
+      "size": [
+        150,
+        70
+      ]
+    },
+    {
+      "id": "root",
+      "type": "backend",
+      "label": "组合根 · runNode",
+      "sublabel": "main.go / config.go",
+      "pos": [
+        275,
+        85
+      ],
+      "size": [
+        230,
+        70
+      ]
+    },
+    {
+      "id": "http",
+      "type": "backend",
+      "label": "HTTP 入口",
+      "sublabel": "http_server.go",
+      "pos": [
+        275,
+        310
+      ],
+      "size": [
+        230,
+        70
+      ],
+      "tag": "请求登记 · 审计 · CORS · 限额"
+    },
+    {
+      "id": "policy",
+      "type": "security",
+      "label": "身份与数据门禁",
+      "sublabel": "账户权限 / vaultGate",
+      "pos": [
+        275,
+        520
+      ],
+      "size": [
+        230,
+        70
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "生命周期 · nodeRuntime",
+      "sublabel": "app_runtime.go",
+      "pos": [
+        625,
+        85
+      ],
+      "size": [
+        230,
+        70
+      ],
+      "tag": "服务退出 / 信号取消 → 同一清理"
+    },
+    {
+      "id": "modules",
+      "type": "backend",
+      "label": "应用模块与核心模型",
+      "sublabel": "Daemon / Instance / 文件 / 集群",
+      "pos": [
+        625,
+        310
+      ],
+      "size": [
+        230,
+        70
+      ]
+    },
+    {
+      "id": "background",
+      "type": "messagebus",
+      "label": "周期任务",
+      "sublabel": "配置落盘 / 指标 / 过期清理",
+      "pos": [
+        625,
+        520
+      ],
+      "size": [
+        230,
+        70
+      ],
+      "tag": "context 取消 + 等待退出"
+    },
+    {
+      "id": "process",
+      "type": "external",
+      "label": "实例 / FRP 子进程",
+      "sublabel": "Process / 平台适配",
+      "pos": [
+        1000,
+        85
+      ],
+      "size": [
+        220,
+        70
+      ],
+      "tag": "关停禁止新启动"
+    },
+    {
+      "id": "storage",
+      "type": "backend",
+      "label": "持久化适配",
+      "sublabel": "Save / SQL / 加密对象 / 日志",
+      "pos": [
+        1000,
+        310
+      ],
+      "size": [
+        220,
+        70
+      ]
+    },
+    {
+      "id": "local",
+      "type": "database",
+      "label": "本地数据目录",
+      "sublabel": "JSON / SQLite / vault / logs",
+      "pos": [
+        1000,
+        520
+      ],
+      "size": [
+        220,
+        70
+      ]
+    },
+    {
+      "id": "sql",
+      "type": "database",
+      "label": "外部账户数据库",
+      "sublabel": "MySQL / PostgreSQL",
+      "pos": [
+        1290,
+        310
+      ],
+      "size": [
+        220,
+        70
+      ],
+      "tag": "可替代本地 SQLite"
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "可选 Redis 缓存",
+      "sublabel": "会话 / 权限；故障回退 SQL",
+      "pos": [
+        1290,
+        520
+      ],
+      "size": [
+        220,
+        70
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "节点主机 · 单个 Go 守护进程管理本地资源",
+      "wraps": [
+        "root",
+        "http",
+        "policy",
+        "runtime",
+        "modules",
+        "background",
+        "process",
+        "storage",
+        "local"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "config",
+      "to": "root",
+      "label": "合并配置",
+      "variant": "default",
+      "labelAt": [
+        230,
+        118
+      ]
+    },
+    {
+      "from": "root",
+      "to": "runtime",
+      "label": "组装",
+      "variant": "default",
+      "labelAt": [
+        565,
+        118
+      ]
+    },
+    {
+      "from": "root",
+      "to": "http",
+      "label": "路由组装",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        465,
+        225
+      ]
+    },
+    {
+      "from": "client",
+      "to": "http",
+      "label": "HTTP(S)",
+      "variant": "emphasis",
+      "labelAt": [
+        232,
+        340
+      ]
+    },
+    {
+      "from": "http",
+      "to": "modules",
+      "label": "用例",
+      "variant": "emphasis",
+      "labelAt": [
+        565,
+        335
+      ]
+    },
+    {
+      "from": "policy",
+      "to": "modules",
+      "label": "鉴权",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        565,
+        445
+      ]
+    },
+    {
+      "from": "runtime",
+      "to": "process",
+      "label": "启动 / 停止",
+      "variant": "default",
+      "labelAt": [
+        930,
+        118
+      ]
+    },
+    {
+      "from": "runtime",
+      "to": "background",
+      "label": "取消 / 等待",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "right",
+      "via": [
+        [
+          900,
+          120
+        ],
+        [
+          900,
+          555
+        ]
+      ],
+      "labelAt": [
+        930,
+        225
+      ]
+    },
+    {
+      "from": "modules",
+      "to": "storage",
+      "label": "读写",
+      "variant": "emphasis",
+      "labelAt": [
+        928,
+        335
+      ]
+    },
+    {
+      "from": "background",
+      "to": "storage",
+      "label": "刷盘 / 清理",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        930,
+        485
+      ]
+    },
+    {
+      "from": "storage",
+      "to": "local",
+      "label": "原子写 / 加密",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1110,
+        450
+      ]
+    },
+    {
+      "from": "storage",
+      "to": "sql",
+      "label": "SQL",
+      "variant": "default",
+      "labelAt": [
+        1255,
+        335
+      ]
+    },
+    {
+      "from": "storage",
+      "to": "redis",
+      "label": "热缓存",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [
+        1255,
+        450
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "请求路径",
+      "items": [
+        "统一信封、真实 HTTP 状态码",
+        "请求登记覆盖处理器与审计写入",
+        "端点权限与保险库门禁沿用现有契约"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "运行时路径",
+      "items": [
+        "初始化失败释放已创建资源",
+        "信号和 HTTP 错误共享关停流程",
+        "关闭 WebSocket，再排空请求和启动操作"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "数据路径",
+      "items": [
+        "落盘循环停止时等待进行中的写入",
+        "写入失败保留脏标记并报告错误",
+        "Redis 是可选缓存，SQL 为账户权威数据"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "演进边界",
+      "items": [
+        "现有代码仍在同一个 Go 包",
+        "长任务取消 / 恢复为后续工作",
+        "业务服务与存储接口按需求逐步拆分"
+      ]
+    }
+  ]
+}

@@ -3,7 +3,7 @@
 //
 // 提供与 MCSManager 面板一致风格的 HTTP API（见 apis/node_api.md），
 // 使得 IriX 客户端可以用同一套客户端代码同时管理 MCSM 节点与本节点。
-// 本守护进程使用纯标准库实现，无任何外部依赖，单文件 go build 即可运行。
+// 核心以标准库为主；账户存储使用 go.mod 中批准的数据库与缓存依赖。
 
 package main
 
@@ -25,6 +25,19 @@ import (
 )
 
 func main() {
+	err := runNode()
+	if err != nil {
+		log.Print(err)
+	}
+	alog.Close()
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// runNode 是组合根：解析配置、初始化依赖，再交由运行时管理服务生命周期。
+// 返回错误而不是在初始化中直接退出，确保已经创建的资源能被释放。
+func runNode() error {
 	var (
 		configPath     = flag.String("config", "config.json", "配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件（字段见 config.example.json），命令行显式参数优先级高于配置文件")
 		port           = flag.Int("port", 12346, "监听端口（1-65535）")
@@ -97,7 +110,7 @@ func main() {
 	// 加载配置文件并合并启动选项（不存在则静默跳过，与纯命令行启动一致）
 	cfg, cfgLoaded, err := loadConfigFile(*configPath)
 	if err != nil {
-		log.Fatalf("%v", err)
+		return err
 	}
 	opts := &nodeOptions{
 		Port:                  *port,
@@ -153,55 +166,55 @@ func main() {
 		embedded.isEmbedded(), embedded.reason, embedded.cpu, embedded.mem>>20)
 
 	if opts.Port <= 0 || opts.Port > 65535 {
-		log.Fatalf("端口无效: %d（须在 1-65535 之间；请检查命令行参数或配置文件 %s）", opts.Port, *configPath)
+		return fmt.Errorf("端口无效: %d（须在 1-65535 之间；请检查命令行参数或配置文件 %s）", opts.Port, *configPath)
 	}
 	if opts.InstanceLogMax < 1 || opts.AuditLogMax < 1 {
-		log.Fatalf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
+		return fmt.Errorf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
 			opts.InstanceLogMax, opts.AuditLogMax, *configPath)
 	}
 	switch opts.TLSMode {
 	case "off", "auto", "manual":
 	default:
-		log.Fatalf("tls-mode 无效: %q（须为 off / auto / manual；请检查命令行参数或配置文件 %s）", opts.TLSMode, *configPath)
+		return fmt.Errorf("tls-mode 无效: %q（须为 off / auto / manual；请检查命令行参数或配置文件 %s）", opts.TLSMode, *configPath)
 	}
 	if opts.TLSMode == "manual" && (opts.TLSCert == "" || opts.TLSKey == "") {
-		log.Fatalf("tls-mode=manual 需要同时配置 tls-cert 与 tls-key（请检查命令行参数或配置文件 %s）", *configPath)
+		return fmt.Errorf("tls-mode=manual 需要同时配置 tls-cert 与 tls-key（请检查命令行参数或配置文件 %s）", *configPath)
 	}
 	if opts.VaultEnabled && opts.TLSMode == "off" {
-		log.Fatalf("启用加密保险库（-vault）必须开启 TLS（tls-mode=auto 或 manual）：密码/TOTP/签名明文传输将完全破坏 Vault 的安全模型")
+		return errors.New("启用加密保险库（-vault）必须开启 TLS（tls-mode=auto 或 manual）：密码/TOTP/签名明文传输将完全破坏 Vault 的安全模型")
 	}
 	if opts.VaultEnabled {
 		if opts.VaultIdleTimeout < 1 {
-			log.Fatalf("vault-idle-timeout 无效: %d 分钟（须 ≥1）", opts.VaultIdleTimeout)
+			return fmt.Errorf("vault-idle-timeout 无效: %d 分钟（须 ≥1）", opts.VaultIdleTimeout)
 		}
 		if opts.VaultMaxAttempts < 1 {
-			log.Fatalf("vault-max-attempts 无效: %d（须 ≥1）", opts.VaultMaxAttempts)
+			return fmt.Errorf("vault-max-attempts 无效: %d（须 ≥1）", opts.VaultMaxAttempts)
 		}
 		if opts.VaultLockoutMinutes < 1 {
-			log.Fatalf("vault-lockout-minutes 无效: %d 分钟（须 ≥1）", opts.VaultLockoutMinutes)
+			return fmt.Errorf("vault-lockout-minutes 无效: %d 分钟（须 ≥1）", opts.VaultLockoutMinutes)
 		}
 		if opts.VaultPBKDF2Iterations < 10000 {
-			log.Fatalf("vault-pbkdf2-iterations 无效: %d（须 ≥10000）", opts.VaultPBKDF2Iterations)
+			return fmt.Errorf("vault-pbkdf2-iterations 无效: %d（须 ≥10000）", opts.VaultPBKDF2Iterations)
 		}
 		if opts.VaultPasswordMinLen < 1 {
-			log.Fatalf("vault-password-min-length 无效: %d（须 ≥1）", opts.VaultPasswordMinLen)
+			return fmt.Errorf("vault-password-min-length 无效: %d（须 ≥1）", opts.VaultPasswordMinLen)
 		}
 		if opts.VaultPasswordExpire < 0 {
-			log.Fatalf("vault-password-expire-days 无效: %d（须 ≥0）", opts.VaultPasswordExpire)
+			return fmt.Errorf("vault-password-expire-days 无效: %d（须 ≥0）", opts.VaultPasswordExpire)
 		}
 		if opts.VaultBlockSizeKB < 1 || opts.VaultBlockSizeKB > 65536 {
-			log.Fatalf("vault-block-size-kb 无效: %d（须在 1-65536 之间）", opts.VaultBlockSizeKB)
+			return fmt.Errorf("vault-block-size-kb 无效: %d（须在 1-65536 之间）", opts.VaultBlockSizeKB)
 		}
 		switch opts.VaultDefaultFilesMode {
 		case "plaintext", "materialize":
 		default:
-			log.Fatalf("vault-default-files-mode 无效: %q（须为 plaintext 或 materialize）", opts.VaultDefaultFilesMode)
+			return fmt.Errorf("vault-default-files-mode 无效: %q（须为 plaintext 或 materialize）", opts.VaultDefaultFilesMode)
 		}
 	}
 	if opts.DataDir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			log.Fatalf("无法获取当前目录: %v", err)
+			return fmt.Errorf("无法获取当前目录: %w", err)
 		}
 		// Windows 上默认位置（当前工作目录）若位于系统盘，自动改用可用空间
 		// 最大的非系统固定盘，避免实例文件/日志/账户库把系统盘撑满
@@ -219,17 +232,25 @@ func main() {
 			opts.DataDir, systemDrive())
 	}
 	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
-		log.Fatalf("无法创建数据目录 %s: %v", opts.DataDir, err)
+		return fmt.Errorf("无法创建数据目录 %s: %w", opts.DataDir, err)
 	}
 
 	d := NewDaemon(opts.DataDir, opts.APIKey)
+	runtimeOwned := false
+	defer func() {
+		if !runtimeOwned {
+			d.workers.stop()
+			d.closeAccounts()
+		}
+		// 所有请求与受管进程退出后，再排空审计文件；main 最后排空 stderr。
+		if d.AuditLog != nil {
+			d.AuditLog.Close()
+		}
+	}()
 	d.Port = opts.Port
 	d.transferAllowCIDR = opts.TransferAllowCIDR
 	if err := d.parseTransferAllowCIDR(); err != nil {
-		log.Fatalf("transfer-allow-cidr 配置无效: %v（请检查命令行参数或配置文件 %s）", err, *configPath)
-	}
-	if opts.LoadTune {
-		go tuner.loop() // 负载自适应调谐（后台 goroutine 周期采样）
+		return fmt.Errorf("transfer-allow-cidr 配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
 	}
 	logDir := filepath.Join(opts.DataDir, "logs")
 	if opts.InstanceLog {
@@ -250,16 +271,6 @@ func main() {
 		// 每次轮转把将被覆盖的审计段复制到 {data}/backup/audit/
 		d.AuditLog.archiveDir = filepath.Join(opts.DataDir, "backup", "audit")
 	}
-	if err := d.Load(); err != nil {
-		log.Fatalf("加载实例数据失败: %v", err)
-	}
-	// 异步合并落盘：实例增删改只打脏标记，由后台循环按防抖窗口合并写盘
-	// （每窗口至多一次全量序列化+fsync，请求路径零磁盘 I/O）。
-	if d.SaveDebounce > 0 {
-		go d.saveLoop()
-		alog.Printf("实例配置异步落盘已启用（防抖窗口 %v，优雅关停时兜底落盘）", d.SaveDebounce)
-	}
-	d.frpLoad() // 加载 FRP 隧道列表（进程态重置为停止，由用户手动启动）
 
 	// 账户管理初始化（docs/accounts-design.md）：默认 SQLite {data}/accounts.db，
 	// 可选 MySQL/PostgreSQL + Redis 热缓存；连接池参数见配置文件 accounts 块。
@@ -274,7 +285,7 @@ func main() {
 		RedisDB:            opts.RedisDB,
 		RedisPoolSize:      opts.RedisPoolSize,
 	}); err != nil {
-		log.Fatalf("账户管理初始化失败: %v（请检查 accounts 配置或 -accounts-* / -redis-* 参数）", err)
+		return fmt.Errorf("账户管理初始化失败: %w（请检查 accounts 配置或 -accounts-* / -redis-* 参数）", err)
 	}
 	redisNote := ""
 	if d.accounts.redis != nil {
@@ -306,7 +317,7 @@ func main() {
 			d.vault.store.blockSize = opts.VaultBlockSizeKB * 1024
 		}
 		if err := d.vault.load(filepath.Join(opts.DataDir, "vault", "vault.json")); err != nil {
-			log.Fatalf("加载保险库状态失败: %v", err)
+			return fmt.Errorf("加载保险库状态失败: %w", err)
 		}
 		if d.vault.initialized {
 			alog.Printf("加密保险库已启用（已初始化，当前锁定：请先解锁再访问数据）")
@@ -315,25 +326,15 @@ func main() {
 		}
 	}
 
-	// 自动启动标记了 AutoStart 的实例（异步，不阻塞 HTTP 服务就绪）。
-	// vault 开启时跳过：重启后保险库处于锁定状态，必须先解锁才能操作实例。
-	if opts.VaultEnabled {
-		alog.Printf("保险库已启用：跳过实例自动启动（解锁后才能启动实例）")
-	} else {
-		for _, inst := range d.Instances {
-			if inst.Config.EventTask.AutoStart {
-				go func(inst *Instance) {
-					if err := d.startInstance(inst); err != nil {
-						alog.Printf("自动启动实例 %s 失败: %v", inst.InstanceUuid, err)
-					}
-				}(inst)
-			}
-		}
+	// 先加载保险库迁移标记，再选择明文或加密的实例加载路径。
+	if err := d.Load(); err != nil {
+		return fmt.Errorf("加载实例数据失败: %w", err)
 	}
+	d.frpLoad()
 	if opts.APIKey == "" {
 		code, isNew, err := d.LoadPairing()
 		if err != nil {
-			log.Fatalf("初始化配对码失败: %v", err)
+			return fmt.Errorf("初始化配对码失败: %w", err)
 		}
 		if isNew {
 			alog.Printf("======================================================")
@@ -359,12 +360,12 @@ func main() {
 	case "auto":
 		tlsCfg, tlsFingerprint, err = ensureSelfSignedTLS(filepath.Join(opts.DataDir, "tls"))
 		if err != nil {
-			log.Fatalf("TLS 自签证书初始化失败: %v", err)
+			return fmt.Errorf("TLS 自签证书初始化失败: %w", err)
 		}
 	case "manual":
 		tlsCfg, tlsFingerprint, err = loadManualTLS(opts.TLSCert, opts.TLSKey)
 		if err != nil {
-			log.Fatalf("%v", err)
+			return err
 		}
 	default:
 		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
@@ -374,7 +375,7 @@ func main() {
 	// 必须在 net.Listen 之前、数据目录与 TLS 证书就绪之后调用：unveil 锁定后
 	// 仅数据目录与系统二进制目录可见，pledge 收敛 syscall 到最小集。
 	if err := restrictPrivileges(opts.DataDir); err != nil {
-		log.Fatalf("权限自限制失败: %v", err)
+		return fmt.Errorf("权限自限制失败: %w", err)
 	}
 
 	// 提升文件描述符上限（Unix 平台）到硬上限：百万级并发连接压测下，
@@ -389,7 +390,7 @@ func main() {
 	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("HTTP 服务启动失败: %v", err)
+		return fmt.Errorf("HTTP 服务启动失败: %w", err)
 	}
 	// TLS 开启时在监听器上包一层 tls.NewListener（日志包装保持最外层）
 	var serveLn net.Listener = &connLogListener{Listener: ln, d: d}
@@ -404,22 +405,7 @@ func main() {
 		}
 	}
 
-	mux := http.NewServeMux()
-	d.RegisterRoutes(mux)
-
-	srv := &http.Server{
-		Addr: addr,
-		// 处理链：审计（含预检）→ CORS（预检在此终结，错误响应同样带 CORS 头）→
-		// 保险库数据面门禁 → 请求体限额 → 业务路由
-		Handler: d.auditMiddleware(corsMiddleware(d.vaultGate(limitAPIBody(mux)))),
-		// 只限制读取请求头与空闲连接：防 slowloris 占用连接。
-		// 不设 ReadTimeout/WriteTimeout，否则大文件上传/下载会被中途切断。
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		// API 类流量请求头很小：默认 1MB 上限偏大，下调到 64KB 既防
-		// 超长请求头占用连接缓冲，也减少每连接读缓冲常驻内存（百万连接时显著）。
-		MaxHeaderBytes: 64 << 10, // 64 KiB
-	}
+	srv := d.newHTTPServer(addr)
 
 	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
 	if cfgLoaded {
@@ -437,50 +423,29 @@ func main() {
 		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
 	}
 
-	// 优雅关停：停止接受新请求，等待在途请求，再关停子进程避免孤儿进程。
+	// 运行时编排：停止接受新请求、刷入持久化、关停子进程和释放外部连接。
 	// 信号注册（忽略 SIGHUP + Interrupt/SIGTERM）拆到平台文件，js/wasm
 	// 无 Unix 信号机制（signals_js.go 为空操作）。
-	stopped := make(chan struct{})
+	app := newNodeRuntime(d, srv, serveLn)
+	app.loadTune = opts.LoadTune
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	signals := make(chan os.Signal, 1)
-	setupSignalHandler(signals)
+	stopSignals := setupSignalHandler(signals)
+	defer stopSignals()
 	go func() {
-		sig := <-signals
-		alog.Printf("收到信号 %v，开始优雅关停…", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			alog.Printf("HTTP 关停未在超时内完成: %v", err)
+		select {
+		case sig := <-signals:
+			alog.Printf("收到信号 %v，开始优雅关停…", sig)
+			cancelRun()
+		case <-runCtx.Done():
 		}
-		// 先停后台落盘循环再做兜底落盘：此后不再有新的配置变更
-		// （HTTP 已停止接受请求）， FlushDirty 把防抖窗口内的最后变更写盘。
-		d.StopAutoSave()
-		if err := d.FlushDirty(); err != nil {
-			alog.Printf("关停前实例配置兜底落盘失败: %v", err)
-		}
-		// 关停实例：先发送停止命令，超时后强杀，避免留下无人管理的孤儿进程
-		d.StopAll(30 * time.Second)
-		d.frpStopAll()    // 停止全部 FRP 隧道进程
-		d.closeAccounts() // 关闭账户数据库与 Redis 连接池
-		// 保险库：进程退出前落盘加密索引（解锁状态下的最后变更不能丢）
-		if d.vault != nil && d.vault.enabled && d.vault.unlockedSafe() {
-			if err := d.vault.store.flush(); err != nil {
-				alog.Printf("保险库索引落盘失败: %v", err)
-			}
-			d.auditLogf("保险库索引已落盘（关停）")
-		}
-		close(stopped)
 	}()
 
-	if err := srv.Serve(serveLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("HTTP 服务启动失败: %v", err)
-	}
-	<-stopped
+	runtimeOwned = true
+	err = app.run(runCtx)
 	d.auditLogf("已退出")
-	// 先排空审计落盘，再排空 stderr 异步日志，等待全部日志写出后退出
-	if d.AuditLog != nil {
-		d.AuditLog.Close()
-	}
-	alog.Close()
+	return err
 }
 
 // connLogListener 包装 net.Listener：仅在 Accept 出错（如句柄耗尽）时记录。

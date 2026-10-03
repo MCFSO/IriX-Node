@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"runtime"
 	"runtime/debug"
@@ -175,13 +176,14 @@ func (t *loadTuner) initMemoryLimit() {
 		limit>>20, total>>20)
 }
 
-// tuner 全局调谐器实例（main 启动 loop）。
+// tuner 全局调谐器实例（节点运行时按配置启动 loop）。
 var tuner = newLoadTuner()
 
-// loop 周期采样与调整（后台 goroutine，随进程退出结束）。
-func (t *loadTuner) loop() {
-	for {
-		time.Sleep(loadTuneInterval)
+// loop 周期采样与调整，节点关停时取消并退出。
+func (t *loadTuner) loop(ctx context.Context) {
+	ticker := time.NewTicker(loadTuneInterval)
+	defer ticker.Stop()
+	for waitNextTick(ctx, ticker.C) {
 		t.tick()
 	}
 }

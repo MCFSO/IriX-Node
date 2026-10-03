@@ -188,6 +188,10 @@ func buildFRPConfig(t *frpTunnel) (string, error) {
 
 // frpStart 启动隧道进程。
 func (d *Daemon) frpStart(t *frpTunnel) error {
+	if !d.processStarts.enter() {
+		return errors.New("节点正在关停，无法启动隧道")
+	}
+	defer d.processStarts.leave()
 	binary := d.frpcBinaryPath()
 	if binary == "" {
 		return errors.New("未找到 frpc 二进制（请上传到节点或安装到 PATH）")
@@ -210,12 +214,20 @@ func (d *Daemon) frpStart(t *frpTunnel) error {
 	if err != nil {
 		return fmt.Errorf("启动 frpc 失败: %w", err)
 	}
+	d.frpMu.Lock()
 	t.proc = proc
 	t.log = proc.Log
 	t.Status = "running"
+	d.frpMu.Unlock()
 	// 退出监听：更新状态
+	d.processWatchers.Add(1)
 	go func(t *frpTunnel, proc *Process) {
-		<-proc.done
+		defer d.processWatchers.Done()
+		select {
+		case <-proc.done:
+		case <-d.workers.ctx.Done():
+			return
+		}
 		d.frpMu.Lock()
 		if t.proc == proc {
 			t.Status = "failed"
@@ -492,12 +504,16 @@ func (d *Daemon) handleFRPUploadBinary(w http.ResponseWriter, r *http.Request) {
 }
 
 // frpStopAll 停止全部隧道（守护进程退出前调用）。
-func (d *Daemon) frpStopAll() {
+func (d *Daemon) frpStopAll() error {
 	d.frpMu.Lock()
 	list := make([]*frpTunnel, len(d.frpTunnels))
 	copy(list, d.frpTunnels)
 	d.frpMu.Unlock()
+	var errs []error
 	for _, t := range list {
-		_ = d.frpStop(t)
+		if err := d.frpStop(t); err != nil {
+			errs = append(errs, fmt.Errorf("停止隧道 %s 失败: %w", t.ID, err))
+		}
 	}
+	return errors.Join(errs...)
 }

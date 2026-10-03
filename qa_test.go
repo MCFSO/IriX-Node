@@ -41,6 +41,10 @@ func newTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
 	dir := t.TempDir()
 	d := NewDaemon(dir, "test-key")
+	t.Cleanup(func() {
+		d.StopAutoSave()
+		d.workers.stop()
+	})
 	if err := d.Load(); err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}
