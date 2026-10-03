@@ -39,7 +39,7 @@ jobs:
         run: go build -o irix-node .
 
   build:
-    name: Cross-build (${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }})
+    name: Cross-build (${{ matrix.goos }}-${{ matrix.goarch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,50 +51,13 @@ jobs:
           - goos: windows
             goarch: arm64
             ext: .exe
-          - goos: windows
-            goarch: "386"
-            ext: .exe
           - goos: linux
             goarch: amd64
           - goos: linux
-            goarch: "386"
-          - goos: linux
             goarch: arm64
-          - goos: linux
-            goarch: arm64
-            label: Android-armv8a
           - goos: linux
             goarch: arm
             goarm: "7"
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-            label: Android-armv7a
-          - goos: linux
-            goarch: arm64
-            label: OpenHarmony-armv8a
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-            label: OpenHarmony-armv7a
-          - goos: linux
-            goarch: loong64
-          - goos: linux
-            goarch: riscv64
-          - goos: linux
-            goarch: ppc64le
-          - goos: linux
-            goarch: s390x
-          - goos: linux
-            goarch: mips
-            gomips: softfloat
-          - goos: linux
-            goarch: mipsle
-            gomips: softfloat
-          - goos: linux
-            goarch: mips64
-          - goos: linux
-            goarch: mips64le
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -103,75 +66,12 @@ jobs:
             goarch: amd64
           - goos: freebsd
             goarch: arm64
-          - goos: freebsd
-            goarch: "386"
-          - goos: freebsd
-            goarch: arm
-            goarm: "7"
           - goos: openbsd
             goarch: amd64
           - goos: openbsd
             goarch: arm64
-          - goos: openbsd
-            goarch: "386"
-          - goos: openbsd
-            goarch: arm
-            goarm: "7"
-          - goos: openbsd
-            goarch: ppc64
-          - goos: openbsd
-            goarch: riscv64
           - goos: netbsd
             goarch: amd64
-          - goos: netbsd
-            goarch: "386"
-          - goos: netbsd
-            goarch: arm
-            goarm: "7"
-          - goos: netbsd
-            goarch: arm64
-          - goos: solaris
-            goarch: amd64
-            label: Solaris-amd64
-          - goos: illumos
-            goarch: amd64
-            label: Illumos-amd64
-          # 以下为扩展平台：账户存储不可用 SQLite（modernc.org/sqlite 未覆盖），
-          # 需 -accounts-driver postgres/mysql，见 docs/platform-deploy.md。
-          - goos: linux
-            goarch: ppc64
-            label: Linux-ppc64
-          - goos: aix
-            goarch: ppc64
-            label: AIX-ppc64
-          - goos: dragonfly
-            goarch: amd64
-            label: DragonFly-amd64
-          - goos: plan9
-            goarch: amd64
-            label: Plan9-amd64
-          - goos: plan9
-            goarch: "386"
-            label: Plan9-386
-          - goos: plan9
-            goarch: arm
-            goarm: "7"
-            label: Plan9-arm
-          # GOOS=android 原生二进制（可 adb shell 直跑）；Termux 用户仍用上面的
-          # linux/arm64 产物（Android-armv8a），此处命名 AndroidNative-* 区分。
-          - goos: android
-            goarch: arm64
-            label: AndroidNative-arm64
-          # WebAssembly 仅做可编译性验证：wasm 运行时无 TCP 监听能力，无法
-          # 作为常驻节点服务运行，产物不上传（noartifact）。
-          - goos: js
-            goarch: wasm
-            label: Wasm-js
-            noartifact: true
-          - goos: wasip1
-            goarch: wasm
-            label: Wasm-wasip1
-            noartifact: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -183,7 +83,6 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          GOMIPS: ${{ matrix.gomips }}
         run: go vet ./...
       - name: Build
         env:
@@ -191,14 +90,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          GOMIPS: ${{ matrix.gomips }}
         run: |
-          bin="irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}"
+          bin="irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build -trimpath -ldflags "-s -w" -o "$bin" .
       - name: Upload artifact
-        if: ${{ matrix.noartifact != true }}
         uses: actions/upload-artifact@v4
         with:
-          name: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}
-          path: irix-node-${{ matrix.label != '' && matrix.label || format('{0}-{1}', matrix.goos, matrix.goarch) }}${{ matrix.ext }}
+          name: irix-node-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
           if-no-files-found: error
