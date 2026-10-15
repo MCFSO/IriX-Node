@@ -39,6 +39,16 @@ const (
 	accountRedisPrefix = "irix:acct:"        // Redis 键前缀
 )
 
+// 登录防暴力破解限速（蓝方加固）：用户名与来源 IP 双维度失败计数，
+// 达到阈值后锁定一段时间（与保险库 unlock 限速策略一致）。
+// 成功登录立即清零；条目随过期会话清理一并回收，防 map 无界增长。
+const (
+	accountLoginMaxFails = 5                // 窗口内最大失败次数
+	accountLoginLockout  = 15 * time.Minute // 触发限速后的锁定时长
+	accountLoginWindow   = 15 * time.Minute // 失败计数窗口
+	accountLoginMaxKeys  = 10000            // 限速表键上限（防内存放大）
+)
+
 // 进程内热缓存 TTL（鉴权高频路径：每个 API 请求都要查会话与权限）。
 // 未配 Redis 的默认 SQLite 部署下，每次请求要打 2~3 次 SQL；进程内缓存
 // 命中后降为零查询。TTL 不宜过长——写路径（登出/改权限/改密）会主动失效
@@ -100,6 +110,18 @@ type accountSystem struct {
 	sessCache map[string]sessCacheEntry
 	// permCache username → 端点开关（改权限/删账户主动失效）
 	permCache map[string]permCacheEntry
+
+	// 登录防暴力破解限速表（loginMu 保护；蓝方加固）。
+	// 键为 "u:"+username 或 "i:"+ip，条目含窗口计数与锁定截止时刻。
+	loginMu    sync.Mutex
+	loginFails map[string]loginFailEntry
+}
+
+// loginFailEntry 登录失败限速条目（用户名与 IP 双维度各存一条）。
+type loginFailEntry struct {
+	count    int       // 窗口内失败次数
+	windowSt time.Time // 当前计数窗口起点
+	until    time.Time // 锁定截止时刻（零值 = 未锁定）
 }
 
 // sessCacheEntry 会话缓存条目。
@@ -407,11 +429,10 @@ func (s *accountSystem) deleteAccount(username string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return errors.New("账户不存在")
 	}
-	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE username = ?`), username)
+	// 三层（SQL / Redis / 进程内）全部撤销：只删 SQL 时 Redis 里的会话
+	// 键仍存活到 TTL，被删账户的旧 token 在缓存期内仍可通过鉴权。
+	s.revokeUserSessions(username, "")
 	s.redisDelPerms(username)
-	// SQL 已删其全部会话：进程内会话缓存必须同步清除，否则旧 token 在
-	// 缓存过期前仍可通过鉴权（删账户后残留访问权限是严重越权）。
-	s.invalidateUserSessions(username)
 	s.invalidatePerms(username)
 	return nil
 }
@@ -527,8 +548,19 @@ func (s *accountSystem) putSession(token string, sess accountSession, ttl time.D
 	if s.redisReady() {
 		data, err := json.Marshal(sess)
 		if err == nil {
-			if err := s.redis.Set(context.Background(), accountRedisPrefix+"session:"+token, data, ttl).Err(); err != nil {
+			ctx := context.Background()
+			if err := s.redis.Set(ctx, accountRedisPrefix+"session:"+token, data, ttl).Err(); err != nil {
 				s.redisFailed()
+			} else {
+				// 用户会话索引（蓝方加固）：按用户名记录活跃 token 集合，
+				// 供改密/删账户时批量撤销 Redis 会话（集合与成员同 TTL）。
+				setKey := accountRedisPrefix + "usess:" + sess.Username
+				pipe := s.redis.Pipeline()
+				pipe.SAdd(ctx, setKey, token)
+				pipe.Expire(ctx, setKey, ttl)
+				if _, err := pipe.Exec(ctx); err != nil {
+					s.redisFailed()
+				}
 			}
 		}
 	}
@@ -582,16 +614,168 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 func (s *accountSystem) delSession(token string) {
 	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE token = ?`), token)
 	if s.redisReady() {
-		if err := s.redis.Del(context.Background(), accountRedisPrefix+"session:"+token).Err(); err != nil {
+		ctx := context.Background()
+		if err := s.redis.Del(ctx, accountRedisPrefix+"session:"+token).Err(); err != nil {
 			s.redisFailed()
+			return
+		}
+		// 尽力清理用户会话索引中的成员（键不存在或网络故障均无害）
+		if username, ok := s.redisSessionOwner(token); ok {
+			s.redis.SRem(ctx, accountRedisPrefix+"usess:"+username, token)
 		}
 	}
 	s.invalidateSession(token)
 }
 
+// redisSessionOwner 从 Redis 会话条目反查所属用户名（清理索引用；尽力而为）。
+func (s *accountSystem) redisSessionOwner(token string) (string, bool) {
+	data, err := s.redis.Get(context.Background(), accountRedisPrefix+"session:"+token).Bytes()
+	if err != nil {
+		return "", false
+	}
+	var sess accountSession
+	if json.Unmarshal(data, &sess) != nil || sess.Username == "" {
+		return "", false
+	}
+	return sess.Username, true
+}
+
+// revokeUserSessions 撤销某用户的全部会话（蓝方加固）：
+// 改密（管理员重置）与删账户时调用——旧凭据泄露场景下，已被偷走的 token
+// 必须立即作废，而不是等 30 天 TTL 自然过期。
+//
+// keepToken 非空时保留该 token（用户自己改密时保住当前会话，避免改完密码
+// 立即被踢出登录）。撤销覆盖三层：SQL 权威层、Redis 热缓存（按用户会话
+// 索引枚举删除）、进程内热缓存。
+func (s *accountSystem) revokeUserSessions(username, keepToken string) {
+	if keepToken != "" {
+		_, _ = s.db.Exec(rebindSQL(s.driver,
+			`DELETE FROM sessions WHERE username = ? AND token <> ?`), username, keepToken)
+	} else {
+		_, _ = s.db.Exec(rebindSQL(s.driver,
+			`DELETE FROM sessions WHERE username = ?`), username)
+	}
+	if s.redisReady() {
+		ctx := context.Background()
+		setKey := accountRedisPrefix + "usess:" + username
+		if members, err := s.redis.SMembers(ctx, setKey).Result(); err == nil {
+			for _, tok := range members {
+				if tok == keepToken {
+					continue
+				}
+				if err := s.redis.Del(ctx, accountRedisPrefix+"session:"+tok).Err(); err != nil {
+					s.redisFailed()
+					break // Redis 抖动：放弃剩余清理，SQL 已是权威层
+				}
+			}
+		}
+		// 索引集合重置：保留 token 之外整组删除
+		if keepToken != "" {
+			pipe := s.redis.Pipeline()
+			pipe.Del(ctx, setKey)
+			pipe.SAdd(ctx, setKey, keepToken)
+			pipe.Expire(ctx, setKey, accountSessionTTL)
+			if _, err := pipe.Exec(ctx); err != nil {
+				s.redisFailed()
+			}
+		} else {
+			if err := s.redis.Del(ctx, setKey).Err(); err != nil {
+				s.redisFailed()
+			}
+		}
+	}
+	// 进程内缓存同步清除（保留 keepToken）
+	s.cacheMu.Lock()
+	for tok, e := range s.sessCache {
+		if e.sess.Username == username && tok != keepToken {
+			delete(s.sessCache, tok)
+		}
+	}
+	s.cacheMu.Unlock()
+}
+
 // purgeExpiredSessions 清理过期会话（登录时顺手执行，避免独立后台任务）。
 func (s *accountSystem) purgeExpiredSessions() {
 	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE expires_at < ?`), time.Now().UnixMilli())
+	s.purgeLoginFails()
+}
+
+// ---------- 登录防暴力破解限速（蓝方加固） ----------
+
+// loginFailKeys 登录限速表的双维度键。
+func loginFailKeys(username, ip string) (string, string) {
+	return "u:" + username, "i:" + ip
+}
+
+// loginBlocked 判断用户名或来源 IP 是否处于登录锁定期。
+// 返回 true 时剩余锁定时长 > 0；bcrypt 本身只拖慢单次尝试速率，
+// 无限次尝试仍可离线穷举弱密码，此处封死在线爆破通道。
+func (s *accountSystem) loginBlocked(username, ip string) bool {
+	uk, ik := loginFailKeys(username, ip)
+	now := time.Now()
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	for _, k := range []string{uk, ik} {
+		if e, ok := s.loginFails[k]; ok && now.Before(e.until) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordLoginFailure 记录一次登录失败（用户名与 IP 双维度各计一次）；
+// 窗口内达到阈值即锁定。bcrypt 校验本身有固定耗时，此计数不构成额外放大。
+func (s *accountSystem) recordLoginFailure(username, ip string) {
+	uk, ik := loginFailKeys(username, ip)
+	now := time.Now()
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	if s.loginFails == nil {
+		s.loginFails = map[string]loginFailEntry{}
+	}
+	// 表过大时先回收过期条目，防攻击者用随机用户名撑爆内存
+	if len(s.loginFails) >= accountLoginMaxKeys {
+		s.purgeLoginFailsLocked(now)
+		if len(s.loginFails) >= accountLoginMaxKeys {
+			return // 仍满则丢弃本次计数（安全侧：拒绝服务而非放行）
+		}
+	}
+	for _, k := range []string{uk, ik} {
+		e := s.loginFails[k]
+		if now.Sub(e.windowSt) > accountLoginWindow {
+			e = loginFailEntry{windowSt: now}
+		}
+		e.count++
+		if e.count >= accountLoginMaxFails {
+			e.until = now.Add(accountLoginLockout)
+		}
+		s.loginFails[k] = e
+	}
+}
+
+// clearLoginFailures 登录成功后清零该用户名与 IP 的失败计数。
+func (s *accountSystem) clearLoginFailures(username, ip string) {
+	uk, ik := loginFailKeys(username, ip)
+	s.loginMu.Lock()
+	delete(s.loginFails, uk)
+	delete(s.loginFails, ik)
+	s.loginMu.Unlock()
+}
+
+// purgeLoginFails 清理已解除锁定的陈旧限速条目（登录时顺手执行）。
+func (s *accountSystem) purgeLoginFails() {
+	s.purgeLoginFailsLocked(time.Now())
+}
+
+// purgeLoginFailsLocked purgeLoginFails 的无锁版本（调用方已持 loginMu）。
+// 窗口起点早于「锁定窗口 + 锁定时长」的条目既不再计数也不可能仍在锁定。
+func (s *accountSystem) purgeLoginFailsLocked(now time.Time) {
+	stale := now.Add(-(accountLoginWindow + accountLoginLockout))
+	for k, e := range s.loginFails {
+		if e.windowSt.Before(stale) {
+			delete(s.loginFails, k)
+		}
+	}
 }
 
 // ---------- 权限热缓存（Redis） ----------
@@ -617,18 +801,6 @@ func (s *accountSystem) loadPermissions(username string) map[string]bool {
 	s.cachePerms(username, a.Permissions)    // 存副本，返回原始值
 	s.redisSetPerms(username, a.Permissions) // 尽力回填
 	return a.Permissions
-}
-
-// invalidateUserSessions 清除某用户在进程内缓存中的全部会话
-// （删账户时调用：SQL 已删其全部会话，缓存不能留下可用 token）。
-func (s *accountSystem) invalidateUserSessions(username string) {
-	s.cacheMu.Lock()
-	for tok, e := range s.sessCache {
-		if e.sess.Username == username {
-			delete(s.sessCache, tok)
-		}
-	}
-	s.cacheMu.Unlock()
 }
 
 // ---------- Redis 缓存与降级 ----------

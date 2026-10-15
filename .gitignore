@@ -44,3 +44,4 @@ accounts.db*
 irix-node-*
 /node-*
 
+.workbuddy/

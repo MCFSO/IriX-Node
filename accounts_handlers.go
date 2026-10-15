@@ -139,13 +139,22 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 username 参数")
 		return
 	}
+	// 登录防暴力破解（蓝方加固）：用户名与来源 IP 双维度限速，
+	// 锁定期内直接拒绝——bcrypt 只能拖慢单次尝试，挡不住持续在线爆破。
+	ip := clientIP(r)
+	if d.accounts.loginBlocked(body.Username, ip) {
+		writeError(w, http.StatusTooManyRequests, "登录尝试次数过多，请稍后再试")
+		return
+	}
 	d.accounts.purgeExpiredSessions()
 
 	a, ok := d.accounts.checkPassword(body.Username, body.Password)
 	if !ok {
+		d.accounts.recordLoginFailure(body.Username, ip)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
+	d.accounts.clearLoginFailures(body.Username, ip)
 	sess := accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
 	token, err := newAccountToken()
 	if err != nil {
@@ -319,6 +328,9 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "修改密码失败: "+err.Error())
 			return
 		}
+		// 改密后撤销该账户全部其他会话（保留当前 token 避免改完即被踢出）：
+		// 若凭据已泄露，改密是止损动作，旧会话不能继续存活 30 天。
+		d.accounts.revokeUserSessions(id.username, bearerToken(r))
 		writeOK(w, map[string]any{"username": id.username})
 		return
 	}
@@ -348,6 +360,10 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "修改密码失败: "+err.Error())
 		return
 	}
+	// 管理员重置密码：撤销目标账户全部会话，但保留请求者自己的当前会话——
+	// 重置他人时该 token 属于管理员、不在目标会话集中（目标全部下线）；
+	// 重置自己时等价自改密（保住当前会话，其余全部作废）。
+	d.accounts.revokeUserSessions(target, bearerToken(r))
 	writeOK(w, map[string]any{"username": target})
 }
 

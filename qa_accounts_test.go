@@ -561,3 +561,111 @@ func TestAccountRedisFallback(t *testing.T) {
 		t.Fatalf("Redis 故障时按 SQL 权限放行失败: %d", code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 蓝方加固回归测试
+// ---------------------------------------------------------------------------
+
+// TestLoginBruteForceLockout 登录防暴力破解限速（蓝方加固）：
+// 同一用户名连续失败达到阈值后进入锁定期，锁定期内即使密码正确也返回 429；
+// 成功登录会清零计数（对照组不受影响）。
+func TestLoginBruteForceLockout(t *testing.T) {
+	d := newTestAccountsDaemon(t)
+	srv := newTestServer(t, d)
+	defer srv.Close()
+
+	if code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
+		"username": "brute", "password": "BrutePass123",
+	}); code != 200 {
+		t.Fatalf("创建账户失败")
+	}
+
+	// 阈值前的失败：均返回 401
+	for i := 0; i < accountLoginMaxFails; i++ {
+		if code, body := apiPost(t, srv.URL+"/api/auth/login", map[string]any{
+			"username": "brute", "password": "WrongPass999",
+		}); code != http.StatusUnauthorized {
+			t.Fatalf("第 %d 次错误密码应 401: %d %s", i+1, code, body)
+		}
+	}
+	// 达到阈值后：正确密码也被锁定拒绝（429），且不泄露是密码正确与否
+	if code, body := apiPost(t, srv.URL+"/api/auth/login", map[string]any{
+		"username": "brute", "password": "BrutePass123",
+	}); code != http.StatusTooManyRequests {
+		t.Fatalf("锁定期内正确密码也应 429: %d %s", code, body)
+	}
+	// IP 维度同锁：换一个用户名登录也被拒（同来源 IP）
+	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{
+		"username": qaTestAdminUser, "password": "whatever-pass",
+	}); code != http.StatusTooManyRequests {
+		t.Fatalf("IP 维度限速应拒绝同 IP 其他用户名登录: %d", code)
+	}
+	t.Logf("[验证] %d 次失败后登录锁定生效（用户名+IP 双维度，锁定 %s）", accountLoginMaxFails, accountLoginLockout)
+
+	// 对照组：无失败记录的用户名不受影响（新守护进程避免 IP 锁干扰）
+	d2 := newTestAccountsDaemon(t)
+	srv2 := newTestServer(t, d2)
+	defer srv2.Close()
+	token, _ := loginAs(t, srv2, qaTestAdminUser, qaTestAdminPass)
+	if token == "" {
+		t.Fatal("正常登录不应受影响")
+	}
+}
+
+// TestPasswordChangeRevokesSessions 改密后旧会话撤销（蓝方加固）：
+//   - 管理员重置 bob 密码 → bob 的全部既有会话立即作废（被偷走的 token 止损）；
+//   - carol 自己改密 → 当前会话保留，第二会话作废（不被踢出也不留旧门）。
+func TestPasswordChangeRevokesSessions(t *testing.T) {
+	d := newTestAccountsDaemon(t)
+	srv := newTestServer(t, d)
+	defer srv.Close()
+
+	// 管理员重置：bob 的两个会话全部作废
+	if code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
+		"username": "bob", "password": "BobPass12345",
+	}); code != 200 {
+		t.Fatalf("创建 bob 失败")
+	}
+	tokenA, _ := loginAs(t, srv, "bob", "BobPass12345")
+	tokenB, _ := loginAs(t, srv, "bob", "BobPass12345")
+	if code, body := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password"+qaAccQuery(), "", map[string]any{
+		"username": "bob", "password": "BobNewPass678",
+	}); code != 200 {
+		t.Fatalf("管理员重置 bob 失败: %d %s", code, body)
+	}
+	for name, tok := range map[string]string{"会话A": tokenA, "会话B": tokenB} {
+		if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me", tok, nil); code != http.StatusForbidden {
+			t.Fatalf("重置后 bob 的%s应已作废（403）: %d", name, code)
+		}
+	}
+	if _, data := loginAs(t, srv, "bob", "BobNewPass678"); data == nil {
+		t.Fatal("bob 应能用新密码重新登录")
+	}
+	t.Logf("[验证] 管理员重置密码后目标账户全部会话立即作废")
+
+	// 自改密：当前会话保留、第二会话作废
+	if code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
+		"username": "carol", "password": "CarolPass123",
+	}); code != 200 {
+		t.Fatalf("创建 carol 失败")
+	}
+	cur, _ := loginAs(t, srv, "carol", "CarolPass123")
+	stolen, _ := loginAs(t, srv, "carol", "CarolPass123")
+	if code, body := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password", cur, map[string]any{
+		"oldPassword": "CarolPass123", "newPassword": qaTestNewPass(),
+	}); code != 200 {
+		t.Fatalf("carol 自改密失败: %d %s", code, body)
+	}
+	if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me", cur, nil); code != 200 {
+		t.Fatalf("自改密后当前会话应保留: %d", code)
+	}
+	if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me", stolen, nil); code != http.StatusForbidden {
+		t.Fatalf("自改密后第二会话应作废（403）: %d", code)
+	}
+	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{
+		"username": "carol", "password": "CarolPass123",
+	}); code != http.StatusUnauthorized {
+		t.Fatalf("carol 旧密码应失效: %d", code)
+	}
+	t.Logf("[验证] 自改密保留当前会话、其余会话作废")
+}

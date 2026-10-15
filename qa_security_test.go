@@ -1169,3 +1169,69 @@ func TestSlowlorisBlockedByHeaderTimeout(t *testing.T) {
 		t.Logf("[验证] 半开连接被 ReadHeaderTimeout 关闭: n=%d err=%v", n, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 蓝方加固回归测试
+// ---------------------------------------------------------------------------
+
+// TestZipBombRejected 解压防护（蓝方加固）：条目数超限的 zip 必须在解压前
+// 被预检拒绝；正常体量的压缩包解压不受影响（见 TestFileCompressRoundTrip）。
+func TestZipBombRejected(t *testing.T) {
+	e := newFileEnv(t)
+	zipPath := filepath.Join(e.cwd, "bomb-many-entries.zip")
+	f, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	// 条目数超过上限（每个条目极小——条目数本身即攻击面）
+	for i := 0; i < maxUnzipEntries+1; i++ {
+		w, err := zw.Create(fmt.Sprintf("f%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	status, data := e.apiCall(t, http.MethodPost, "/api/files/compress", map[string]any{
+		"type": 2, "source": "bomb-many-entries.zip", "targets": []string{"out"},
+	})
+	if status == 200 {
+		t.Fatalf("超条目数的 zip 炸弹应被拒绝，实际成功: %s", data)
+	}
+	if !strings.Contains(string(data), "超限") {
+		t.Errorf("错误信息应说明超限: %s", data)
+	}
+	// 解压目标目录不得出现任何文件（预检在写入前拒绝）
+	if entries, _ := os.ReadDir(filepath.Join(e.cwd, "out")); len(entries) > 0 {
+		t.Errorf("预检失败，已写出了 %d 个条目", len(entries))
+	}
+	t.Logf("[验证] %d 条目的 zip 炸弹被预检拒绝: %s", maxUnzipEntries+1, data)
+}
+
+// TestCappedWriterBudgetEnforced 解压总量预算写入端硬性截断：
+// 头部声明可能说谎，实际写入量由 cappedWriter 强制执行（防「小头部大载荷」）。
+func TestCappedWriterBudgetEnforced(t *testing.T) {
+	var sink bytes.Buffer
+	cw := &cappedWriter{w: &sink, budget: 8}
+	if n, err := cw.Write([]byte("12345678")); n != 8 || err != nil {
+		t.Fatalf("预算内写入应成功: n=%d err=%v", n, err)
+	}
+	if _, err := cw.Write([]byte("9")); !errors.Is(err, errZipBudget) {
+		t.Fatalf("超预算写入应返回 errZipBudget，实际 %v", err)
+	}
+	if sink.String() != "12345678" {
+		t.Fatalf("超预算部分不应落盘: %q", sink.String())
+	}
+	// 单次写入超预算同样被拒
+	cw2 := &cappedWriter{w: &sink, budget: 4}
+	if _, err := cw2.Write([]byte("abcdefgh")); !errors.Is(err, errZipBudget) {
+		t.Fatalf("单次超预算写入应返回 errZipBudget，实际 %v", err)
+	}
+}

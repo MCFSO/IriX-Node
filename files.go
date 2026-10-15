@@ -774,7 +774,15 @@ func addToZip(zw *zip.Writer, path, rel string) error {
 	return err
 }
 
-// unzip 解压 zip 到 dest 目录（防路径穿越）。
+// 解压防护上限（蓝方加固）：恶意 zip 可在极小体积内声明超大解压
+// 内容（zip 炸弹），无上限时单个压缩包即可写满整块磁盘。条目数与
+// 声明解压总量在解压前预检，实际写入量在拷贝中硬性截断（防头部长度说谎）。
+const (
+	maxUnzipEntries    = 50000   // 最大条目数
+	maxUnzipTotalBytes = 8 << 30 // 解压总大小上限（8 GiB）
+)
+
+// unzip 解压 zip 到 dest 目录（防路径穿越与 zip 炸弹）。
 func unzip(zipPath, dest string) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -782,9 +790,23 @@ func unzip(zipPath, dest string) error {
 	}
 	defer zr.Close()
 
+	if len(zr.File) > maxUnzipEntries {
+		return fmt.Errorf("压缩包条目数超限（%d > %d）", len(zr.File), maxUnzipEntries)
+	}
+	var declaredTotal uint64
+	for _, f := range zr.File {
+		declaredTotal += f.UncompressedSize64
+	}
+	if declaredTotal > maxUnzipTotalBytes {
+		return fmt.Errorf("压缩包声明解压总量超限（%s > %s），疑似 zip 炸弹",
+			FormatSize(int64(declaredTotal)), FormatSize(maxUnzipTotalBytes))
+	}
+
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
+	// 实际写入总量计数：头部声明可能说谎，拷贝中硬性执行同一上限
+	var writtenTotal uint64
 	for _, f := range zr.File {
 		name := filepath.Clean(f.Name)
 		if name == "." || name == "" {
@@ -812,12 +834,36 @@ func unzip(zipPath, dest string) error {
 			rc.Close()
 			return err
 		}
-		_, cerr := io.Copy(out, rc)
+		n, cerr := io.Copy(&cappedWriter{w: out, budget: maxUnzipTotalBytes - writtenTotal}, rc)
 		rc.Close()
 		out.Close()
 		if cerr != nil {
+			if errors.Is(cerr, errZipBudget) {
+				return fmt.Errorf("压缩包实际解压总量超限（%s），疑似 zip 炸弹", FormatSize(maxUnzipTotalBytes))
+			}
 			return cerr
 		}
+		writtenTotal += uint64(n)
 	}
 	return nil
+}
+
+// errZipBudget 解压总量预算耗尽（zip 炸弹防护）。
+var errZipBudget = errors.New("解压总量预算耗尽")
+
+// cappedWriter 限制总写入量的 io.Writer 包装（超预算返回 errZipBudget）。
+type cappedWriter struct {
+	w      io.Writer
+	budget uint64 // 剩余允许写入的字节数
+}
+
+// Write 透传写入并扣减预算，预算耗尽即中断拷贝。
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if uint64(len(p)) > c.budget {
+		c.budget = 0
+		return 0, errZipBudget
+	}
+	n, err := c.w.Write(p)
+	c.budget -= uint64(n)
+	return n, err
 }
