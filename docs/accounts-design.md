@@ -1,35 +1,43 @@
 # 账户管理设计（docs/accounts-design.md）
 
-> 目标：IriX Node 从「单一配对码」升级为多账户体系——
-> 配对码登录即 root 管理员；管理员可创建/删除账户，并对**每个 API 端点**
-> 独立开关权限（按模块分组）；存储默认 SQLite、可选 MySQL / PostgreSQL，
-> Redis 可选缓存会话与权限热数据。全部使用连接池。
+> 目标：IriX Node 采用多账户体系——首次启动在账户库中随机生成一个初始
+> 管理员账户（凭据仅在启动日志显示一次）；管理员可创建/删除账户，并对
+> **每个 API 端点**独立开关权限（按模块分组）；存储默认 SQLite、可选
+> MySQL / PostgreSQL，Redis 可选缓存会话与权限热数据。全部使用连接池。
+>
+> v1.2.0 起配对码机制已彻底移除：不再有 `-apikey` 命令行参数、配置文件
+> `apiKey` 字段、`{data}/auth.hash` 文件，`?apikey=` / `X-Api-Key` 认证通道
+> 也不再被本节点接受（这些仅存在于 v1.1.0 及更早版本）。
 
 ---
 
-## 1. 认证通道（三通道并存）
+## 1. 认证通道
 
 | 通道 | 凭据 | 身份 | 端点权限 |
 | --- | --- | --- | --- |
-| apikey | `?apikey=` 参数 / `X-Api-Key` 头（配对码或 `-apikey` 固定密钥） | root（管理员） | 不受限制（兼容既有前端） |
-| 会话 token | `Authorization: Bearer <token>` 或 `X-Auth-Token` 头 | 账户 | 按端点开关逐条判定 |
-| 直连票据 | `/download/`、`/upload/` 路径中的票据密码 | 无 | 票据自身授权（10 分钟过期），维持不变 |
+| 账户会话 token | `X-Auth-Token: <token>` 头 / `Authorization: Bearer <token>` 头 / `?token=<token>` 查询参数 | 账户（管理员或普通账户） | 管理员（`is_admin`）不受限制；普通账户按端点开关逐条判定 |
+| 直连票据 | `/download/{票据密码}/...`、`/upload/{票据密码}` 路径中的票据密码 | 无 | 票据自身授权（10 分钟过期），维持不变 |
+
+`?token=` 查询参数供浏览器 / WebSocket 等无法自定义请求头的场景使用（审计日志已对
+`token=` 打码）。所有 `/api/*` 数据面请求都必须先登录取得会话 token。
 
 会话 token：`crypto/rand` 32 字节（hex 64 字符），有效期 30 天，
-剩余不足一半时滑动续期（每 15 天最多写一次存储）。
+剩余不足一半时滑动续期。
 
-## 2. root 管理员与首次登录强制改密
+## 2. 初始管理员账户与首次启动引导
 
-- **root 是内置管理员账户**，初始登录凭据 = 配对码（或 `-apikey` 固定密钥）。
-- **首次登录强制改密**：`POST /api/auth/login` 用配对码登录成功时，
-  响应 `mustChangePassword: true`；该会话除以下端点外一律 403
-  （错误消息：`首次登录必须先修改密码（PUT /api/accounts/password）`）：
-  - `PUT /api/accounts/password`（自己改密，携带 `oldPassword` = 配对码）
-  - `GET /api/accounts/me` / `GET /api/accounts/catalog` / `POST /api/auth/logout`
-- 改密后 root 的 bcrypt 哈希落入 accounts 表（root 行，`is_admin=1`）；
-  **配对码不再用于登录**（`apikey` 通道为兼容既有客户端保持不变）。
+- **首次启动引导**：账户库（默认 `{data}/accounts.db`）中不存在任何管理员账户时，
+  用 `crypto/rand` 随机生成 12 位用户名与 20 位密码（字符集 `[a-zA-Z0-9]`），
+  bcrypt 入库，并在启动日志中**仅显示一次**；已存在管理员账户则跳过（共享账户库
+  多节点并发启动时以「已有管理员即让位」避免重复创建）。
+- **登录**：`POST /api/auth/login`，body `{"username":"...","password":"..."}`，
+  成功返回 `{status,data:{token,username,isAdmin,expiresAt},time}`；密码错误
+  401「用户名或密码错误」。退出：`POST /api/auth/logout`。
+- **凭据丢失**：删除账户库后重启可重新生成初始管理员，或直接操作账户库恢复。
+- **不存在**「root 首次登录强制改密」流程（该机制随配对码一并移除）；
+  登录后建议立即在账户管理中修改密码。
 - **管理员可以直接改任意密码**：`PUT /api/accounts/password` 携带
-  `{username, password}`（管理员模式，无需旧密码），含 root。
+  `{username, password}`（管理员模式，无需旧密码），含管理员自身。
 
 ## 3. 权限模型：每个端点一个开关
 
@@ -38,8 +46,8 @@
   `"POST /api/frp/tunnels/{id}/start"`）。目录按模块分组（概览/审计/账户/
   实例/运行时/文件/回收站/FRP/AI 与指标/集群/保险库/容器/Bastille 基础/
   Bastille 文件），供开关 UI 渲染。
-- **判定**：`d.auth` 包装器在 mux 匹配之后执行——管理员（apikey 通道、
-  root 会话、`is_admin` 账户）**旁路开关**；普通账户查 `accounts.permissions`
+- **判定**：`d.auth` 包装器在 mux 匹配之后执行——管理员（`is_admin` 账户会话）
+  **旁路开关**；普通账户查 `accounts.permissions`
   （JSON，键 = 路由模式），**默认全关**，键存在且为 true 才放行，否则
   403 `权限不足: 当前账户无权访问 <模式>`。
 - **账户自身端点豁免开关**（任何登录账户可用）：`/api/accounts/me`、
@@ -83,14 +91,14 @@
 
 | 端点 | 认证 | 说明 |
 | --- | --- | --- |
-| `POST /api/auth/login` | 公开 | `{username, password}` → `{token, username, isAdmin, mustChangePassword, expiresAt}` |
+| `POST /api/auth/login` | 公开 | `{username, password}` → `{token, username, isAdmin, expiresAt}` |
 | `POST /api/auth/logout` | 会话 | 删除当前会话 |
-| `GET /api/accounts/me` | 会话/apikey | 当前账户信息与自身权限 |
-| `GET /api/accounts/catalog` | 会话/apikey | 权限目录（分组 + 端点 + 描述） |
+| `GET /api/accounts/me` | 会话 | 当前账户信息与自身权限 |
+| `GET /api/accounts/catalog` | 会话 | 权限目录（分组 + 端点 + 描述） |
 | `PUT /api/accounts/password` | 会话 | 自己改密 `{oldPassword, newPassword}`；管理员重置 `{username, password}` |
-| `GET /api/accounts` | 管理员 | 账户列表（root 内置条目在首位，含 `mustChangePassword`） |
+| `GET /api/accounts` | 管理员 | 账户列表（含首次启动生成的管理员账户） |
 | `POST /api/accounts` | 管理员 | `{username, password, isAdmin}` 创建（重名 409） |
-| `DELETE /api/accounts?username=` | 管理员 | 删除账户及其会话（root 不可删） |
+| `DELETE /api/accounts?username=` | 管理员 | 删除账户及其会话（不能删除当前登录的账户） |
 | `PUT /api/accounts/permissions` | 管理员 | 整组开关 / 逐条开关（见 §3） |
 
 登录请求体中的 `password` 字段由审计中间件统一打码（复用 vault 的
@@ -119,6 +127,7 @@
   vaultGate 数据面门禁，保险库锁定期间仍可登录/登出账户。
 - 改密/管理员重置**不吊销既有会话**（会话已认证，保留至过期）；
   删除账户会连带删除其全部会话。
-- `PUT /api/accounts/permissions` 对 root 返回 400（root 恒全权限）。
+- `PUT /api/accounts/permissions` 对管理员账户返回 400（管理员恒全权限）。
 - 密码策略：账户密码 ≥ 8 位；用户名 1-64 位字母/数字/`_`/`-`。
-- 遗留兼容：无配置时行为与旧版完全一致（apikey 通道 + 默认 SQLite）。
+- 遗留兼容：无配置时行为与旧版一致（默认 SQLite 账户库 + 首次启动引导管理员账户），
+  但旧版的固定 `apikey` / 配对码认证通道已不可用。

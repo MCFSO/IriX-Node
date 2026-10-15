@@ -99,7 +99,7 @@ func TestFileLoggerDropNoBlock(t *testing.T) {
 // TestStartProcessLogsToDisk 端到端：实例启动后 stdout 异步落盘到 {data}/logs/{uuid}.log。
 func TestStartProcessLogsToDisk(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.LogDir = filepath.Join(dir, "logs")
 	inst := NewInstance("log-uuid", InstanceConfig{
 		Nickname:     "日志落盘",
@@ -291,7 +291,7 @@ func waitFileContains(path string, want []byte, timeout time.Duration) bool {
 	return false
 }
 
-// doJSONReq 发起带 apikey 的请求并解析 {status, data, time} 响应。
+// doJSONReq 发起带会话 token（查询串）的请求并解析 {status, data, time} 响应。
 func doJSONReq(t *testing.T, method, url string) (int, map[string]any) {
 	t.Helper()
 	req, err := http.NewRequest(method, url, nil)
@@ -321,7 +321,7 @@ func TestInstanceLogsAPI(t *testing.T) {
 		Cwd:          dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	if err := d.startInstance(inst); err != nil {
@@ -336,7 +336,7 @@ func TestInstanceLogsAPI(t *testing.T) {
 		}
 	}()
 
-	base := srv.URL + "/api/instance/logs?uuid=" + inst.InstanceUuid + "&apikey=test-key"
+	base := srv.URL + "/api/instance/logs?uuid=" + inst.InstanceUuid + "&token=test-key"
 
 	// 1. tail 历史：等待输出落盘后读取，应非空
 	logPath := filepath.Join(d.LogDir, inst.InstanceUuid+".log")

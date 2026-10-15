@@ -83,10 +83,10 @@ func TestLoadTunerDebounce(t *testing.T) {
 // TestLoadEndpoint /api/load 端点返回状态与调谐参数。
 func TestLoadEndpoint(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	code, body := doReq(t, srv.URL+"/api/load?apikey=test-key")
+	code, body := doReq(t, srv.URL+"/api/load?token=test-key")
 	if code != http.StatusOK {
 		t.Fatalf("/api/load 失败: %d %s", code, body)
 	}

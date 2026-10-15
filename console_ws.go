@@ -1,6 +1,6 @@
 // 实时控制台 WebSocket（docs/irix-node-local-parity.md §4.1.1）。
 //
-// WS  /api/instance/console/ws?uuid=<u>&daemonId=<d>&apikey=<key>&since=<unix_ms>
+// WS  /api/instance/console/ws?uuid=<u>&daemonId=<d>&token=<token>&since=<unix_ms>
 //
 //   - 服务端 → 客户端：文本帧，一行一条服务器原始输出（保留 ANSI 转义，
 //     颜色由客户端 ansi_color.dart 渲染，节点不得剥离）；

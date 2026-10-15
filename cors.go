@@ -9,7 +9,7 @@
 //     且 403/503 等错误响应同样必须带 CORS 头，否则前端读不到错误信息）；
 //   - 允许来源回显 Origin（Vary: Origin），请求头回显 Access-Control-Request-Headers，
 //     方法固定放行 GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS，预检缓存 24 小时；
-//   - 认证凭据是 apikey 查询参数 / X-Api-Key 头（非 Cookie），回显来源
+//   - 认证凭据是会话 token（Authorization / X-Auth-Token 头），回显来源
 //     并允许凭据携带，兼容前端 fetch 的各类凭据模式；
 //   - 直连下载/上传通道（/download/ /upload/）与 WebSocket 控制台同样经过本中间件，
 //     浏览器直接访问时响应同样带 CORS 头。

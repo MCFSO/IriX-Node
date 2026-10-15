@@ -100,12 +100,12 @@ func TestInstallJDKEndToEnd(t *testing.T) {
 	adoptiumAPI = server.URL
 
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 发起安装
 	body := `{"major":21}`
-	resp, err := testClient.Post(srv.URL+"/api/runtime/java/install?apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/runtime/java/install?token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("发起安装失败: %v", err)
@@ -130,7 +130,7 @@ func TestInstallJDKEndToEnd(t *testing.T) {
 	var last map[string]any
 	for time.Now().Before(deadline) {
 		code, res := doJSONReq(t, http.MethodGet,
-			srv.URL+"/api/runtime/java/install-progress?jobId="+jobID+"&apikey=test-key")
+			srv.URL+"/api/runtime/java/install-progress?jobId="+jobID+"&token=test-key")
 		if code != 200 {
 			t.Fatalf("进度查询状态码: %d", code)
 		}
@@ -161,9 +161,9 @@ func TestInstallJDKEndToEnd(t *testing.T) {
 // TestInstallJDKInvalidMajor 非法大版本直接拒绝。
 func TestInstallJDKInvalidMajor(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
-	resp, err := testClient.Post(srv.URL+"/api/runtime/java/install?apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/runtime/java/install?token=test-key",
 		"application/json", strings.NewReader(`{"major":99}`))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
@@ -214,11 +214,11 @@ func (t *task) messageNow() string {
 // TestUninstallJava 卸载：不存在 404，存在删除成功。
 func TestUninstallJava(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 未安装 → 404
-	req404, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/runtime/java?apikey=test-key&major=21", nil)
+	req404, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/runtime/java?token=test-key&major=21", nil)
 	resp, err := testClient.Do(req404)
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
@@ -233,7 +233,7 @@ func TestUninstallJava(t *testing.T) {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatalf("创建目录失败: %v", err)
 	}
-	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/runtime/java?apikey=test-key&major=21", nil)
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/runtime/java?token=test-key&major=21", nil)
 	resp2, err := testClient.Do(req)
 	if err != nil {
 		t.Fatalf("卸载失败: %v", err)

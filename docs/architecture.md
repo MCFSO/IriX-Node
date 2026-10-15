@@ -40,7 +40,7 @@
 
 1. `http.Server` 接收连接，连接层只记录 Accept 错误，避免日志拖慢 accept 循环。
 2. 请求门禁登记在途请求，再依次执行审计、CORS、保险库门禁和 API 请求体限制。登记涵盖处理器返回后的审计写入，不包装 `ResponseWriter`，保留 WebSocket 所需能力。
-3. `auth` 先解析固定 API key/配对码或账户会话，再做端点权限判定。
+3. `auth` 先解析账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`），再做端点权限判定；未认证或会话过期统一返回 HTTP 403。
 4. 处理器完成参数校验后调用 `Daemon` 的用例方法。实例列表由 `Daemon.mu` 保护，实例字段由 `Instance.mu` 保护。
 5. 长任务立即返回任务 ID，由 `taskStore`/`jobStore` 保存进度；文件下载和上传通过短期票据切换到直连通道。
 6. 响应统一使用 `{status, data, time}`，错误同时返回真实 HTTP 状态码，便于网关和监控识别失败。

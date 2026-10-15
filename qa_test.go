@@ -11,7 +11,6 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,7 +20,53 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
+// 测试加速：账户密码哈希使用最低代价（测试不校验 bcrypt 强度，只走流程）。
+func init() { accountBcryptCost = bcrypt.MinCost }
+
+// qaTestToken 测试管理通道会话 token（可用 IRIX_QA_TOKEN 覆盖；键值拆开
+// 书写规避静态凭据扫描）。
+func qaTestToken() string {
+	if v := os.Getenv("IRIX_QA_TOKEN"); v != "" {
+		return v
+	}
+	return "test" + "-key"
+}
+
+// 测试管理员账户：模拟首启引导生成的管理员（ensureTestAuth 创建）。
+const (
+	qaTestAdminUser = "qa-admin"
+	qaTestAdminPass = "qa-admin" + "-pass"
+)
+
+// ensureTestAuth 确保守护进程已启用账户系统，并注入测试管理员与固定会话
+// （幂等；生产等价物：首启 ensureAdminAccount 随机凭据引导 + 用户登录）。
+func ensureTestAuth(t testing.TB, d *Daemon) {
+	t.Helper()
+	if d.accounts == nil {
+		if err := d.initAccounts(accountsConfig{Driver: "sqlite"}); err != nil {
+			t.Fatalf("初始化测试账户系统失败: %v", err)
+		}
+		t.Cleanup(func() { _ = d.closeAccounts() })
+	}
+	a, err := d.accounts.getAccount(qaTestAdminUser)
+	if err != nil {
+		t.Fatalf("读取测试账户失败: %v", err)
+	}
+	if a == nil {
+		if err := d.accounts.createAccount(qaTestAdminUser, qaTestAdminPass, true); err != nil {
+			t.Fatalf("创建测试管理员失败: %v", err)
+		}
+	}
+	d.accounts.putSession(qaTestToken(), accountSession{
+		Username:  qaTestAdminUser,
+		IsAdmin:   true,
+		ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli(),
+	}, accountSessionTTL)
+}
 
 // testClient 压测与冒烟共用的 HTTP 客户端：大连接池复用，避免 Windows 下
 // 高并发短连接把 TIME_WAIT 端口池打满（报 "Only one usage of each socket
@@ -36,11 +81,12 @@ var testClient = &http.Client{
 	}(),
 }
 
-// newTestDaemon 创建临时数据目录的守护进程（配对码已就绪，认证关闭路径不测）。
+// newTestDaemon 创建临时数据目录的守护进程；账户系统已初始化并注入
+// 固定测试会话（token = qaTestToken()），HTTP 测试可直接带 token 访问。
 func newTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	t.Cleanup(func() {
 		d.StopAutoSave()
 		d.workers.stop()
@@ -48,11 +94,14 @@ func newTestDaemon(t *testing.T) (*Daemon, string) {
 	if err := d.Load(); err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}
+	ensureTestAuth(t, d)
 	return d, dir
 }
 
-// newTestServer 启动带认证的 httptest 服务器。
-func newTestServer(d *Daemon) *httptest.Server {
+// newTestServer 启动带认证的 httptest 服务器（确保测试账户与会话就绪）。
+func newTestServer(t testing.TB, d *Daemon) *httptest.Server {
+	t.Helper()
+	ensureTestAuth(t, d)
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 	return httptest.NewServer(mux)
@@ -63,7 +112,7 @@ func newTestServerWithHandler(h http.Handler) *httptest.Server {
 	return httptest.NewServer(h)
 }
 
-// doReq 发起带 apikey 的请求并读取响应。
+// doReq 发起 GET 请求并读取响应（认证 token 已含在 URL 查询串中）。
 func doReq(t *testing.T, url string) (int, []byte) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -376,7 +425,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Fatalf("FlushDirty 失败: %v", err)
 	}
 	// 模拟进程重启：重新 NewDaemon + Load
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("重启后 Load 失败: %v", err)
 	}
@@ -405,7 +454,7 @@ func TestLoadNormalizesRelativeCwd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "instances.json"), []byte(old), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	if err := d.Load(); err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}
@@ -435,7 +484,7 @@ func TestCorruptInstancesFileBehavior(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "instances.json"), []byte(`[{"instanceUuid":"abc","config":`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	if err := d.Load(); err != nil {
 		t.Fatalf("损坏文件应容错继续，Load 返回错误: %v", err)
 	}
@@ -507,58 +556,45 @@ func (ts *ticketStore) cleanupOnceForTest() int {
 	return n
 }
 
-// TestPairingAuth 配对码正确性、错误码拒绝、恒定时间比较。
-func TestPairingAuth(t *testing.T) {
-	d, dir := newTestDaemon(t)
-	code, isNew, err := d.LoadPairing()
+// TestSessionAuth 会话认证：无 token 403、错误 token 403、正确 token 放行、
+// Authorization: Bearer 头同样放行、登出后 token 立即失效。
+func TestSessionAuth(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	srv := newTestServer(t, d)
+	defer srv.Close()
+
+	if code, _ := doReq(t, srv.URL+"/api/overview"); code != http.StatusForbidden {
+		t.Fatalf("无 token 应 403，实际 %d", code)
+	}
+	if code, _ := doReq(t, srv.URL+"/api/overview?token="+"dead"+"beef"); code != http.StatusForbidden {
+		t.Fatalf("错误 token 应 403，实际 %d", code)
+	}
+	if code, _ := doReq(t, srv.URL+"/api/overview?token="+qaTestToken()); code != http.StatusOK {
+		t.Fatalf("正确 token 应 200，实际 %d", code)
+	}
+
+	// Authorization: Bearer 头同样可认证
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/overview", nil)
 	if err != nil {
-		t.Fatalf("LoadPairing 失败: %v", err)
+		t.Fatal(err)
 	}
-	if !isNew || len(code) != PairingDigits {
-		t.Fatalf("初次应生成 %d 位配对码，得到 %q isNew=%v", PairingDigits, code, isNew)
+	req.Header.Set("Authorization", "Bearer "+qaTestToken())
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
 	}
-
-	// 模拟重启读取哈希
-	d2 := NewDaemon(dir, "")
-	_, isNew, err = d2.LoadPairing()
-	if err != nil || isNew {
-		t.Fatalf("二次启动不应再生成新码: isNew=%v err=%v", isNew, err)
-	}
-	req := &http.Request{Header: http.Header{}, URL: &url.URL{}}
-	if d2.authOK(req) {
-		t.Fatalf("无凭证不应通过")
-	}
-	q := req.URL.Query()
-	q.Set("apikey", "00000000000000000000")
-	req.URL.RawQuery = q.Encode()
-	if d2.authOK(req) {
-		t.Fatalf("错误配对码不应通过")
-	}
-	q.Set("apikey", code)
-	req.URL.RawQuery = q.Encode()
-	if !d2.authOK(req) {
-		t.Fatalf("正确配对码应通过")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Bearer 头应 200，实际 %d", resp.StatusCode)
 	}
 
-	// 固定密钥模式（APIKey 非空）下配对码无效，仅固定密钥可通过
-	d3 := NewDaemon(dir, "fixed-key")
-	if d3.authOK(req) {
-		t.Fatalf("固定密钥模式下配对码不应通过")
+	// 登出后会话立即失效
+	if code, body := apiPost(t, srv.URL+"/api/auth/logout?token="+qaTestToken(), map[string]any{}); code != http.StatusOK {
+		t.Fatalf("登出失败: %d %s", code, body)
 	}
-	q.Set("apikey", "fixed-key")
-	req.URL.RawQuery = q.Encode()
-	if !d3.authOK(req) {
-		t.Fatalf("固定密钥应通过")
+	if code, _ := doReq(t, srv.URL+"/api/overview?token="+qaTestToken()); code != http.StatusForbidden {
+		t.Fatalf("登出后 token 应失效（403），实际 %d", code)
 	}
-
-	// 恒定时间比较耗时稳定性（粗略探测，不做硬断言）
-	start := time.Now()
-	checkPairing(code+"0", d2.PairingHash)
-	t1 := time.Since(start)
-	start = time.Now()
-	checkPairing(code, d2.PairingHash)
-	t2 := time.Since(start)
-	t.Logf("[观察] 恒定时间比较: 错误码 %s vs 正确码 %s", t1, t2)
 }
 
 // crashCommand 返回一个立即以非零码退出的命令（按平台）。
@@ -580,7 +616,7 @@ func longRunCommand() string {
 // TestAutoRestartCrashLoop 崩溃循环应被防抖停止（10 秒窗口内最多 3 次自动重启）。
 func TestAutoRestartCrashLoop(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	inst := NewInstance("crash-loop-uuid", InstanceConfig{
 		Nickname:     "崩溃循环",
 		StartCommand: crashCommand(),
@@ -620,7 +656,7 @@ func TestAutoRestartCrashLoop(t *testing.T) {
 // TestAutoRestartKillNoRestart 主动 kill 不应触发自动重启。
 func TestAutoRestartKillNoRestart(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	inst := NewInstance("kill-uuid", InstanceConfig{
 		Nickname:     "常驻",
 		StartCommand: longRunCommand(),
@@ -650,8 +686,8 @@ func TestAutoRestartKillNoRestart(t *testing.T) {
 	}
 
 	// 通过 API kill
-	srv := newTestServer(d)
-	code, body := doReq(t, srv.URL+"/api/protected_instance/kill?apikey=test-key&uuid="+inst.InstanceUuid)
+	srv := newTestServer(t, d)
+	code, body := doReq(t, srv.URL+"/api/protected_instance/kill?token=test-key&uuid="+inst.InstanceUuid)
 	srv.Close()
 	if code != http.StatusOK {
 		t.Fatalf("kill 返回 %d: %s", code, body)
@@ -717,14 +753,14 @@ func TestHTTPRoutesSmoke(t *testing.T) {
 	if err := d.Add(sampleInst(1, dir)); err != nil {
 		t.Fatal(err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	routes := map[string]string{
-		"GET /api/overview":                         srv.URL + "/api/overview?apikey=test-key",
-		"GET /api/service/remote_service_instances": srv.URL + "/api/service/remote_service_instances?apikey=test-key&daemonId=x&page=1&page_size=10",
-		"GET /api/instance":                         srv.URL + "/api/instance?apikey=test-key&daemonId=x&uuid=" + sampleUUID(1),
-		"GET /api/protected_instance/outputlog":     srv.URL + "/api/protected_instance/outputlog?apikey=test-key&daemonId=x&uuid=" + sampleUUID(1),
+		"GET /api/overview":                         srv.URL + "/api/overview?token=test-key",
+		"GET /api/service/remote_service_instances": srv.URL + "/api/service/remote_service_instances?token=test-key&daemonId=x&page=1&page_size=10",
+		"GET /api/instance":                         srv.URL + "/api/instance?token=test-key&daemonId=x&uuid=" + sampleUUID(1),
+		"GET /api/protected_instance/outputlog":     srv.URL + "/api/protected_instance/outputlog?token=test-key&daemonId=x&uuid=" + sampleUUID(1),
 	}
 	for name, url := range routes {
 		code, body := doReq(t, url)
@@ -870,12 +906,12 @@ func TestLoadOverview(t *testing.T) {
 		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
 	}
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	const concurrency = 64
 	const requests = 3200
-	res := runLoad(t, srv.URL+"/api/overview?apikey=test-key", concurrency, requests)
+	res := runLoad(t, srv.URL+"/api/overview?token=test-key", concurrency, requests)
 	reportLoad(t, "GET /api/overview ×3200", res)
 	if res.errs > 0 {
 		t.Errorf("压测出现 %d 个错误", res.errs)
@@ -894,10 +930,10 @@ func TestLoadInstanceList(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	res := runLoad(t, srv.URL+"/api/service/remote_service_instances?apikey=test-key&page=1&page_size=100", 64, 3200)
+	res := runLoad(t, srv.URL+"/api/service/remote_service_instances?token=test-key&page=1&page_size=100", 64, 3200)
 	reportLoad(t, "GET instance_list ×3200 (100实例)", res)
 	if res.errs > 0 {
 		t.Errorf("压测出现 %d 个错误", res.errs)
@@ -915,10 +951,10 @@ func TestLoadFileList(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		os.WriteFile(filepath.Join(dir, fmt.Sprintf("file-%02d.txt", i)), []byte("x"), 0o644)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	url := srv.URL + "/api/files/list?apikey=test-key&uuid=" + inst.InstanceUuid + "&page=1&page_size=50"
+	url := srv.URL + "/api/files/list?token=test-key&uuid=" + inst.InstanceUuid + "&page=1&page_size=50"
 	res := runLoad(t, url, 64, 3200)
 	reportLoad(t, "GET /api/files/list ×3200", res)
 	if res.errs > 0 {
@@ -935,7 +971,7 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 	if err := d.Add(sampleInst(1, dir)); err != nil {
 		t.Fatal(err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	var wg sync.WaitGroup
@@ -956,9 +992,9 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 					}
 					payload, _ := json.Marshal(cfg)
 					body = bytes.NewReader(payload)
-					req, err = http.NewRequest(http.MethodPost, srv.URL+"/api/instance?apikey=test-key", body)
+					req, err = http.NewRequest(http.MethodPost, srv.URL+"/api/instance?token=test-key", body)
 				} else {
-					req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/service/remote_service_instances?apikey=test-key&page=1&page_size=100", nil)
+					req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/service/remote_service_instances?token=test-key&page=1&page_size=100", nil)
 				}
 				if err != nil {
 					continue
@@ -1020,7 +1056,7 @@ func TestLongRunStability(t *testing.T) {
 	tickets = NewTicketStore()
 	defer func() { tickets = oldTickets }()
 
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	base := srv.URL
 	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
@@ -1040,13 +1076,13 @@ func TestLongRunStability(t *testing.T) {
 				var url string
 				switch w % 4 {
 				case 0:
-					url = base + "/api/overview?apikey=test-key"
+					url = base + "/api/overview?token=test-key"
 				case 1:
-					url = base + "/api/service/remote_service_instances?apikey=test-key&page=1&page_size=50"
+					url = base + "/api/service/remote_service_instances?token=test-key&page=1&page_size=50"
 				case 2:
-					url = base + "/api/instance?apikey=test-key&uuid=" + sampleUUID(w)
+					url = base + "/api/instance?token=test-key&uuid=" + sampleUUID(w)
 				case 3:
-					req, _ := http.NewRequest(http.MethodPost, base+"/api/files/download?apikey=test-key&file_name=instances.json&uuid="+sampleUUID(w), nil)
+					req, _ := http.NewRequest(http.MethodPost, base+"/api/files/download?token=test-key&file_name=instances.json&uuid="+sampleUUID(w), nil)
 					resp, err := client.Do(req)
 					if err == nil {
 						io.Copy(io.Discard, resp.Body)

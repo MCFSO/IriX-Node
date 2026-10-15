@@ -41,7 +41,7 @@ func startCoreDownload(t *testing.T, srvURL, uuid, dlURL, fileName, sha string) 
 		body["sha512"] = sha
 	}
 	raw, _ := json.Marshal(body)
-	resp, err := testClient.Post(srvURL+"/api/instance/download-core?apikey=test-key",
+	resp, err := testClient.Post(srvURL+"/api/instance/download-core?token=test-key",
 		"application/json", strings.NewReader(string(raw)))
 	if err != nil {
 		t.Fatalf("发起下载失败: %v", err)
@@ -69,7 +69,7 @@ func waitCoreDone(t *testing.T, srvURL, jobID string) map[string]any {
 	var last map[string]any
 	for time.Now().Before(deadline) {
 		code, res := doJSONReq(t, http.MethodGet,
-			srvURL+"/api/instance/download-core-progress?jobId="+jobID+"&apikey=test-key")
+			srvURL+"/api/instance/download-core-progress?jobId="+jobID+"&token=test-key")
 		if code != 200 {
 			t.Fatalf("进度查询状态码: %d", code)
 		}
@@ -88,11 +88,15 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 	sum := sha512.Sum512(corePayload)
 	d, dir := newTestDaemon(t)
 	d.transferAllowLoopback = true // 核心下载 SSRF 防护按 IP 校验；测试源为 httptest 环回，放行
-	inst := sampleInst(1, dir)
+	instDir := filepath.Join(dir, "srv")
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, instDir)
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	src := mockCoreServer(t, http.StatusOK)
 	defer src.Close()
@@ -103,7 +107,7 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 	if last["status"] != "done" {
 		t.Fatalf("下载未完成: %v", last)
 	}
-	got, err := os.ReadFile(filepath.Join(dir, "server.jar"))
+	got, err := os.ReadFile(filepath.Join(instDir, "server.jar"))
 	if err != nil {
 		t.Fatalf("核心文件缺失: %v", err)
 	}
@@ -114,8 +118,11 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 	if err := d.FlushDirty(); err != nil {
 		t.Fatalf("FlushDirty 失败: %v", err)
 	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 2 { // server.jar + instances.json
-		t.Fatalf("目录内容异常（应只有 server.jar 与 instances.json）: %v", entries)
+	if entries, _ := os.ReadDir(instDir); len(entries) != 1 { // server.jar
+		t.Fatalf("实例目录异常（应只有 server.jar）: %v", entries)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instances.json")); err != nil {
+		t.Fatalf("instances.json 未落盘: %v", err)
 	}
 	t.Logf("[验证] 核心下载 + sha512 校验成功并就位")
 }
@@ -128,7 +135,7 @@ func TestDownloadCoreHashMismatch(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	src := mockCoreServer(t, http.StatusOK)
 	defer src.Close()
@@ -159,7 +166,7 @@ func TestDownloadCoreNoHash(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	src := mockCoreServer(t, http.StatusOK)
 	defer src.Close()
@@ -184,13 +191,13 @@ func TestDownloadCorePathTraversal(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	src := mockCoreServer(t, http.StatusOK)
 	defer src.Close()
 
 	body := fmt.Sprintf(`{"uuid":"%s","url":"%s","fileName":"../evil.jar"}`, inst.InstanceUuid, src.URL)
-	resp, err := testClient.Post(srv.URL+"/api/instance/download-core?apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/instance/download-core?token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
@@ -225,7 +232,7 @@ func TestDownloadCoreHTTPError(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	src := mockCoreServer(t, http.StatusNotFound)
 	defer src.Close()

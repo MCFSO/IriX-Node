@@ -1,6 +1,5 @@
 // 账户管理核心（docs/accounts-design.md）：
-//   - 认证三通道：apikey（配对码/固定密钥 = root 管理员）、账户会话 token、
-//     直连票据（/download/ /upload/，维持不变）；
+//   - 认证通道：账户会话 token、直连票据（/download/ /upload/，维持不变）；
 //   - 存储：database/sql 统一抽象，默认 SQLite，可选 MySQL / PostgreSQL，
 //     连接池参数可配置（database/sql 自带连接池）；
 //   - Redis（可选）：缓存登录会话与账户权限热数据（高频鉴权读取），
@@ -14,7 +13,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -38,7 +36,6 @@ const (
 	accountPermTTL     = time.Minute         // 权限热缓存 TTL
 	accountRedisCoold  = 30 * time.Second    // Redis 降级冷却期
 	accountTokenBytes  = 32                  // 会话 token 随机字节数（hex 后 64 字符）
-	accountRoot        = "root"              // 内置管理员账户名（配对码登录）
 	accountRedisPrefix = "irix:acct:"        // Redis 键前缀
 )
 
@@ -49,10 +46,13 @@ const (
 const (
 	accountSessCacheTTL = 10 * time.Second // 会话缓存（登出 delSession 立即失效）
 	accountPermCacheTTL = 30 * time.Second // 端点权限缓存（改权限立即失效）
-	accountRootCacheTTL = 10 * time.Second // root 是否已设独立密码
 )
 
-// account 账户记录（root 为内置虚拟账户，不存表）。
+// accountBcryptCost 密码哈希代价（bcrypt）。默认 bcrypt.DefaultCost；
+// 测试可下调为 bcrypt.MinCost 以加速大量测试账户的创建（不改校验语义）。
+var accountBcryptCost = bcrypt.DefaultCost
+
+// account 账户记录。
 type account struct {
 	Username    string          `json:"username"`
 	IsAdmin     bool            `json:"isAdmin"`
@@ -100,10 +100,6 @@ type accountSystem struct {
 	sessCache map[string]sessCacheEntry
 	// permCache username → 端点开关（改权限/删账户主动失效）
 	permCache map[string]permCacheEntry
-	// rootPwSet root 是否已设置独立密码；rootPwCached=false 表示尚未缓存
-	rootPwSet    bool
-	rootPwCached bool
-	rootPwExpire time.Time
 }
 
 // sessCacheEntry 会话缓存条目。
@@ -275,7 +271,7 @@ const accountsSchemaIndex = `CREATE INDEX IF NOT EXISTS idx_sessions_expires ON 
 
 // createAccount 创建账户（密码 bcrypt 哈希后入库）。
 func (s *accountSystem) createAccount(username, password string, isAdmin bool) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), accountBcryptCost)
 	if err != nil {
 		return err
 	}
@@ -286,10 +282,18 @@ func (s *accountSystem) createAccount(username, password string, isAdmin bool) e
 		username, string(hash), boolInt(isAdmin), now, now)
 	// 清掉该账户可能存在的负缓存（此前查询过的不存在账户会缓存空权限）
 	s.invalidatePerms(username)
-	if username == accountRoot {
-		s.invalidateRootPasswordSet()
-	}
 	return err
+}
+
+// hasAdminAccount 是否已存在管理员账户（首次启动引导判定用）。
+func (s *accountSystem) hasAdminAccount() (bool, error) {
+	var n int
+	err := s.db.QueryRow(rebindSQL(s.driver,
+		`SELECT COUNT(*) FROM accounts WHERE is_admin = 1`)).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // getAccount 读取账户；不存在返回 (nil, nil)。
@@ -312,7 +316,7 @@ func (s *accountSystem) getAccount(username string) (*account, error) {
 	return &a, nil
 }
 
-// listAccounts 列出全部账户（不含 root 虚拟账户）。
+// listAccounts 列出全部账户。
 func (s *accountSystem) listAccounts() ([]*account, error) {
 	rows, err := s.db.Query(rebindSQL(s.driver,
 		`SELECT username, is_admin, permissions, created_at, updated_at FROM accounts ORDER BY username`))
@@ -357,48 +361,23 @@ func (s *accountSystem) setPermissions(username string, perms map[string]bool) e
 	return nil
 }
 
-// putPassword 写入账户密码（UPSERT）：root 首次设置独立密码时插入
-// accounts 表的 root 行；普通账户等价于覆盖。管理员直接重置与用户改密共用。
+// putPassword 写入账户密码（UPDATE）：仅更新已存在账户；
+// 账户不存在返回错误（管理员重置与用户自己改密共用）。
 func (s *accountSystem) putPassword(username, password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), accountBcryptCost)
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
-	// root 行插入时 is_admin=1（root 恒管理员；conflict 分支不触碰 is_admin，
-	// 避免改密时抹掉普通账户的管理员标志）
-	isAdmin := boolInt(username == accountRoot)
-	if s.driver == "mysql" {
-		_, err = s.db.Exec(
-			`INSERT INTO accounts (username, password_hash, is_admin, permissions, created_at, updated_at)
-			 VALUES (?, ?, ?, '{}', ?, ?)
-			 ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash), updated_at = VALUES(updated_at)`,
-			username, string(hash), isAdmin, now, now)
-	} else {
-		_, err = s.db.Exec(rebindSQL(s.driver,
-			`INSERT INTO accounts (username, password_hash, is_admin, permissions, created_at, updated_at)
-			 VALUES (?, ?, ?, '{}', ?, ?)
-			 ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`),
-			username, string(hash), isAdmin, now, now)
+	res, err := s.db.Exec(rebindSQL(s.driver,
+		`UPDATE accounts SET password_hash = ?, updated_at = ? WHERE username = ?`),
+		string(hash), time.Now().UnixMilli(), username)
+	if err != nil {
+		return err
 	}
-	// root 行由「不存在」变为「存在」，rootPasswordSet 的缓存结果随之改变
-	if username == accountRoot {
-		s.invalidateRootPasswordSet()
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("账户不存在")
 	}
-	return err
-}
-
-// rootPasswordSet root 是否已设置独立登录密码（accounts 表存在 root 行）。
-// 未设置时 root 的登录凭据为配对码/固定 apikey，登录响应强制改密。
-// 每个 root 会话请求都会调用，结果走进程内短 TTL 缓存（改密时失效）。
-func (s *accountSystem) rootPasswordSet() bool {
-	if v, ok := s.cachedRootPasswordSet(); ok {
-		return v
-	}
-	a, err := s.getAccount(accountRoot)
-	v := err == nil && a != nil
-	s.cacheRootPasswordSet(v)
-	return v
+	return nil
 }
 
 // checkPassword 校验账户密码并返回账户（bcrypt 比较）。
@@ -434,15 +413,12 @@ func (s *accountSystem) deleteAccount(username string) error {
 	// 缓存过期前仍可通过鉴权（删账户后残留访问权限是严重越权）。
 	s.invalidateUserSessions(username)
 	s.invalidatePerms(username)
-	if username == accountRoot {
-		s.invalidateRootPasswordSet()
-	}
 	return nil
 }
 
 // ---------- 进程内热缓存（鉴权高频路径） ----------
 //
-// 每个 API 请求都要查会话（非 apikey 通道）与端点权限，默认 SQLite 部署下
+// 每个 API 请求都要查会话（token 通道）与端点权限，默认 SQLite 部署下
 // 即 2~3 次 SQL。这里用有 TTL 的进程内缓存把命中路径降为零 I/O；
 // 写路径（登出/续期/改权限/改密/删账户）主动失效对应键，避免安全语义被
 // TTL 拖慢（如「登出后仍可访问 10 秒」）。
@@ -465,11 +441,7 @@ func (s *accountSystem) cachedSession(token string) (accountSession, bool) {
 }
 
 // cacheSession 写入会话缓存（惰性建 map，兼容直接构造的 accountSystem）。
-// root 恒 admin：写入前统一修正，保证进程内缓存与 SQL 层的判定一致。
 func (s *accountSystem) cacheSession(token string, sess accountSession) {
-	if sess.Username == accountRoot {
-		sess.IsAdmin = true
-	}
 	s.cacheMu.Lock()
 	if s.sessCache == nil {
 		s.sessCache = map[string]sessCacheEntry{}
@@ -521,34 +493,6 @@ func (s *accountSystem) invalidatePerms(username string) {
 	s.cacheMu.Unlock()
 }
 
-// cachedRootPasswordSet 读取 root 是否已设独立密码的缓存结果。
-// 第二返回值为 false 表示尚未缓存（需回源查询）。
-func (s *accountSystem) cachedRootPasswordSet() (bool, bool) {
-	s.cacheMu.RLock()
-	cached, val, exp := s.rootPwCached, s.rootPwSet, s.rootPwExpire
-	s.cacheMu.RUnlock()
-	if !cached || time.Now().After(exp) {
-		return false, false
-	}
-	return val, true
-}
-
-// cacheRootPasswordSet 写入 root 密码状态缓存。
-func (s *accountSystem) cacheRootPasswordSet(v bool) {
-	s.cacheMu.Lock()
-	s.rootPwSet, s.rootPwCached = v, true
-	s.rootPwExpire = time.Now().Add(accountRootCacheTTL)
-	s.cacheMu.Unlock()
-}
-
-// invalidateRootPasswordSet 使 root 密码状态缓存失效（root 改密/删账户后）。
-func (s *accountSystem) invalidateRootPasswordSet() {
-	s.cacheMu.Lock()
-	s.rootPwCached = false
-	s.rootPwExpire = time.Time{}
-	s.cacheMu.Unlock()
-}
-
 // ---------- 会话（SQL 权威 + Redis 缓存） ----------
 
 // newAccountToken 生成账户会话 token（crypto/rand，hex 64 字符）。
@@ -593,7 +537,7 @@ func (s *accountSystem) putSession(token string, sess accountSession, ttl time.D
 }
 
 // lookupSession 查找会话：进程内缓存 → Redis 热缓存 → SQL 权威。
-// 每个 API 请求（非 apikey 通道）都会调用一次，命中进程内缓存时零 I/O。
+// 每个 API 请求都会调用一次，命中进程内缓存时零 I/O。
 func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 	// 1) 进程内热缓存（零 I/O）
 	if sess, ok := s.cachedSession(token); ok {
@@ -624,12 +568,9 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 		_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE token = ?`), token)
 		return accountSession{}, false
 	}
-	// 回填 admin 标志（root 恒 admin；普通账户读表）
-	sess.IsAdmin = sess.Username == accountRoot
-	if sess.Username != accountRoot {
-		if a, err := s.getAccount(sess.Username); err == nil && a != nil {
-			sess.IsAdmin = a.IsAdmin
-		}
+	// 回填 admin 标志（账户被删则保留 false，后续鉴权照常，但该 token 不再有权限）
+	if a, err := s.getAccount(sess.Username); err == nil && a != nil {
+		sess.IsAdmin = a.IsAdmin
 	}
 	s.cacheSession(token, sess)    // 回填进程内缓存
 	s.redisSetSession(token, sess) // 尽力回填（Redis 不可用时内部自动降级）
@@ -817,18 +758,4 @@ func validUsername(name string) bool {
 		}
 	}
 	return true
-}
-
-// checkRootPassword 校验 root 密码：固定 apikey 或配对码（恒定时间比较）。
-func (d *Daemon) checkRootPassword(password string) bool {
-	if password == "" {
-		return false
-	}
-	if d.APIKey != "" {
-		return subtle.ConstantTimeCompare([]byte(password), []byte(d.APIKey)) == 1
-	}
-	if d.PairingHash == "" {
-		return false
-	}
-	return checkPairing(password, d.PairingHash)
 }

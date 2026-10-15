@@ -16,7 +16,7 @@ import (
 // metricsGet 请求 metrics 接口并解析 samples。
 func metricsGet(t *testing.T, srvURL, uuid, minutes string) []map[string]any {
 	t.Helper()
-	url := srvURL + "/api/instance/metrics?uuid=" + uuid + "&apikey=test-key"
+	url := srvURL + "/api/instance/metrics?uuid=" + uuid + "&token=test-key"
 	if minutes != "" {
 		url += "&minutes=" + minutes
 	}
@@ -55,12 +55,12 @@ func TestLogsQuery(t *testing.T) {
 	_ = os.WriteFile(logPath, []byte(content), 0o644)
 	d.LogDir = filepath.Join(dir, "logs")
 
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 关键词过滤
 	resp, err := testClient.Get(srv.URL + "/api/instance/logs/query?uuid=" +
-		inst.InstanceUuid + "&keyword=error&apikey=test-key")
+		inst.InstanceUuid + "&keyword=error&token=test-key")
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestLogsQuery(t *testing.T) {
 
 	// maxLines 上限
 	resp2, _ := testClient.Get(srv.URL + "/api/instance/logs/query?uuid=" +
-		inst.InstanceUuid + "&maxLines=1&apikey=test-key")
+		inst.InstanceUuid + "&maxLines=1&token=test-key")
 	body2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
 	if err := json.Unmarshal(body2, &out); err != nil {
@@ -106,7 +106,7 @@ func TestMetricsSamples(t *testing.T) {
 		Nickname: "监控", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
@@ -148,7 +148,7 @@ func TestMetricsNotRunning(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	samples := metricsGet(t, srv.URL, inst.InstanceUuid, "")
 	if len(samples) != 0 {

@@ -1,78 +1,72 @@
-// 配对码机制：首次启动生成 20 位随机配对码并仅显示一次。
-// 磁盘上只保存其 SHA-256 哈希，后续启动不会再次显示；
-// 丢失配对码只能删除 auth.hash 后重新生成。
+// 首次启动引导：账户库中不存在任何管理员账户时，随机生成管理员用户名
+// 与密码（crypto/rand），bcrypt 入库后在终端仅显示一次。
+// 磁盘不保存明文凭据；凭据丢失且无人能登录时，需删除账户库（默认
+// {data}/accounts.db）后重启重新生成，或直接操作账户库恢复。
 
 package main
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"fmt"
 	"math/big"
-	"os"
-	"path/filepath"
-	"strings"
 )
 
-// PairingDigits 配对码位数。
-const PairingDigits = 20
+// 引导管理员凭据长度（字符数）。
+const (
+	bootstrapUserLen = 12 // 用户名：字母/数字（符合 validUsername 规则）
+	bootstrapPassLen = 20 // 密码：大小写字母与数字（远超最小密码长度）
+)
 
-// pairingFile 配对码哈希持久化文件路径。
-func (d *Daemon) pairingFile() string {
-	return filepath.Join(d.DataDir, "auth.hash")
-}
+// 凭据字符集（无易混淆要求，均满足用户名/密码校验规则）。
+const (
+	credCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 
-// LoadPairing 加载配对码配置。
-// 首次启动（auth.hash 不存在）时生成 20 位随机配对码并返回 isNew=true，
-// 磁盘仅保存哈希；后续启动只加载哈希，配对码不再显示。
-func (d *Daemon) LoadPairing() (code string, isNew bool, err error) {
-	raw, err := os.ReadFile(d.pairingFile())
-	if err == nil {
-		h := strings.TrimSpace(string(raw))
-		if len(h) == sha256.Size*2 {
-			d.PairingHash = h
-			return "", false, nil
+// randomString 生成 n 位随机字符串（crypto/rand，无模偏差）。
+func randomString(n int, charset string) (string, error) {
+	max := big.NewInt(int64(len(charset)))
+	out := make([]byte, n)
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
 		}
-		return "", false, fmt.Errorf("配对码文件内容无效: %s", d.pairingFile())
+		out[i] = charset[idx.Int64()]
 	}
-	if !os.IsNotExist(err) {
-		return "", false, err
-	}
+	return string(out), nil
+}
 
-	code, err = generatePairingCode()
+// ensureAdminAccount 首次启动引导：账户库中没有任何管理员账户时，
+// 随机生成管理员用户名与密码并入库（bcrypt），返回明文凭据供调用方
+// 在终端仅显示一次。created=false 表示已存在管理员账户（含共享账户库
+// 多节点并发启动时由其他节点抢先创建的情况），此时无需显示任何凭据。
+func (d *Daemon) ensureAdminAccount() (username, password string, created bool, err error) {
+	has, err := d.accounts.hasAdminAccount()
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
-	d.PairingHash = pairingHash(code)
-	if err := os.WriteFile(d.pairingFile(), []byte(d.PairingHash+"\n"), 0o600); err != nil {
-		return "", false, fmt.Errorf("保存配对码失败: %w", err)
+	if has {
+		return "", "", false, nil
 	}
-	return code, true, nil
-}
-
-// generatePairingCode 生成 PairingDigits 位十进制随机数（crypto/rand，无偏差）。
-func generatePairingCode() (string, error) {
-	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(PairingDigits), nil)
-	n, err := rand.Int(rand.Reader, max)
-	if err != nil {
-		return "", err
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		u, err := randomString(bootstrapUserLen, credCharset)
+		if err != nil {
+			return "", "", false, err
+		}
+		p, err := randomString(bootstrapPassLen, credCharset)
+		if err != nil {
+			return "", "", false, err
+		}
+		if err := d.accounts.createAccount(u, p, true); err != nil {
+			lastErr = err
+			// 用户名撞库/共享库并发初始化：重查是否已有管理员，有则让位
+			if has, herr := d.accounts.hasAdminAccount(); herr == nil && has {
+				return "", "", false, nil
+			}
+			continue
+		}
+		return u, p, true, nil
 	}
-	return fmt.Sprintf("%0*d", PairingDigits, n), nil
-}
-
-// pairingHash 计算配对码的 SHA-256 十六进制摘要。
-func pairingHash(code string) string {
-	sum := sha256.Sum256([]byte(code))
-	return hex.EncodeToString(sum[:])
-}
-
-// checkPairing 恒定时间比较请求携带的配对码与已存哈希。
-func checkPairing(got, storedHex string) bool {
-	if got == "" {
-		return false
-	}
-	sum := sha256.Sum256([]byte(got))
-	return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(storedHex)) == 1
+	return "", "", false, fmt.Errorf("创建初始管理员账户失败: %w", lastErr)
 }

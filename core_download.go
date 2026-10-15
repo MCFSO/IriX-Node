@@ -26,7 +26,7 @@ import (
 )
 
 // validateCoreURL 校验核心下载链接：仅允许 http/https（MCSM 同款行为，
-// 用户可配置自建镜像/内网源；本接口受 apikey 保护）。
+// 用户可配置自建镜像/内网源；本接口受账户认证保护）。
 // host 为字面量环回/未指定地址时直接拒绝（防 SSRF 到本机）；
 // 实际解析的 IP 在拨号时由 coreDownloadDialContext 再校验（防 DNS rebinding）。
 func validateCoreURL(raw string) error {

@@ -8,7 +8,7 @@
 # 用法：
 #   sudo sh install-systemd.sh                          # 使用默认配置
 #   sudo sh install-systemd.sh -bin ./irix-node \
-#        -bind 0.0.0.0 -port 23333 -apikey mykey        # 自定义监听与密钥
+#        -bind 0.0.0.0 -port 23333                    # 自定义监听地址与端口
 #
 # 参数：
 #   -bin <路径>      irix-node 二进制路径（默认脚本同目录 irix-node）
@@ -16,13 +16,17 @@
 #   -bind <地址>     监听地址（默认 127.0.0.1；局域网访问用 0.0.0.0）
 #   -port <端口>     监听端口（默认 12346）
 #   -data <目录>     数据目录（默认 /var/lib/irix-node）
-#   -apikey <密钥>   固定 API 密钥（留空启用配对码机制，首次启动仅显示一次）
 #   -transfer-allow-cidr <CIDR>  集群拉取放行内网 CIDR（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）
 #   -user <用户>     运行用户（默认 root；Bastille/Docker 管理需要高权限）
 #   -no-instance-log 关闭实例日志落盘
 #   -no-audit-log    关闭审计日志落盘
 #   -update          仅更新二进制并重启（保留已有配置，用于升级）
 #   -h               显示帮助
+#
+# 认证：不再有 -apikey / 配对码。首次启动时账户库（默认
+#   <数据目录>/accounts.db）中不存在管理员账户则随机生成一个，
+#   用户名与密码仅在启动日志中显示一次（journalctl -u irix-node 查看）；
+#   之后的 API 请求先 POST /api/auth/login 换取会话 token 再携带。
 #
 # 安装后可随时编辑 /etc/irix-node/config.json 修改配置，然后
 #   systemctl restart irix-node
@@ -35,7 +39,6 @@ BIN_URL=""
 BIND_ADDR="127.0.0.1"
 PORT="12346"
 DATA_DIR="/var/lib/irix-node"
-APIKEY=""
 TRANSFER_CIDR=""
 RUN_USER="root"
 UPDATE_ONLY=false
@@ -50,7 +53,7 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 SERVICE_FILE="/etc/systemd/system/irix-node.service"
 
 usage() {
-	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 log() {
@@ -70,7 +73,6 @@ while [ $# -gt 0 ]; do
 		-bind) BIND_ADDR="$2"; shift 2 ;;
 		-port) PORT="$2"; shift 2 ;;
 		-data) DATA_DIR="$2"; shift 2 ;;
-		-apikey) APIKEY="$2"; shift 2 ;;
 		-transfer-allow-cidr) TRANSFER_CIDR="$2"; shift 2 ;;
 		-user) RUN_USER="$2"; shift 2 ;;
 		-update) UPDATE_ONLY=true; shift ;;
@@ -134,7 +136,6 @@ cat > "$CONFIG_FILE" <<EOF
   "bind": "${BIND_ADDR}",
   "port": ${PORT},
   "data": "${DATA_DIR}",
-  "apiKey": "${APIKEY}",
   "instanceLog": ${INSTANCE_LOG_JSON},
   "instanceLogMax": ${INSTANCE_LOG_MAX},
   "auditLog": ${AUDIT_LOG_JSON},
@@ -143,7 +144,7 @@ cat > "$CONFIG_FILE" <<EOF
   "transferAllowCidr": "${TRANSFER_CIDR}"
 }
 EOF
-chmod 600 "$CONFIG_FILE"   # 可能含 API 密钥，仅 root 可读
+chmod 600 "$CONFIG_FILE"   # 仅 root 可读（配置含监听地址等部署细节）
 
 # ---- systemd 单元 ----
 log "注册 systemd 服务: irix-node.service"
@@ -182,8 +183,8 @@ echo "  服务状态:  systemctl status irix-node"
 echo "  查看日志:  journalctl -u irix-node -f"
 echo "  配置文件:  $CONFIG_FILE（修改后 systemctl restart irix-node 生效）"
 echo "  数据目录:  $DATA_DIR"
-echo "  访问地址:  http://${BIND_ADDR}:${PORT}/api/overview"
-if [ -z "$APIKEY" ]; then
-	echo "  配对码:    首次启动时在日志中显示（journalctl -u irix-node | grep 配对码），仅此一次，请立即记录"
-fi
+echo "  访问地址:  http://${BIND_ADDR}:${PORT}/api/overview（需携带会话 token：?token=<token>）"
+echo "  管理员账户: 首次启动时随机生成，用户名与密码仅在启动日志中显示一次"
+echo "              查看: journalctl -u irix-node | grep -A4 '首次启动'；请立即记录"
+echo "              登录: POST /api/auth/login 换取会话 token（凭据丢失只能删除账户库重启重新生成）"
 echo ""

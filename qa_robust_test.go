@@ -36,13 +36,13 @@ func TestNoPanicWhenInstanceRemovedConcurrently(t *testing.T) {
 	d.RegisterRoutes(mux)
 
 	paths := []string{
-		"/api/instance?uuid=%s&apikey=test-key",
-		"/api/protected_instance/kill?uuid=%s&apikey=test-key",
-		"/api/protected_instance/command?uuid=%s&command=ls&apikey=test-key",
-		"/api/protected_instance/outputlog?uuid=%s&size=1&apikey=test-key",
-		"/api/protected_instance/open?uuid=%s&apikey=test-key",
-		"/api/protected_instance/stop?uuid=%s&apikey=test-key",
-		"/api/protected_instance/restart?uuid=%s&apikey=test-key",
+		"/api/instance?uuid=%s&token=test-key",
+		"/api/protected_instance/kill?uuid=%s&token=test-key",
+		"/api/protected_instance/command?uuid=%s&command=ls&token=test-key",
+		"/api/protected_instance/outputlog?uuid=%s&size=1&token=test-key",
+		"/api/protected_instance/open?uuid=%s&token=test-key",
+		"/api/protected_instance/stop?uuid=%s&token=test-key",
+		"/api/protected_instance/restart?uuid=%s&token=test-key",
 	}
 
 	const rounds = 300
@@ -103,7 +103,7 @@ func TestNoPanicWhenInstanceRemovedConcurrently(t *testing.T) {
 // 而不是因「实例未在运行」返回 500。
 func TestRestartStoppedInstanceSucceeds(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	inst := sampleInst(1, dir)
@@ -113,7 +113,7 @@ func TestRestartStoppedInstanceSucceeds(t *testing.T) {
 	}
 	defer d.StopAll(2 * time.Second)
 
-	code, body := doReq(t, srv.URL+"/api/protected_instance/restart?uuid="+inst.InstanceUuid+"&apikey=test-key")
+	code, body := doReq(t, srv.URL+"/api/protected_instance/restart?uuid="+inst.InstanceUuid+"&token=test-key")
 	if code != http.StatusOK {
 		t.Fatalf("restart 已停止实例应成功，得到 %d: %s", code, body)
 	}
@@ -132,7 +132,7 @@ func TestRestartStoppedInstanceSucceeds(t *testing.T) {
 // TestPublicAddrHonorsBindAll 绑定 0.0.0.0 时下载/上传地址不能写死 127.0.0.1，
 // 否则远端客户端拿到的直连地址不可用。
 func TestPublicAddrHonorsBindAll(t *testing.T) {
-	d := NewDaemon(t.TempDir(), "test-key")
+	d := NewDaemon(t.TempDir())
 	d.Port = 12346
 
 	if got := d.publicAddr(); got != "127.0.0.1:12346" {
@@ -157,7 +157,7 @@ func TestPublicAddrHonorsBindAll(t *testing.T) {
 // 无上限时一个大文件即可打爆内存；应拒绝超限文件而不是尝试读取。
 func TestFileReadRejectsOversizeFile(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	inst := sampleInst(1, dir)
@@ -177,7 +177,7 @@ func TestFileReadRejectsOversizeFile(t *testing.T) {
 	f.Close()
 
 	req, _ := http.NewRequest(http.MethodPut,
-		srv.URL+"/api/files/?uuid="+inst.InstanceUuid+"&apikey=test-key",
+		srv.URL+"/api/files/?uuid="+inst.InstanceUuid+"&token=test-key",
 		strings.NewReader(`{"target":"/big.bin"}`))
 	resp, err := testClient.Do(req)
 	if err != nil {
@@ -205,7 +205,7 @@ func TestFileReadRejectsOversizeFile(t *testing.T) {
 // 而不是忽略 ParseMultipartForm 的错误后报「缺少 file 字段」。
 func TestUploadRejectsNonMultipart(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	inst := sampleInst(1, dir)
@@ -231,7 +231,7 @@ func TestUploadRejectsNonMultipart(t *testing.T) {
 // TestUploadWritesFile 正常 multipart 上传应落盘成功（回归保护）。
 func TestUploadWritesFile(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	inst := sampleInst(1, dir)

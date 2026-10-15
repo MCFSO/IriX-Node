@@ -1,15 +1,16 @@
 // 账户管理 HTTP 处理器与路由注册（docs/accounts-design.md）。
 //
 // 认证通道：
-//   - apikey（配对码 / 固定密钥）→ root 管理员，兼容既有前端，不做端点限制；
-//   - 账户会话 token → 按端点开关鉴权；root 首次登录（尚未设置独立密码）的
-//     会话处于「强制改密」状态：除改密/登出/查看自身与权限目录外一律 403。
+//   - 账户会话 token（Authorization: Bearer / X-Auth-Token / ?token=）→
+//     按端点开关鉴权；管理员（is_admin 账户）旁路端点开关；
+//   - 直连票据（/download/ /upload/）自带授权，维持不变。
 //
-// 密码规则：
-//   - root 初始凭据 = 配对码（或 -apikey），首次登录后必须设置新密码
-//     （PUT /api/accounts/password 带 oldPassword），设置后配对码不再用于登录
-//     （但 apikey 通道为兼容既有客户端保持不变）；
-//   - 管理员可直接重置任意账户密码（含 root，带 username + password），无需旧密码。
+// 首次启动引导（auth.go）：账户库中不存在管理员账户时随机生成一个
+// 管理员账户（用户名/密码仅终端显示一次），登录后可在账户管理里
+// 创建更多账户、修改自身密码、逐端点开启权限。
+//
+// 密码规则：账户密码 ≥ 8 位；管理员可直接重置任意账户密码
+// （PUT /api/accounts/password 带 username + password，无需旧密码）。
 
 package main
 
@@ -22,10 +23,9 @@ import (
 
 // identity 认证后的请求身份。
 type identity struct {
-	username   string
-	isAdmin    bool
-	mustChange bool // 强制改密状态（root 首次登录，配对码尚未替换）
-	via        string
+	username string
+	isAdmin  bool
+	via      string
 }
 
 type ctxIdentityKey struct{}
@@ -41,7 +41,11 @@ func identityOf(r *http.Request) *identity {
 	return id
 }
 
-// bearerToken 提取会话 token：Authorization: Bearer <token> 或 X-Auth-Token 头。
+// bearerToken 提取会话 token：
+//  1. X-Auth-Token 头；
+//  2. Authorization: Bearer <token>；
+//  3. ?token= 查询参数（浏览器 WebSocket 无法自定义请求头等场景；
+//     审计日志已对 token 参数打码，优先使用前两种方式）。
 func bearerToken(r *http.Request) string {
 	if t := r.Header.Get("X-Auth-Token"); t != "" {
 		return t
@@ -50,17 +54,12 @@ func bearerToken(r *http.Request) string {
 	if strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
-	return ""
+	return strings.TrimSpace(r.URL.Query().Get("token"))
 }
 
-// authenticate 认证请求：
-//  1. apikey（查询参数 / X-Api-Key 头）→ root 管理员（配对码机制不变）；
-//  2. 会话 token → 账户身份（token 不存在/过期/账户已删 → nil）；
-//     root 会话在尚未设置独立密码时标记 mustChange（强制首次改密）。
+// authenticate 认证请求：会话 token → 账户身份
+// （token 不存在/过期/账户已删 → nil，由 auth 包装器拒绝）。
 func (d *Daemon) authenticate(r *http.Request) *identity {
-	if d.authOK(r) {
-		return &identity{username: accountRoot, isAdmin: true, via: "apikey"}
-	}
 	if d.accounts == nil {
 		return nil
 	}
@@ -77,14 +76,10 @@ func (d *Daemon) authenticate(r *http.Request) *identity {
 		sess.ExpiresAt = time.Now().Add(accountSessionTTL).UnixMilli()
 		d.accounts.putSession(token, sess, accountSessionTTL)
 	}
-	id := &identity{username: sess.Username, isAdmin: sess.IsAdmin, via: "token"}
-	if sess.Username == accountRoot && !d.accounts.rootPasswordSet() {
-		id.mustChange = true
-	}
-	return id
+	return &identity{username: sess.Username, isAdmin: sess.IsAdmin, via: "token"}
 }
 
-// requireAdmin 要求管理员身份（root / is_admin 账户）；不满足时写 403 并返回 false。
+// requireAdmin 要求管理员身份（is_admin 账户）；不满足时写 403 并返回 false。
 func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	id := identityOf(r)
 	if id != nil && id.isAdmin {
@@ -118,15 +113,13 @@ func (d *Daemon) registerAccountRoutes(mux *http.ServeMux) {
 
 // accountLoginResponse 登录响应。
 type accountLoginResponse struct {
-	Token              string `json:"token"`
-	Username           string `json:"username"`
-	IsAdmin            bool   `json:"isAdmin"`
-	MustChangePassword bool   `json:"mustChangePassword"`
-	ExpiresAt          int64  `json:"expiresAt"`
+	Token     string `json:"token"`
+	Username  string `json:"username"`
+	IsAdmin   bool   `json:"isAdmin"`
+	ExpiresAt int64  `json:"expiresAt"`
 }
 
-// handleAccountLogin 登录：root（配对码/固定 apikey，首次强制改密）
-// 或普通账户（密码）。
+// handleAccountLogin 登录：校验账户密码并签发会话 token。
 // POST /api/auth/login body: {username, password}
 func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	if d.accounts == nil {
@@ -148,34 +141,12 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	d.accounts.purgeExpiredSessions()
 
-	var (
-		sess       accountSession
-		mustChange bool
-	)
-	switch {
-	case body.Username == accountRoot:
-		// 已设置独立密码：只认新密码；否则只认配对码/固定 apikey（首次登录）
-		if d.accounts.rootPasswordSet() {
-			if _, ok := d.accounts.checkPassword(accountRoot, body.Password); !ok {
-				writeError(w, http.StatusUnauthorized, "用户名或密码错误")
-				return
-			}
-		} else {
-			if !d.checkRootPassword(body.Password) {
-				writeError(w, http.StatusUnauthorized, "用户名或密码错误")
-				return
-			}
-			mustChange = true
-		}
-		sess = accountSession{Username: accountRoot, IsAdmin: true, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
-	default:
-		a, ok := d.accounts.checkPassword(body.Username, body.Password)
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "用户名或密码错误")
-			return
-		}
-		sess = accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
+	a, ok := d.accounts.checkPassword(body.Username, body.Password)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
 	}
+	sess := accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
 	token, err := newAccountToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成会话失败: "+err.Error())
@@ -183,11 +154,10 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	d.accounts.putSession(token, sess, accountSessionTTL)
 	writeOK(w, accountLoginResponse{
-		Token:              token,
-		Username:           sess.Username,
-		IsAdmin:            sess.IsAdmin,
-		MustChangePassword: mustChange,
-		ExpiresAt:          sess.ExpiresAt,
+		Token:     token,
+		Username:  sess.Username,
+		IsAdmin:   sess.IsAdmin,
+		ExpiresAt: sess.ExpiresAt,
 	})
 }
 
@@ -206,15 +176,6 @@ func (d *Daemon) handleAccountMe(w http.ResponseWriter, r *http.Request) {
 	id := identityOf(r)
 	if id == nil {
 		writeError(w, http.StatusForbidden, "未认证")
-		return
-	}
-	if id.username == accountRoot {
-		writeOK(w, map[string]any{
-			"username":           accountRoot,
-			"isAdmin":            true,
-			"mustChangePassword": !d.accounts.rootPasswordSet(),
-			"permissions":        nil,
-		})
 		return
 	}
 	a, err := d.accounts.getAccount(id.username)
@@ -236,31 +197,22 @@ func (d *Daemon) handleAccountCatalog(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, permCatalog())
 }
 
-// handleAccountsList 账户列表（root 虚拟条目在前，含强制改密状态）。
+// handleAccountsList 账户列表。
 // GET /api/accounts
 func (d *Daemon) handleAccountsList(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(w, r) {
 		return
 	}
-	out := []map[string]any{{
-		"username":           accountRoot,
-		"isAdmin":            true,
-		"builtin":            true,
-		"mustChangePassword": !d.accounts.rootPasswordSet(),
-	}}
 	list, err := d.accounts.listAccounts()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取账户列表失败: "+err.Error())
 		return
 	}
+	out := make([]map[string]any, 0, len(list))
 	for _, a := range list {
-		if a.Username == accountRoot {
-			continue // root 行只在设置了独立密码后存在，列表用上面的内置条目表示
-		}
 		out = append(out, map[string]any{
 			"username":  a.Username,
 			"isAdmin":   a.IsAdmin,
-			"builtin":   false,
 			"createdAt": a.CreatedAt,
 			"updatedAt": a.UpdatedAt,
 		})
@@ -288,10 +240,6 @@ func (d *Daemon) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "用户名格式无效（1-64 位字母/数字/下划线/连字符）")
 		return
 	}
-	if body.Username == accountRoot {
-		writeError(w, http.StatusBadRequest, "root 为内置管理员账户，不可创建")
-		return
-	}
 	if len(body.Password) < accountPassMinLen {
 		writeError(w, http.StatusBadRequest, "密码长度不能少于 8 位")
 		return
@@ -310,7 +258,7 @@ func (d *Daemon) handleAccountCreate(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"username": body.Username})
 }
 
-// handleAccountDelete 删除账户（管理员；root 不可删）。
+// handleAccountDelete 删除账户（管理员；连带删除其全部会话）。
 // DELETE /api/accounts?username=
 func (d *Daemon) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(w, r) {
@@ -321,8 +269,8 @@ func (d *Daemon) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 username 参数")
 		return
 	}
-	if username == accountRoot {
-		writeError(w, http.StatusBadRequest, "root 为内置管理员账户，不可删除")
+	if id := identityOf(r); id != nil && id.username == username {
+		writeError(w, http.StatusBadRequest, "不能删除当前登录的账户")
 		return
 	}
 	if err := d.accounts.deleteAccount(username); err != nil {
@@ -333,9 +281,8 @@ func (d *Daemon) handleAccountDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAccountPassword 修改密码（两种模式）：
-//   - 自己改密：{oldPassword, newPassword}（root 首次登录强制改密走这里；
-//     oldPassword = 配对码/固定 apikey 或已设置的密码）；
-//   - 管理员重置：{username, password}（可直接重置任意账户含 root，无需旧密码）。
+//   - 自己改密：{oldPassword, newPassword}（任何登录账户，旧密码为当前密码）；
+//   - 管理员重置：{username, password}（可直接重置任意账户密码，无需旧密码）。
 //
 // PUT /api/accounts/password
 func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
@@ -354,23 +301,13 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	// 自己改密（任何登录用户，含 root 首次登录强制改密）
+	// 自己改密（任何登录账户）
 	if body.OldPassword != "" || body.NewPassword != "" {
 		if body.OldPassword == "" || body.NewPassword == "" {
 			writeError(w, http.StatusBadRequest, "自己改密需要 oldPassword 与 newPassword")
 			return
 		}
-		ok := false
-		if id.username == accountRoot {
-			if d.accounts.rootPasswordSet() {
-				_, ok = d.accounts.checkPassword(accountRoot, body.OldPassword)
-			} else {
-				ok = d.checkRootPassword(body.OldPassword)
-			}
-		} else {
-			_, ok = d.accounts.checkPassword(id.username, body.OldPassword)
-		}
-		if !ok {
+		if _, ok := d.accounts.checkPassword(id.username, body.OldPassword); !ok {
 			writeError(w, http.StatusUnauthorized, "原密码错误")
 			return
 		}
@@ -385,7 +322,7 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, map[string]any{"username": id.username})
 		return
 	}
-	// 管理员直接重置（含 root，无需旧密码）
+	// 管理员直接重置（无需旧密码）
 	if !requireAdmin(w, r) {
 		return
 	}
@@ -394,16 +331,14 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "管理员重置需要 username 与 password")
 		return
 	}
-	if target != accountRoot {
-		a, err := d.accounts.getAccount(target)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "读取账户失败: "+err.Error())
-			return
-		}
-		if a == nil {
-			writeError(w, http.StatusNotFound, "账户不存在")
-			return
-		}
+	a, err := d.accounts.getAccount(target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取账户失败: "+err.Error())
+		return
+	}
+	if a == nil {
+		writeError(w, http.StatusNotFound, "账户不存在")
+		return
 	}
 	if len(body.Password) < accountPassMinLen {
 		writeError(w, http.StatusBadRequest, "密码长度不能少于 8 位")
@@ -416,7 +351,7 @@ func (d *Daemon) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"username": target})
 }
 
-// handleAccountPermissions 修改账户端点开关（管理员；root 恒全权限不可改）。
+// handleAccountPermissions 修改账户端点开关（管理员）。
 // PUT /api/accounts/permissions body:
 //   - 整组开关：{username, group: "文件", enabled: true}
 //   - 逐条开关：{username, permissions: {"GET /api/files/list": true, ...}}
@@ -439,10 +374,6 @@ func (d *Daemon) handleAccountPermissions(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "缺少 username 参数")
 		return
 	}
-	if body.Username == accountRoot {
-		writeError(w, http.StatusBadRequest, "root 为内置管理员，不受端点开关限制")
-		return
-	}
 	a, err := d.accounts.getAccount(body.Username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取账户失败: "+err.Error())
@@ -450,6 +381,10 @@ func (d *Daemon) handleAccountPermissions(w http.ResponseWriter, r *http.Request
 	}
 	if a == nil {
 		writeError(w, http.StatusNotFound, "账户不存在")
+		return
+	}
+	if a.IsAdmin {
+		writeError(w, http.StatusBadRequest, "管理员账户不受端点开关限制")
 		return
 	}
 	if body.Group == "" && len(body.Permissions) == 0 {

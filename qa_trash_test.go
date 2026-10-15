@@ -55,10 +55,10 @@ func TestTrashLifecycle(t *testing.T) {
 		t.Fatalf("创建目录失败: %v", err)
 	}
 	_ = os.WriteFile(worldFile, []byte("world-data"), 0o644)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/files/trash"
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	// 删除进回收站
 	code, out := trashAPI(t, http.MethodPost, "", base+auth,
@@ -76,7 +76,7 @@ func TestTrashLifecycle(t *testing.T) {
 	}
 
 	// 列表
-	code, out = trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&apikey=test-key", "")
+	code, out = trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&token=test-key", "")
 	if code != 200 {
 		t.Fatalf("列表失败: %d %v", code, out)
 	}
@@ -101,7 +101,7 @@ func TestTrashLifecycle(t *testing.T) {
 		t.Fatalf("恢复内容错误: %v %q", err, data)
 	}
 	// 元数据清空
-	code, out = trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&apikey=test-key", "")
+	code, out = trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&token=test-key", "")
 	items, _ = out["data"].(map[string]any)["items"].([]any)
 	if len(items) != 0 {
 		t.Fatalf("恢复后列表应为空: %v", items)
@@ -118,10 +118,10 @@ func TestTrashRestoreConflict(t *testing.T) {
 	}
 	worldFile := filepath.Join(dir, "level.dat")
 	_ = os.WriteFile(worldFile, []byte("v1"), 0o644)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/files/trash"
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	code, _ := trashAPI(t, http.MethodPost, "", base+auth,
 		trashBody(inst.InstanceUuid, map[string]any{"targets": []string{"/level.dat"}}))
@@ -131,7 +131,7 @@ func TestTrashRestoreConflict(t *testing.T) {
 	// 恢复前在原始位置新建同名文件
 	_ = os.WriteFile(worldFile, []byte("v2"), 0o644)
 
-	code, out := trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&apikey=test-key", "")
+	code, out := trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&token=test-key", "")
 	items, _ := out["data"].(map[string]any)["items"].([]any)
 	id := items[0].(map[string]any)["id"].(string)
 
@@ -160,10 +160,10 @@ func TestTrashEmpty(t *testing.T) {
 	for _, name := range []string{"a.txt", "b.txt"} {
 		_ = os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/files/trash"
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	code, _ := trashAPI(t, http.MethodPost, "", base+auth,
 		trashBody(inst.InstanceUuid, map[string]any{"targets": []string{"/a.txt", "/b.txt"}}))
@@ -180,7 +180,7 @@ func TestTrashEmpty(t *testing.T) {
 	if len(trashEntries) != 0 {
 		t.Fatalf("清空后回收站应为空: %v", trashEntries)
 	}
-	code, out := trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&apikey=test-key", "")
+	code, out := trashAPI(t, http.MethodGet, "", base+"/list?uuid="+inst.InstanceUuid+"&token=test-key", "")
 	items, _ := out["data"].(map[string]any)["items"].([]any)
 	if len(items) != 0 {
 		t.Fatalf("清空后元数据应为空: %v", items)
@@ -195,10 +195,10 @@ func TestTrashRejections(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/files/trash"
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	// 越界
 	code, _ := trashAPI(t, http.MethodPost, "", base+auth,
@@ -232,9 +232,9 @@ func TestTrashPersistence(t *testing.T) {
 		t.Fatalf("添加实例失败: %v", err)
 	}
 	_ = os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("x"), 0o644)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	code, _ := trashAPI(t, http.MethodPost, srv.URL, "/api/files/trash"+auth,
 		trashBody(inst.InstanceUuid, map[string]any{"targets": []string{"/keep.txt"}}))
@@ -243,7 +243,7 @@ func TestTrashPersistence(t *testing.T) {
 	}
 
 	// 用同一数据目录重建守护进程（模拟重启）
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("重新加载失败: %v", err)
 	}

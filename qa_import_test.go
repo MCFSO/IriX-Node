@@ -19,7 +19,7 @@ func importBody(t *testing.T, srvURL, path, nickname string) (int, map[string]an
 		body["nickname"] = nickname
 	}
 	raw, _ := json.Marshal(body)
-	resp, err := testClient.Post(srvURL+"/api/instance/import?apikey=test-key",
+	resp, err := testClient.Post(srvURL+"/api/instance/import?token=test-key",
 		"application/json", strings.NewReader(string(raw)))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
@@ -35,7 +35,7 @@ func importBody(t *testing.T, srvURL, path, nickname string) (int, map[string]an
 // TestImportDirectory 端到端：含 server.jar 的目录导入成功，实例就位。
 func TestImportDirectory(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	serverDir := filepath.Join(dir, "survival")
@@ -70,7 +70,7 @@ func TestImportDirectory(t *testing.T) {
 // TestImportEulaFeature eula.txt 特征也可导入，昵称缺省用目录名。
 func TestImportEulaFeature(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	serverDir := filepath.Join(dir, "my-server")
@@ -98,7 +98,7 @@ func TestImportEulaFeature(t *testing.T) {
 // TestImportNotServer 无服务端特征的目录拒绝导入。
 func TestImportNotServer(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	plainDir := filepath.Join(dir, "plain")
@@ -118,7 +118,7 @@ func TestImportNotServer(t *testing.T) {
 // TestImportMissingDir 目录不存在拒绝。
 func TestImportMissingDir(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	code, _ := importBody(t, srv.URL, filepath.Join(t.TempDir(), "no-such-dir"), "")
 	if code != 400 {
@@ -130,7 +130,7 @@ func TestImportMissingDir(t *testing.T) {
 // TestImportDuplicateCwd 同一目录重复导入拒绝。
 func TestImportDuplicateCwd(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	serverDir := filepath.Join(dir, "dup")
@@ -154,7 +154,7 @@ func TestImportDuplicateCwd(t *testing.T) {
 // TestImportSystemDir 系统目录拒绝（validateCwd 黑名单）。
 func TestImportSystemDir(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	sysDir := "/etc"
 	if runtime.GOOS == "windows" {

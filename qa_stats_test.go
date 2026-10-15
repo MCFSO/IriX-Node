@@ -49,12 +49,12 @@ func TestInstanceStatsAPI(t *testing.T) {
 		Nickname: "指标", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	getStats := func() map[string]any {
 		req, _ := http.NewRequest(http.MethodGet,
-			srv.URL+"/api/instance/stats?uuid="+inst.InstanceUuid+"&apikey=test-key", nil)
+			srv.URL+"/api/instance/stats?uuid="+inst.InstanceUuid+"&token=test-key", nil)
 		resp, err := testClient.Do(req)
 		if err != nil {
 			t.Fatalf("请求失败: %v", err)

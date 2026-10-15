@@ -57,14 +57,14 @@ func newFileEnv(t *testing.T) *fileTestEnv {
 	}
 	inst := NewInstance("file-uuid", InstanceConfig{Nickname: "文件实例", Cwd: cwd})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	t.Cleanup(srv.Close)
 	return &fileTestEnv{
 		d:    d,
 		inst: inst,
 		cwd:  cwd,
 		base: srv.URL,
-		url:  "apikey=test-key&uuid=" + inst.InstanceUuid,
+		url:  "token=test-key&uuid=" + inst.InstanceUuid,
 	}
 }
 
@@ -392,7 +392,7 @@ func TestWriteErrorHTTPStatus(t *testing.T) {
 	}
 
 	// 参数错误（实例不存在）→ HTTP 400 + body 400
-	resp, err = http.DefaultClient.Get(e.base + "/api/instance?apikey=test-key&uuid=no-such-uuid")
+	resp, err = http.DefaultClient.Get(e.base + "/api/instance?token=test-key&uuid=no-such-uuid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestWriteErrorHTTPStatus(t *testing.T) {
 	}
 
 	// 成功响应仍为 HTTP 200
-	resp, err = http.DefaultClient.Get(e.base + "/api/overview?apikey=test-key")
+	resp, err = http.DefaultClient.Get(e.base + "/api/overview?token=test-key")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +718,7 @@ func TestFileWriteMemoryAmplification(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	req := httptest.NewRequest(http.MethodPut, "/api/files/?apikey=test-key&uuid="+inst.InstanceUuid, bytes.NewReader(payload))
+	req := httptest.NewRequest(http.MethodPut, "/api/files/?token=test-key&uuid="+inst.InstanceUuid, bytes.NewReader(payload))
 	rec := httptest.NewRecorder()
 	d.handleFileReadWrite(rec, req)
 	runtime.ReadMemStats(&after)
@@ -737,7 +737,7 @@ func TestFileWriteMemoryAmplification(t *testing.T) {
 		sizeMB, serverAlloc, amplif, maxAPIBodyBytes>>20, float64(maxAPIBodyBytes>>20)*amplif)
 
 	// 读取路径同样全量进内存
-	req = httptest.NewRequest(http.MethodPut, "/api/files/?apikey=test-key&uuid="+inst.InstanceUuid,
+	req = httptest.NewRequest(http.MethodPut, "/api/files/?token=test-key&uuid="+inst.InstanceUuid,
 		strings.NewReader(`{"target":"big.bin"}`))
 	rec = httptest.NewRecorder()
 	d.handleFileReadWrite(rec, req)
@@ -829,7 +829,7 @@ func TestInstanceCommandAndLog(t *testing.T) {
 		Cwd:          dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	if err := d.startInstance(inst); err != nil {
@@ -846,7 +846,7 @@ func TestInstanceCommandAndLog(t *testing.T) {
 	}()
 
 	// 下发命令
-	code, body := doReq(t, srv.URL+"/api/protected_instance/command?apikey=test-key&uuid="+inst.InstanceUuid+"&command=echo+hello-irix")
+	code, body := doReq(t, srv.URL+"/api/protected_instance/command?token=test-key&uuid="+inst.InstanceUuid+"&command=echo+hello-irix")
 	if code != http.StatusOK {
 		t.Fatalf("命令下发失败: HTTP %d %s", code, body)
 	}
@@ -860,7 +860,7 @@ func TestInstanceCommandAndLog(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var logText string
 	for time.Now().Before(deadline) {
-		_, logBody := doReq(t, srv.URL+"/api/protected_instance/outputlog?apikey=test-key&size=64&uuid="+inst.InstanceUuid)
+		_, logBody := doReq(t, srv.URL+"/api/protected_instance/outputlog?token=test-key&size=64&uuid="+inst.InstanceUuid)
 		var lr struct {
 			Data string `json:"data"`
 		}
@@ -880,7 +880,7 @@ func TestInstanceCommandAndLog(t *testing.T) {
 	// 未运行实例下发命令应失败
 	idle := NewInstance("idle-uuid", InstanceConfig{Nickname: "空闲", Cwd: dir})
 	d.Instances = append(d.Instances, idle)
-	_, body = doReq(t, srv.URL+"/api/protected_instance/command?apikey=test-key&command=x&uuid="+idle.InstanceUuid)
+	_, body = doReq(t, srv.URL+"/api/protected_instance/command?token=test-key&command=x&uuid="+idle.InstanceUuid)
 	json.Unmarshal(body, &resp)
 	if resp["status"] == float64(200) {
 		t.Errorf("未运行实例下发命令应失败")
@@ -965,7 +965,7 @@ func TestOrphanProcessAfterRestart(t *testing.T) {
 	inst.mu.Unlock()
 
 	// 模拟守护进程重启：新 Daemon 加载同一数据目录
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("重启加载失败: %v", err)
 	}
@@ -1007,7 +1007,7 @@ func TestAPIBodyLimit(t *testing.T) {
 	d.RegisterRoutes(mux)
 	srv := newTestServerWithHandler(limitAPIBody(mux))
 	defer srv.Close()
-	q := "?apikey=test-key&uuid=" + inst.InstanceUuid
+	q := "?token=test-key&uuid=" + inst.InstanceUuid
 
 	// 超限请求体（20 MiB > 16 MiB 上限）应被拒绝
 	oversize, _ := json.Marshal(map[string]any{"target": "big.bin", "text": strings.Repeat("A", 20<<20)})
@@ -1038,7 +1038,7 @@ func TestAPIBodyLimit(t *testing.T) {
 	}
 
 	// /upload/ 通道不受 16MiB 限制（流式落盘）
-	status, data := (&fileTestEnv{d: d, inst: inst, cwd: cwd, base: srv.URL, url: "apikey=test-key&uuid=" + inst.InstanceUuid}).
+	status, data := (&fileTestEnv{d: d, inst: inst, cwd: cwd, base: srv.URL, url: "token=test-key&uuid=" + inst.InstanceUuid}).
 		apiCall(t, http.MethodPost, "/api/files/upload?upload_dir=/up", nil)
 	if status != 200 {
 		t.Fatalf("申请上传票据失败: %v %s", status, data)

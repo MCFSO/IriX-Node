@@ -35,7 +35,7 @@ func benchClient(conns int) *http.Client {
 // BenchmarkParallelOverview 并行打概览接口。
 func BenchmarkParallelOverview(b *testing.B) {
 	_, srv := benchServer(b, 100)
-	url := srv.URL + "/api/overview?apikey=test-key"
+	url := srv.URL + "/api/overview?token=test-key"
 	client := benchClient(runtime.GOMAXPROCS(0) * 2)
 	defer client.CloseIdleConnections()
 	b.ResetTimer()
@@ -55,7 +55,7 @@ func BenchmarkParallelOverview(b *testing.B) {
 // BenchmarkParallelInstanceListDeepPage 并行深分页（1000 实例取第 10 页）。
 func BenchmarkParallelInstanceListDeepPage(b *testing.B) {
 	_, srv := benchServer(b, 1000)
-	url := srv.URL + "/api/service/remote_service_instances?apikey=test-key&page=10&page_size=20"
+	url := srv.URL + "/api/service/remote_service_instances?token=test-key&page=10&page_size=20"
 	client := benchClient(runtime.GOMAXPROCS(0) * 2)
 	defer client.CloseIdleConnections()
 	b.ResetTimer()
@@ -76,7 +76,7 @@ func BenchmarkParallelInstanceListDeepPage(b *testing.B) {
 func benchDaemon(b *testing.B, n int) *Daemon {
 	b.Helper()
 	dir := b.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	for i := 0; i < n; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))
 	}
@@ -89,7 +89,7 @@ func BenchmarkInstanceListPageSizes(b *testing.B) {
 	for _, pageSize := range []int{10, 100, 1000} {
 		b.Run(fmt.Sprintf("instances=1000_pageSize=%d", pageSize), func(b *testing.B) {
 			d := benchDaemon(b, 1000)
-			url := fmt.Sprintf("/api/service/remote_service_instances?apikey=test-key&page=1&page_size=%d", pageSize)
+			url := fmt.Sprintf("/api/service/remote_service_instances?token=test-key&page=1&page_size=%d", pageSize)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -112,7 +112,7 @@ func BenchmarkOverviewWithManyInstances(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				req := httptest.NewRequest(http.MethodGet, "/api/overview?apikey=test-key", nil)
+				req := httptest.NewRequest(http.MethodGet, "/api/overview?token=test-key", nil)
 				rec := httptest.NewRecorder()
 				d.handleOverview(rec, req)
 				if rec.Code != http.StatusOK {
@@ -136,7 +136,7 @@ func TestScaleHundredThousandInstances(t *testing.T) {
 		t.Skip("跳过大规模测试")
 	}
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	const n = 100000
 
 	build := time.Now()
@@ -161,7 +161,7 @@ func TestScaleHundredThousandInstances(t *testing.T) {
 		saveDur, float64(fi.Size())/1024/1024)
 
 	load := time.Now()
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}

@@ -37,8 +37,8 @@ GET/HEAD 等无正文请求跳过 body 包装以减少每请求分配。
 重复 I/O。已做如下优化：
 
 - **鉴权三级读取**：`accountSystem` 按「进程内缓存 → Redis → SQL」读取会话与
-  端点权限。默认部署（SQLite、未配 Redis）此前每个 API 请求要打 2~3 次 SQL
-  （`lookupSession` + `rootPasswordSet` + `loadPermissions`），命中进程内缓存后
+  端点权限。默认部署（SQLite、未配 Redis）此前每个 API 请求要打 2 次 SQL
+  （`lookupSession` + `loadPermissions`），命中进程内缓存后
   降为零查询。写路径（登出/续期/改权限/改密/删账户）会主动失效对应缓存键，
   因此「登出后立即不可访问」「权限收紧立即生效」不受 TTL 影响。
   实测（本机 16 并发）：普通账户 token 通道 2440 → 约 3500 QPS。

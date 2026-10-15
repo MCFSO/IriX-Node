@@ -66,7 +66,7 @@ func TestJavaCandidates(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho fake\n"), 0o755); err != nil {
 		t.Fatalf("创建假 java 失败: %v", err)
 	}
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.DataDir = dir
 	// 节点自管 JDK 目录
 	jdkDir := filepath.Join(dir, "jdk", "jdk-99")
@@ -124,10 +124,10 @@ func TestProbeJava(t *testing.T) {
 // TestRuntimeJavaAPI GET /api/runtime/java 响应结构。
 func TestRuntimeJavaAPI(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	resp, err := testClient.Get(srv.URL + "/api/runtime/java?apikey=test-key")
+	resp, err := testClient.Get(srv.URL + "/api/runtime/java?token=test-key")
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestJavaDetectionTimeout(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("not a program"), 0o644); err != nil {
 		t.Fatalf("写入失败: %v", err)
 	}
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.DataDir = dir
 	// 仅候选 PATH 中该假 java：直接探测单个
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

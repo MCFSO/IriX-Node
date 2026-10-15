@@ -21,7 +21,7 @@ import (
 // startTask 发起任务并轮询到 done/failed，返回最终快照。
 func startTask(t *testing.T, srvURL, path, body string) map[string]any {
 	t.Helper()
-	resp, err := testClient.Post(srvURL+path+"?apikey=test-key",
+	resp, err := testClient.Post(srvURL+path+"?token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("发起任务失败: %v", err)
@@ -47,7 +47,7 @@ func startTask(t *testing.T, srvURL, path, body string) map[string]any {
 	var last map[string]any
 	for time.Now().Before(deadline) {
 		code, res := doJSONReq(t, http.MethodGet,
-			srvURL+"/api/instance/snapshot-progress?jobId="+jobID+"&apikey=test-key")
+			srvURL+"/api/instance/snapshot-progress?jobId="+jobID+"&token=test-key")
 		if code != 200 {
 			t.Fatalf("进度查询状态码: %d", code)
 		}
@@ -88,7 +88,7 @@ func TestSnapshotEndToEnd(t *testing.T) {
 	setupServerWorld(t, world)
 	inst := NewInstance("snap-uuid", InstanceConfig{Nickname: "备份", Cwd: world})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	body := `{"uuid":"snap-uuid","daemonId":"local"}`
@@ -146,7 +146,7 @@ func TestRestoreEndToEnd(t *testing.T) {
 		Nickname: "恢复", Cwd: world, StartCommand: cmd,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	setupServerWorld(t, world)
@@ -218,7 +218,7 @@ func TestBackupsListDelete(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(world, "server.jar"), []byte("x"), 0o644)
 	inst := NewInstance("list-uuid", InstanceConfig{Nickname: "列表", Cwd: world})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 造两个备份（显式 mtime 区分新旧）
@@ -231,7 +231,7 @@ func TestBackupsListDelete(t *testing.T) {
 	_ = os.Chtimes(oldZip, time.Unix(1787216400, 0), time.Unix(1787216400, 0))
 	_ = os.Chtimes(newZip, time.Unix(1787220000, 0), time.Unix(1787220000, 0))
 
-	code, out := doJSONReq(t, http.MethodGet, srv.URL+"/api/instance/backups?uuid=list-uuid&apikey=test-key")
+	code, out := doJSONReq(t, http.MethodGet, srv.URL+"/api/instance/backups?uuid=list-uuid&token=test-key")
 	if code != 200 {
 		t.Fatalf("列表状态码: %d", code)
 	}
@@ -246,7 +246,7 @@ func TestBackupsListDelete(t *testing.T) {
 	// 删除其中一个
 	delBody := `{"paths":[` + jsonMarshal(first["path"].(string)) + `]}`
 	req, _ := http.NewRequest(http.MethodDelete,
-		srv.URL+"/api/instance/backups?uuid=list-uuid&apikey=test-key",
+		srv.URL+"/api/instance/backups?uuid=list-uuid&token=test-key",
 		strings.NewReader(delBody))
 	resp, err := testClient.Do(req)
 	if err != nil {
@@ -269,7 +269,7 @@ func TestBackupDownloadTicket(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	backupDir := d.backupsDirOf(inst.InstanceUuid)
@@ -284,7 +284,7 @@ func TestBackupDownloadTicket(t *testing.T) {
 
 	// 申请票据
 	body := `{"path":` + jsonMarshal(zipPath) + `}`
-	resp, err := testClient.Post(srv.URL+"/api/instance/backups/download?uuid="+inst.InstanceUuid+"&apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/instance/backups/download?uuid="+inst.InstanceUuid+"&token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("申请票据失败: %v", err)
@@ -315,7 +315,7 @@ func TestBackupDownloadTicket(t *testing.T) {
 
 	// 越界路径拒绝
 	bad := `{"path":` + jsonMarshal(filepath.Join(dir, "instances.json")) + `}`
-	resp2, err := testClient.Post(srv.URL+"/api/instance/backups/download?uuid="+inst.InstanceUuid+"&apikey=test-key",
+	resp2, err := testClient.Post(srv.URL+"/api/instance/backups/download?uuid="+inst.InstanceUuid+"&token=test-key",
 		"application/json", strings.NewReader(bad))
 	if err != nil {
 		t.Fatalf("越界请求失败: %v", err)
@@ -334,12 +334,12 @@ func TestRestorePathTraversal(t *testing.T) {
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	evil := filepath.Join(dir, "instances.json")
 	body := `{"uuid":"` + inst.InstanceUuid + `","archivePath":` + jsonMarshal(evil) + `}`
-	resp, err := testClient.Post(srv.URL+"/api/instance/restore?apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/instance/restore?token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)

@@ -13,9 +13,9 @@ IriX 客户端「节点」类型的本地节点守护进程，Go 语言实现。
 go build -o irix-node .       # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试（CI 必跑）
-go run . -port 12346 -data <目录> [-apikey <key>]   # 本地运行
+go run . -port 12346 -data <目录>   # 本地运行
 go run . -config config.json  # 用配置文件启动（全部启动参数可写入）
-go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局域网访问）
+go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
 ```
 
 修改代码后必须通过 `go vet ./...` 与 `go build .`。
@@ -24,7 +24,7 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 入口：flag 解析、配置文件加载与合并、配对码初始化、路由注册、`NormalizePath`/`SplitCommand` 等通用工具 |
+| `main.go` | 入口：flag 解析、配置文件加载与合并、首次启动管理员账户引导、路由注册、`NormalizePath`/`SplitCommand` 等通用工具 |
 | `config.go` | 配置文件（`config.json`）加载：`Config` 结构、`loadConfigFile`、`ensureConfigFile`（首次启动无配置时自动生成示例）、`nodeOptions` 命令行/配置文件合并（优先级：命令行显式参数 > 配置文件 > 默认值） |
 | `daemon.go` | 核心模型：`Daemon`/`Instance`/`InstanceConfig`、`instances.json` 持久化、增删改查 |
 | `instance.go` | 实例相关 API 处理器、路由注册表 `RegisterRoutes`、认证包装器 `auth` |
@@ -34,7 +34,7 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 | `download.go` | 带票据的下载/上传直连通道 `ticketStore` |
 | `overview.go` | `GET /api/overview` 主机信息 |
 | `sysinfo.go` + `sysinfo_{windows,linux,bsd,other}.go` | 跨平台系统信息采集（构建标签区分） |
-| `auth.go` | 配对码机制：生成 20 位随机码、SHA-256 哈希持久化、恒定时间比较 |
+| `auth.go` | 首次启动引导：`ensureAdminAccount` 在账户库无管理员时随机生成用户名（12 位）与密码（20 位）并 bcrypt 入库，仅显示一次 |
 | `accounts.go` | 账户管理数据面：SQL 存储（sqlite/mysql/postgres，连接池）、会话、bcrypt、Redis 热缓存与降级 |
 | `accounts_handlers.go` | 账户管理 API：登录/登出/改密/账户 CRUD/权限开关、`authenticate` 身份认证 |
 | `perm_catalog.go` | 端点权限目录：`perm()` 织入、分组、`permAllowed` 逐端点判定 |
@@ -59,8 +59,10 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 ## API 约定
 
 - 响应体统一为 MCSM 风格 `{status, data, time}`（`writeJSON`）。
-- 认证：请求携带 `?apikey=` 参数或 `X-Api-Key` 头；
-  `-apikey` 为空时校验配对码哈希（`auth.hash`）。
+- 认证：先 `POST /api/auth/login` 用账户名+密码换会话 token（30 天有效），
+  后续请求携带 `X-Auth-Token` 头 / `Authorization: Bearer` 头 / `?token=` 参数
+  （WebSocket 只能走查询参数）。直连票据通道（`/download/`、`/upload/`）免会话认证。
+  不再有 `-apikey` / `apiKey` 配置与配对码机制（v1.1.0 及更早版本才有）。
 - 路由用 Go 1.22+ 方法前缀模式注册（如 `"GET /api/instance"`），全部集中在 `RegisterRoutes`。
 - 文件路径操作必须经过 `NormalizePath` 防止 `..` 越界。
 - 实例状态常量：`StatusBusy=-1, StatusStopped=0, StatusStopping=1, StatusStarting=2, StatusRunning=3`。
@@ -68,7 +70,10 @@ go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局�
 ## 数据目录
 
 - `instances.json`：实例配置列表（`PersistedInstance`）。
-- `auth.hash`：配对码 SHA-256 哈希（首次启动生成，仅显示一次；删除后重启可重置）。
+- `accounts.db`：账户库（sqlite 默认，`-accounts-driver` 可换 mysql/postgres）；
+  库中不存在管理员账户时首次启动随机生成一个并仅显示一次凭据。凭据丢失可删除
+  账户库后重启重新生成。
+- `auth.hash`：v1.1.0 及更早版本的配对码哈希，已废弃、不再读写。
 
 ## 配置文件
 

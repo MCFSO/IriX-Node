@@ -13,9 +13,18 @@
 | 项 | 约定 |
 |----|------|
 | 基础地址 | `http://<host>:<port>`（TLS 开启时为 `https://…`） |
-| API 认证 | `?apikey=<key>` 查询参数，或请求头 `X-Api-Key: <key>`。`-apikey` 未配置时校验配对码（同字段）。认证失败统一 `403 API 密钥无效` |
+| API 认证 | **账户会话 token**：先 `POST /api/auth/login` 换取 token，随后需要认证的请求三选一携带——请求头 `X-Auth-Token: <token>`、请求头 `Authorization: Bearer <token>`、查询参数 `?token=<token>`（本文示例统一写作 `?token=<token>`；URL 已有其它查询参数时用 `&token=<token>`；**WebSocket 只能用 `?token=`**）。token 有效期 30 天，剩余不足一半时服务端自动滑动续期。未认证 / 会话过期统一 `403 未认证或会话已过期（请先登录 POST /api/auth/login）` |
 | 请求体 | `application/json; charset=utf-8`（除特别说明外） |
 | 请求体上限 | 16 MiB（`/upload/` 直连通道、FRP 二进制上传除外） |
+
+认证相关要点：
+
+- **登录 / 退出**：`POST /api/auth/login`（公开，无需认证），body `{"username":"…","password":"…"}` → `{status, data:{token, username, isAdmin, expiresAt}, time}`；用户名或密码错误返回 `401 用户名或密码错误`。`POST /api/auth/logout` 注销当前 token。
+- **首次启动引导**：账户库（默认 `{data}/accounts.db`）中没有任何管理员账户时，服务端用 `crypto/rand` 随机生成 12 位用户名与 20 位密码，`bcrypt` 入库，并只在启动日志显示一次（凭据丢失可删除账户库后重启重新生成）。
+- **鉴权**：管理员（`isAdmin=true`）不受端点权限开关限制；普通账户按端点权限目录逐条判定，无权访问时返回 `403 权限不足: 当前账户无权访问 <端点模式>`。
+- **示例 URL**：`GET /api/cluster/status?token=<token>`；`GET /api/cluster/transfer?jobId=…&token=<token>`（已有查询参数时用 `&` 追加）。
+- **直连票据通道**：`GET /download/{票据密码}/…`、`POST /upload/{票据密码}` 免会话认证（凭票据，10 分钟有效，见附录 B）。
+- **历史机制（已移除）**：本节点自 v1.2.0 起不再接受 MCSM 风格的 apikey / 配对码认证——`-apikey` 参数、配置文件 `apiKey` 字段、`{data}/auth.hash` 文件以及 `?apikey=` / `X-Api-Key` 认证通道均已不存在（仅 v1.1.0 及更早版本有）。响应体 `{status,data,time}` 格式不变。
 
 ### 0.2 统一响应信封（MCSM 风格）
 
@@ -37,9 +46,11 @@
 { "status": 401, "data": "认证失败", "time": 1740000000123 }
 ```
 
-常见 HTTP 状态码：`400`（参数/格式错误）、`401`（认证失败/未授权/限速）、`403`（API 密钥无效 / vault 门禁）、`429`（挑战池已满）、`500`（内部错误）、`503`（票据已满）。
+常见 HTTP 状态码：`400`（参数/格式错误）、`401`（登录失败 / vault 解锁认证失败 / 未授权 / 限速）、`403`（未认证或会话已过期 / 权限不足 / vault 门禁）、`429`（挑战池已满）、`500`（内部错误）、`503`（票据已满）。
 
-### 0.4 会话令牌机制（Vault 解锁后）
+### 0.4 Vault 解锁会话令牌（`X-Vault-Token`）
+
+> 本节讲的是 **Vault 解锁会话**，与 0.1 的**账户会话 token** 是两套相互独立的凭据：外层账户认证走会话 token，访问保险库数据面还要额外带上有效的 Vault 解锁会话。
 
 - 解锁/恢复成功后，令牌在**响应体 `data.sessionToken`** 中返回（不在 HTTP header，也不在 query string）。
 - 客户端后续请求必须把令牌放进请求头 **`X-Vault-Token: <sessionToken>`**。
@@ -60,7 +71,7 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 | 已锁定 / 无有效解锁会话 / 仅恢复会话 | `403 vault locked` |
 | 已解锁且有有效解锁会话 | 放行，并滑动会话空闲超时 |
 
-**结论**：一旦启用 Vault 并完成初始化，前端调用任何非 Vault API（集群、FRP、文件等）都必须同时携带 `apikey` 与 `X-Vault-Token`（解锁会话）。且 vaultGate 先于 `auth` 执行，因此在「已启用但未解锁」状态下，数据面请求（即使不带 apikey）会先收到 `403 vault locked` 而不是 `403 API 密钥无效`。
+**结论**：一旦启用 Vault 并完成初始化，前端调用任何非 Vault API（集群、FRP、文件等）都必须同时携带**账户会话 token**（`X-Auth-Token` 头 / `Authorization: Bearer` 头 / `?token=` 参数，见 0.1）与 **`X-Vault-Token`**（Vault 解锁会话）。且 vaultGate 先于 `auth` 执行，因此在「已启用但未解锁」状态下，数据面请求（即使不带 token）会先收到 `403 vault locked` 而不是 `403 未认证或会话已过期（请先登录 POST /api/auth/login）`。
 
 ---
 
@@ -68,44 +79,46 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 
 | 方法 | 路径 | 认证 | 需要 X-Vault-Token | 说明 |
 |------|------|------|-------------------|------|
-| GET | `/api/vault/status` | apikey | 否（可选，携带则返回会话信息） | 保险库状态 |
-| POST | `/api/vault/init` | apikey | 否 | 首次初始化 |
-| POST | `/api/vault/totp/verify` | apikey | 是（initToken 或会话） | 确认 TOTP 绑定 |
-| POST | `/api/vault/totp/reset` | apikey | 是（解锁/恢复会话） | 重绑 TOTP |
-| POST | `/api/vault/challenge` | apikey | 否 | 签发一次性挑战 |
-| POST | `/api/vault/cert` | apikey | 是（initToken 或会话） | 绑定证书 |
-| POST | `/api/vault/unlock` | apikey | 否 | 三重认证解锁 |
-| POST | `/api/vault/lock` | apikey | 是（解锁会话） | 立即锁定 |
-| POST | `/api/vault/password` | apikey | 是（解锁/恢复会话） | 修改密码 |
-| POST | `/api/vault/recovery` | apikey | 否 | 恢复令牌建立恢复会话 |
-| POST | `/api/vault/user/add` | apikey | 是（解锁会话） | 新增用户 |
-| POST | `/api/vault/user/remove` | apikey | 是（解锁会话） | 删除用户 |
-| GET | `/api/vault/users` | apikey | 是（解锁会话） | 用户列表 |
-| POST | `/api/vault/migrate` | apikey | 是（解锁会话） | 启动/续跑迁移 |
-| GET | `/api/vault/migrate/status` | apikey | 是（解锁会话） | 迁移进度 |
-| POST | `/api/vault/backup` | apikey | 是（解锁会话） | 导出加密备份包（zip 二进制） |
-| GET | `/api/cluster/status` | apikey | 受 vaultGate 约束 | 集群状态 |
-| POST | `/api/cluster/heartbeat` | apikey | 受 vaultGate 约束 | 上报心跳 |
-| POST | `/api/cluster/events` | apikey | 受 vaultGate 约束 | 上报事件 |
-| GET | `/api/cluster/peers` | apikey | 受 vaultGate 约束 | 对等节点列表 |
-| POST | `/api/cluster/transfer` | apikey | 受 vaultGate 约束 | 发起节点间拉取 |
-| GET | `/api/cluster/transfer` | apikey | 受 vaultGate 约束 | 查询拉取进度 |
-| GET | `/api/cluster/files/list` | apikey | 受 vaultGate 约束 | 同步区目录列表 |
-| POST | `/api/cluster/files/mkdir` | apikey | 受 vaultGate 约束 | 同步区建目录 |
-| DELETE | `/api/cluster/files` | apikey | 受 vaultGate 约束 | 同步区删除 |
-| POST | `/api/cluster/files/download` | apikey | 受 vaultGate 约束 | 同步区下载票据 |
-| POST | `/api/cluster/files/upload` | apikey | 受 vaultGate 约束 | 同步区上传票据 |
-| GET | `/api/cluster/sync/list` | apikey | 受 vaultGate 约束 | 同步区递归快照 |
-| GET | `/api/instance/sync/list` | apikey | 受 vaultGate 约束 | 实例目录递归快照 |
-| GET | `/api/frp/status` | apikey | 受 vaultGate 约束 | frpc 状态与隧道列表 |
-| POST | `/api/frp/tunnels` | apikey | 受 vaultGate 约束 | 创建隧道 |
-| POST | `/api/frp/tunnels/{id}/start` | apikey | 受 vaultGate 约束 | 启动隧道 |
-| POST | `/api/frp/tunnels/{id}/stop` | apikey | 受 vaultGate 约束 | 停止隧道 |
-| DELETE | `/api/frp/tunnels/{id}` | apikey | 受 vaultGate 约束 | 删除隧道 |
-| GET | `/api/frp/tunnels/{id}/logs` | apikey | 受 vaultGate 约束 | 隧道日志 |
-| POST | `/api/frp/binary` | apikey | 受 vaultGate 约束 | 上传 frpc 二进制 |
+| GET | `/api/vault/status` | token | 否（可选，携带则返回会话信息） | 保险库状态 |
+| POST | `/api/vault/init` | token | 否 | 首次初始化 |
+| POST | `/api/vault/totp/verify` | token | 是（initToken 或会话） | 确认 TOTP 绑定 |
+| POST | `/api/vault/totp/reset` | token | 是（解锁/恢复会话） | 重绑 TOTP |
+| POST | `/api/vault/challenge` | token | 否 | 签发一次性挑战 |
+| POST | `/api/vault/cert` | token | 是（initToken 或会话） | 绑定证书 |
+| POST | `/api/vault/unlock` | token | 否 | 三重认证解锁 |
+| POST | `/api/vault/lock` | token | 是（解锁会话） | 立即锁定 |
+| POST | `/api/vault/password` | token | 是（解锁/恢复会话） | 修改密码 |
+| POST | `/api/vault/recovery` | token | 否 | 恢复令牌建立恢复会话 |
+| POST | `/api/vault/user/add` | token | 是（解锁会话） | 新增用户 |
+| POST | `/api/vault/user/remove` | token | 是（解锁会话） | 删除用户 |
+| GET | `/api/vault/users` | token | 是（解锁会话） | 用户列表 |
+| POST | `/api/vault/migrate` | token | 是（解锁会话） | 启动/续跑迁移 |
+| GET | `/api/vault/migrate/status` | token | 是（解锁会话） | 迁移进度 |
+| POST | `/api/vault/backup` | token | 是（解锁会话） | 导出加密备份包（zip 二进制） |
+| GET | `/api/cluster/status` | token | 受 vaultGate 约束 | 集群状态 |
+| POST | `/api/cluster/heartbeat` | token | 受 vaultGate 约束 | 上报心跳 |
+| POST | `/api/cluster/events` | token | 受 vaultGate 约束 | 上报事件 |
+| GET | `/api/cluster/peers` | token | 受 vaultGate 约束 | 对等节点列表 |
+| POST | `/api/cluster/transfer` | token | 受 vaultGate 约束 | 发起节点间拉取 |
+| GET | `/api/cluster/transfer` | token | 受 vaultGate 约束 | 查询拉取进度 |
+| GET | `/api/cluster/files/list` | token | 受 vaultGate 约束 | 同步区目录列表 |
+| POST | `/api/cluster/files/mkdir` | token | 受 vaultGate 约束 | 同步区建目录 |
+| DELETE | `/api/cluster/files` | token | 受 vaultGate 约束 | 同步区删除 |
+| POST | `/api/cluster/files/download` | token | 受 vaultGate 约束 | 同步区下载票据 |
+| POST | `/api/cluster/files/upload` | token | 受 vaultGate 约束 | 同步区上传票据 |
+| GET | `/api/cluster/sync/list` | token | 受 vaultGate 约束 | 同步区递归快照 |
+| GET | `/api/instance/sync/list` | token | 受 vaultGate 约束 | 实例目录递归快照 |
+| GET | `/api/frp/status` | token | 受 vaultGate 约束 | frpc 状态与隧道列表 |
+| POST | `/api/frp/tunnels` | token | 受 vaultGate 约束 | 创建隧道 |
+| POST | `/api/frp/tunnels/{id}/start` | token | 受 vaultGate 约束 | 启动隧道 |
+| POST | `/api/frp/tunnels/{id}/stop` | token | 受 vaultGate 约束 | 停止隧道 |
+| DELETE | `/api/frp/tunnels/{id}` | token | 受 vaultGate 约束 | 删除隧道 |
+| GET | `/api/frp/tunnels/{id}/logs` | token | 受 vaultGate 约束 | 隧道日志 |
+| POST | `/api/frp/binary` | token | 受 vaultGate 约束 | 上传 frpc 二进制 |
 
 > 上表「受 vaultGate 约束」= Vault 未启用时按普通 API 处理；Vault 启用并初始化后，还需要有效解锁会话（`X-Vault-Token`），否则 `403 vault locked` 等。
+>
+> 「认证」列指**外层账户会话 token**（`X-Auth-Token` / `Authorization: Bearer` / `?token=`，见 0.1），与 Vault 解锁会话（`X-Vault-Token`）是两套独立凭据：访问保险库 API 时外层仍走会话 token，保险库自身鉴权才用 `X-Vault-Token`。
 
 ---
 
@@ -597,7 +610,7 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 
 ## 3. 集群端点
 
-> 所有集群端点都注册在 `registerClusterRoutes`（`cluster.go`），路径前缀为 `/api/cluster/` 与 `/api/instance/sync/list`。它们受 vaultGate 约束（见 0.5）。认证仍走 `apikey` / `X-Api-Key`。
+> 所有集群端点都注册在 `registerClusterRoutes`（`cluster.go`），路径前缀为 `/api/cluster/` 与 `/api/instance/sync/list`。它们受 vaultGate 约束（见 0.5）。认证仍走外层账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`）。
 
 ### 3.1 GET /api/cluster/status
 
@@ -705,7 +718,7 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 | `instanceId` | string | 是 | 集群实例全局 id |
 | `source` | object | 是 | 源节点 |
 | `source.address` | string | 是 | 源节点地址（http/https，缺省 scheme 时自动补 `http://`） |
-| `source.apikey` | string | 否 | 源节点 apikey（拼到远端查询参数） |
+| `source.token` | string | 否 | 源节点的**账户会话 token**（后端拼到远端查询参数：`?token=`，已有查询参数时用 `&token=`）。仅当来源是 **MCSM 面板节点**时才填该面板节点的 apikey——本节点自 v1.2.0 起不再使用 apikey 认证 |
 | `source.uuid` | string | 是 | 源节点上实例 uuid |
 | `source.daemonId` | string | 否 | 源守护进程 id |
 | `dest` | string | 否 | 本地同步区目标目录（如 `/mirrors/i-abcd`，空则同步区根） |
@@ -713,7 +726,7 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 ```json
 {
   "instanceId": "i-abcd",
-  "source": { "address": "http://192.168.1.6:12346", "apikey": "", "uuid": "…", "daemonId": "…" },
+  "source": { "address": "http://192.168.1.6:12346", "token": "", "uuid": "…", "daemonId": "…" },
   "dest": "/mirrors/i-abcd"
 }
 ```
@@ -724,7 +737,7 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 { "jobId": "a1b2…（UUID v4）" }
 ```
 
-- 后端执行流程（供前端理解进度）：申请远端 `/api/instance/snapshot` → 轮询 `/api/instance/snapshot-progress` → 申请 `/api/instance/backups/download` 票据 → 直连 `/download/{password}/{fileName}` 下载 zip → 解压到 `dest`。
+- 后端执行流程（供前端理解进度）：携带 `source.token` 申请远端 `/api/instance/snapshot`（`?token=`）→ 轮询 `/api/instance/snapshot-progress`（`&token=`）→ 申请 `/api/instance/backups/download` 票据 → 直连 `/download/{password}/{fileName}` 下载 zip → 解压到 `dest`。
 - **SSRF 安全限制**：`source.address` 仅允许 http/https；拒绝环回、未指定、链路本地（含 169.254.x.x 云元数据）、组播、广播、本机自身，以及 RFC1918 内网地址（10/8、172.16/12、192.168/16、IPv6 fc00::/7）。内网直传需服务端 `-transfer-allow-cidr` 显式放行；重定向与远端返回的下载地址逐跳校验。
 - 错误：`400 缺少 instanceId/source.address/source.uuid 参数`；`400` SSRF 拒绝消息（如 `禁止访问内网地址…`）；`400` `dest` 路径错误。
 
@@ -1015,8 +1028,8 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 |------|------|------|------|------|
 | `node` | string | 是 | — | frps 服务器地址 |
 | `serverPort` | number | 否 | — | frps 端口（>0 时写入 `serverPort`） |
-| `token` | string | 否 | — | 认证 token（写入 `auth.token`） |
-| `user` | string | 否 | — | 认证用户名（写入 `auth.user`，sakura 用） |
+| `token` | string | 否 | — | 隧道服务商（openfrp/sakura）的认证 token（写入 frpc 配置 `auth.token`；与本节点 API 会话 token 无关） |
+| `user` | string | 否 | — | 隧道服务商认证用户名（写入 frpc 配置 `auth.user`，sakura 用） |
 | `name` | string | 否 | 隧道 `name` → `"tunnel"` | 代理名 |
 | `localPort` | number | 是 | — | 本地服务端口 |
 | `remotePort` | number | 否 | — | 远程端口（>0 时写入 `remotePort`） |
@@ -1151,4 +1164,5 @@ vaultGate 拦截**除 `/api/vault/*`、`/api/overview`、`/api/load` 以外的�
 | 同步区上传 | `POST /api/cluster/files/upload {upload_dir}` | `POST http://<addr>/upload/<password>`（multipart `file`） |
 
 - 票据 10 分钟过期，全局上限 10000。
+- 直连调用**免会话认证**（凭票据即可）；但**申请票据**的接口本身仍需外层账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`），并受 vaultGate 约束。
 - 集群下载票据是目录范围票据（可下载同步区任意文件，兼容 `/mirrors/...` 前缀）；实例级下载票据绑定单文件。

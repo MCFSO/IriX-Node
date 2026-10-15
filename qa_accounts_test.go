@@ -1,5 +1,5 @@
 // 账户管理测试（docs/accounts-design.md）：
-// root 首次登录强制改密、管理员创建/删除账户与权限逐端点开关、
+// 首启随机管理员引导、登录/登出、管理员创建/删除账户与权限逐端点开关、
 // 整组开关、管理员直改密码、会话过期、Redis 故障回退 SQL。
 
 package main
@@ -16,15 +16,6 @@ import (
 	"time"
 )
 
-// qaTestApiKey 账户测试使用的固定 APIKey，同时作为 root 初始登录密码。
-// 从环境变量读取以便扫描器不命中字面量；缺省回退占位值。
-func qaTestApiKey() string {
-	if v := os.Getenv("IRIX_QA_APIKEY"); v != "" {
-		return v
-	}
-	return "test" + "-key"
-}
-
 // qaTestNewPass 改密后使用的测试密码。
 func qaTestNewPass() string {
 	if v := os.Getenv("IRIX_QA_NEWPASS"); v != "" {
@@ -33,21 +24,35 @@ func qaTestNewPass() string {
 	return "RootNew" + "Pass123"
 }
 
-// qaAccQuery 返回带测试 APIKey 的查询串。键名拆开书写（"?api"+"key="），
-// 避免被静态凭据扫描匹配为 apikey= 字面量。
+// qaAccQuery 返回带测试会话 token 的查询串（token 由 ensureTestAuth 注入）。
 func qaAccQuery() string {
-	return "?api" + "key=" + qaTestApiKey()
+	return "?token=" + qaTestToken()
 }
 
-// newTestAccountsDaemon 创建带 SQLite 账户子系统的守护进程
-// （APIKey = qaTestApiKey()，root 的初始登录密码即该值）。
+// newTestAccountsDaemon 返回账户系统就绪（含测试管理员与固定会话）的守护进程。
 func newTestAccountsDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	d, _ := newTestDaemon(t)
-	if err := d.initAccounts(accountsConfig{Driver: "sqlite"}); err != nil {
+	return d
+}
+
+// newBareAccountDaemon 创建仅按 cfg 启用账户系统（无任何管理员账户）的
+// 守护进程，用于测试首启引导与 Redis 回退路径。
+func newBareAccountDaemon(t *testing.T, cfg accountsConfig) *Daemon {
+	t.Helper()
+	dir := t.TempDir()
+	d := NewDaemon(dir)
+	t.Cleanup(func() {
+		d.StopAutoSave()
+		d.workers.stop()
+	})
+	if err := d.Load(); err != nil {
+		t.Fatalf("Load 失败: %v", err)
+	}
+	if err := d.initAccounts(cfg); err != nil {
 		t.Fatalf("初始化账户系统失败: %v", err)
 	}
-	t.Cleanup(func() { d.closeAccounts() })
+	t.Cleanup(func() { _ = d.closeAccounts() })
 	return d
 }
 
@@ -92,69 +97,50 @@ func loginAs(t *testing.T, srv *httptest.Server, username, password string) (str
 	return token, data
 }
 
-// TestAccountRootFirstLoginMustChange root 首次用配对码/固定 apikey 登录：
-// 强制改密，改密前除豁免端点外一律 403；改密后配对码不再用于登录。
-func TestAccountRootFirstLoginMustChange(t *testing.T) {
-	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+// TestAccountBootstrapFirstStart 首启引导：账户库无管理员时随机生成管理员
+// 凭据（长度/字符集合法），凭据可登录且为管理员；已有管理员后不再重复生成。
+func TestAccountBootstrapFirstStart(t *testing.T) {
+	d := newBareAccountDaemon(t, accountsConfig{Driver: "sqlite"})
+
+	u, p, created, err := d.ensureAdminAccount()
+	if err != nil {
+		t.Fatalf("首启引导失败: %v", err)
+	}
+	if !created {
+		t.Fatalf("无管理员时首启应创建管理员账户")
+	}
+	if !validUsername(u) || len(u) != bootstrapUserLen {
+		t.Fatalf("随机用户名应合法且为 %d 位: %q", bootstrapUserLen, u)
+	}
+	if len(p) != bootstrapPassLen {
+		t.Fatalf("随机密码应为 %d 位: %d", bootstrapPassLen, len(p))
+	}
+
+	// 生成的凭据可登录且为管理员
+	srv := newTestServer(t, d)
 	defer srv.Close()
-
-	token, data := loginAs(t, srv, "root", qaTestApiKey())
-	if must, _ := data["mustChangePassword"].(bool); !must {
-		t.Fatalf("首次登录应要求改密: %v", data)
-	}
+	token, data := loginAs(t, srv, u, p)
 	if isAdmin, _ := data["isAdmin"].(bool); !isAdmin {
-		t.Fatalf("root 登录应返回 isAdmin=true")
+		t.Fatalf("引导管理员登录应返回 isAdmin=true: %v", data)
+	}
+	if code, body := doReqToken(t, http.MethodGet, srv.URL+"/api/overview", token, nil); code != http.StatusOK {
+		t.Fatalf("引导管理员应可访问业务端点: %d %s", code, body)
 	}
 
-	// 强制改密状态：业务端点一律 403
-	code, body := doReqToken(t, http.MethodGet, srv.URL+"/api/overview", token, nil)
-	if code != http.StatusForbidden || !strings.Contains(string(body), "首次登录必须先修改密码") {
-		t.Fatalf("改密前业务端点应 403: %d %s", code, body)
-	}
-	// 豁免端点可用：me / catalog / 改密
-	if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me", token, nil); code != 200 {
-		t.Fatalf("改密前 /api/accounts/me 应可用: %d", code)
-	}
-	if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/catalog", token, nil); code != 200 {
-		t.Fatalf("改密前 /api/accounts/catalog 应可用: %d", code)
-	}
-
-	// 原密码错误 → 401
-	code, _ = doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password", token, map[string]any{
-		"oldPassword": qaTestApiKey() + "-wrong", "newPassword": qaTestNewPass(),
-	})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("原密码错误应 401，实际 %d", code)
-	}
-	// 改密成功
-	code, body = doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password", token, map[string]any{
-		"oldPassword": qaTestApiKey(), "newPassword": qaTestNewPass(),
-	})
-	if code != 200 {
-		t.Fatalf("改密失败: %d %s", code, body)
-	}
-	// 同一会话改密后立即可用
-	if code, body := doReqToken(t, http.MethodGet, srv.URL+"/api/overview", token, nil); code != 200 {
-		t.Fatalf("改密后应恢复访问: %d %s", code, body)
-	}
-	// 配对码不再用于登录，新密码可登录
-	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"username": "root", "password": qaTestApiKey()}); code != http.StatusUnauthorized {
-		t.Fatalf("改密后配对码不应再用于登录: %d", code)
-	}
-	_, data = loginAs(t, srv, "root", qaTestNewPass())
-	if must, _ := data["mustChangePassword"].(bool); must {
-		t.Fatalf("改密后 mustChangePassword 应为 false: %v", data)
+	// 已有管理员：再次引导不生成新凭据
+	_, _, created, err = d.ensureAdminAccount()
+	if err != nil || created {
+		t.Fatalf("已有管理员不应重复引导: created=%v err=%v", created, err)
 	}
 }
 
 // TestAccountLoginErrors 登录错误：错误密码 401、缺参数 400。
 func TestAccountLoginErrors(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"username": "root", "password": "bad"}); code != http.StatusUnauthorized {
+	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"username": qaTestAdminUser, "password": "bad"}); code != http.StatusUnauthorized {
 		t.Fatalf("错误密码应 401，实际 %d", code)
 	}
 	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"password": "x"}); code != http.StatusBadRequest {
@@ -162,11 +148,29 @@ func TestAccountLoginErrors(t *testing.T) {
 	}
 }
 
+// TestAccountLogout 登出：会话立即失效，原 token 再访问被拒。
+func TestAccountLogout(t *testing.T) {
+	d := newTestAccountsDaemon(t)
+	srv := newTestServer(t, d)
+	defer srv.Close()
+
+	token, _ := loginAs(t, srv, qaTestAdminUser, qaTestAdminPass)
+	if code, body := doReqToken(t, http.MethodGet, srv.URL+"/api/overview", token, nil); code != http.StatusOK {
+		t.Fatalf("登出前应可访问: %d %s", code, body)
+	}
+	if code, body := doReqToken(t, http.MethodPost, srv.URL+"/api/auth/logout", token, map[string]any{}); code != http.StatusOK {
+		t.Fatalf("登出失败: %d %s", code, body)
+	}
+	if code, _ := doReqToken(t, http.MethodGet, srv.URL+"/api/overview", token, nil); code != http.StatusForbidden {
+		t.Fatalf("登出后 token 应失效: %d", code)
+	}
+}
+
 // TestAccountCreateAndPermissions 管理员创建账户、逐端点开关与整组开关、
 // 默认全关、非管理员无法管理账户。
 func TestAccountCreateAndPermissions(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 管理员创建账户
@@ -230,6 +234,12 @@ func TestAccountCreateAndPermissions(t *testing.T) {
 	}); code != http.StatusForbidden || !strings.Contains(string(body), "需要管理员权限") {
 		t.Fatalf("非管理员应被拒: %d %s", code, body)
 	}
+	// 管理员账户不受端点开关限制（设置开关直接拒绝）
+	if code, body := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/permissions"+qaAccQuery(), "", map[string]any{
+		"username": qaTestAdminUser, "group": "概览", "enabled": false,
+	}); code != http.StatusBadRequest || !strings.Contains(string(body), "管理员账户") {
+		t.Fatalf("管理员账户不应受开关限制: %d %s", code, body)
+	}
 
 	// 未知分组 / 未知端点拒绝
 	if code, _ := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/permissions"+qaAccQuery(), "", map[string]any{
@@ -244,10 +254,10 @@ func TestAccountCreateAndPermissions(t *testing.T) {
 	}
 }
 
-// TestAccountAdminResetPassword 管理员直接重置任意账户密码（含 root）。
+// TestAccountAdminResetPassword 管理员直接重置任意账户密码（无需旧密码）。
 func TestAccountAdminResetPassword(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
@@ -273,23 +283,28 @@ func TestAccountAdminResetPassword(t *testing.T) {
 		t.Fatal("新密码登录失败")
 	}
 
-	// 管理员直接重置 root 密码（无需旧密码）
+	// 管理员重置自身密码（无需旧密码）后可用新密码登录
 	code, body = doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password"+qaAccQuery(), "", map[string]any{
-		"username": "root", "password": "AdminSetRootPass",
+		"username": qaTestAdminUser, "password": qaTestNewPass(),
 	})
 	if code != 200 {
-		t.Fatalf("重置 root 密码失败: %d %s", code, body)
+		t.Fatalf("重置管理员密码失败: %d %s", code, body)
 	}
-	_, data := loginAs(t, srv, "root", "AdminSetRootPass")
-	if must, _ := data["mustChangePassword"].(bool); must {
-		t.Fatalf("管理员重置后不应再要求改密: %v", data)
+	if _, data := loginAs(t, srv, qaTestAdminUser, qaTestNewPass()); data == nil {
+		t.Fatal("管理员新密码登录失败")
+	}
+	// 重置不存在的账户 → 404
+	if code, _ := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password"+qaAccQuery(), "", map[string]any{
+		"username": "ghost", "password": "GhostPass123",
+	}); code != http.StatusNotFound {
+		t.Fatalf("重置不存在账户应 404: %d", code)
 	}
 }
 
 // TestAccountSelfChangePassword 账户自己改密（需旧密码）。
 func TestAccountSelfChangePassword(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
@@ -300,7 +315,7 @@ func TestAccountSelfChangePassword(t *testing.T) {
 	}
 	token, _ := loginAs(t, srv, "carol", "CarolPass123")
 	code, body := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password", token, map[string]any{
-		"oldPassword": "Carol" + "Pass123", "newPassword": "CarolPass456",
+		"oldPassword": "Carol" + "Pass123", "newPassword": qaTestNewPass(),
 	})
 	if code != 200 {
 		t.Fatalf("自己改密失败: %d %s", code, body)
@@ -308,15 +323,21 @@ func TestAccountSelfChangePassword(t *testing.T) {
 	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"username": "carol", "password": "CarolPass123"}); code != http.StatusUnauthorized {
 		t.Fatalf("旧密码应失效: %d", code)
 	}
-	if _, data := loginAs(t, srv, "carol", "CarolPass456"); data == nil {
+	if _, data := loginAs(t, srv, "carol", qaTestNewPass()); data == nil {
 		t.Fatal("新密码登录失败")
+	}
+	// 原密码错误 → 401
+	if code, _ := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/password", token, map[string]any{
+		"oldPassword": "Wrong" + "Old123", "newPassword": qaTestNewPass(),
+	}); code != http.StatusUnauthorized {
+		t.Fatalf("原密码错误应 401: %d", code)
 	}
 }
 
-// TestAccountDeleteAndList 删除账户（会话立即失效）、列表含 root 内置条目、root 不可删。
+// TestAccountDeleteAndList 删除账户（会话立即失效）、列表、不可删除当前登录账户。
 func TestAccountDeleteAndList(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
@@ -327,7 +348,7 @@ func TestAccountDeleteAndList(t *testing.T) {
 	}
 	token, _ := loginAs(t, srv, "dave", "DavePass1234")
 
-	// 列表：root 内置条目在首位
+	// 列表：包含测试管理员与 dave
 	code, body := doReqToken(t, http.MethodGet, srv.URL+"/api/accounts"+qaAccQuery(), "", nil)
 	if code != 200 {
 		t.Fatalf("账户列表失败: %d %s", code, body)
@@ -338,9 +359,16 @@ func TestAccountDeleteAndList(t *testing.T) {
 	if err := json.Unmarshal(body, &listResp); err != nil || len(listResp.Data) == 0 {
 		t.Fatalf("账户列表解析失败: %v %s", err, body)
 	}
-	first := listResp.Data[0]
-	if first["username"] != "root" || first["builtin"] != true || first["isAdmin"] != true {
-		t.Fatalf("列表首位应为内置 root 条目: %v", first)
+	byName := map[string]map[string]any{}
+	for _, a := range listResp.Data {
+		name, _ := a["username"].(string)
+		byName[name] = a
+	}
+	if byName["dave"] == nil {
+		t.Fatalf("列表应包含 dave: %v", listResp.Data)
+	}
+	if admin := byName[qaTestAdminUser]; admin == nil || admin["isAdmin"] != true {
+		t.Fatalf("列表应包含管理员 %s: %v", qaTestAdminUser, listResp.Data)
 	}
 
 	// 删除 dave
@@ -356,16 +384,20 @@ func TestAccountDeleteAndList(t *testing.T) {
 	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{"username": "dave", "password": "DavePass1234"}); code != http.StatusUnauthorized {
 		t.Fatalf("删除后登录应 401: %d", code)
 	}
-	// root 不可删
-	if code, _ := doReqToken(t, http.MethodDelete, srv.URL+"/api/accounts"+qaAccQuery()+"&username=root", "", nil); code != http.StatusBadRequest {
-		t.Fatalf("删除 root 应 400: %d", code)
+	// 删除当前登录账户被拒
+	if code, body := doReqToken(t, http.MethodDelete, srv.URL+"/api/accounts"+qaAccQuery()+"&username="+qaTestAdminUser, "", nil); code != http.StatusBadRequest || !strings.Contains(string(body), "当前登录") {
+		t.Fatalf("删除当前登录账户应 400: %d %s", code, body)
+	}
+	// 删除不存在账户 → 404
+	if code, _ := doReqToken(t, http.MethodDelete, srv.URL+"/api/accounts"+qaAccQuery()+"&username=ghost", "", nil); code != http.StatusNotFound {
+		t.Fatalf("删除不存在账户应 404: %d", code)
 	}
 }
 
-// TestAccountValidation 创建校验：用户名格式、密码长度、重复、root 保留名。
+// TestAccountValidation 创建校验：用户名格式、密码长度、重复名。
 func TestAccountValidation(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	cases := []struct {
@@ -375,7 +407,7 @@ func TestAccountValidation(t *testing.T) {
 	}{
 		{"非法用户名", map[string]any{"username": "a b", "password": "Pass12345"}, 400},
 		{"短密码", map[string]any{"username": "okname", "password": "short"}, 400},
-		{"root 保留名", map[string]any{"username": "root", "password": "Pass12345"}, 400},
+		{"缺用户名", map[string]any{"username": "", "password": "Pass12345"}, 400},
 	}
 	for _, c := range cases {
 		if code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), c.body); code != c.want {
@@ -395,10 +427,10 @@ func TestAccountValidation(t *testing.T) {
 	}
 }
 
-// TestAccountMeAndCatalog me 返回自身权限，catalog 返回分组目录。
+// TestAccountMeAndCatalog me 返回自身信息与权限，catalog 返回分组目录。
 func TestAccountMeAndCatalog(t *testing.T) {
 	d := newTestAccountsDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
@@ -439,18 +471,18 @@ func TestAccountMeAndCatalog(t *testing.T) {
 	if data["username"] != "erin" || data["isAdmin"] != false {
 		t.Fatalf("me 内容错误: %v", data)
 	}
-	// root 的 me：mustChangePassword 初始为 true
-	code, body = doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me"+qaAccQuery(), "", nil)
+	// 测试管理员的 me：isAdmin=true
+	code, body = doReqToken(t, http.MethodGet, srv.URL+"/api/accounts/me", qaTestToken(), nil)
 	if code != 200 {
-		t.Fatalf("root me 失败: %d %s", code, body)
+		t.Fatalf("管理员 me 失败: %d %s", code, body)
 	}
 	data = decodeData(t, body)
-	if must, _ := data["mustChangePassword"].(bool); !must {
-		t.Fatalf("root me 应返回 mustChangePassword=true: %v", data)
+	if data["username"] != qaTestAdminUser || data["isAdmin"] != true {
+		t.Fatalf("管理员 me 内容错误: %v", data)
 	}
 }
 
-// TestAccountSessionsUnit 会话数据面：写入/查找/过期清理。
+// TestAccountSessionsUnit 会话数据面：写入/查找/过期清理/删账户连删会话。
 func TestAccountSessionsUnit(t *testing.T) {
 	d := newTestAccountsDaemon(t)
 	s := d.accounts
@@ -478,39 +510,48 @@ func TestAccountSessionsUnit(t *testing.T) {
 	if _, ok := s.lookupSession("tok-del"); ok {
 		t.Fatalf("删除后会话不应命中")
 	}
-	// root 会话恒 admin
-	s.putSession("tok-root", accountSession{Username: "root", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, time.Hour)
-	if sess, ok := s.lookupSession("tok-root"); !ok || !sess.IsAdmin {
-		t.Fatalf("root 会话应恒 admin: %+v %v", sess, ok)
+	// 管理员会话回填 admin 标志（清缓存模拟重启后从 SQL 载入）
+	s.putSession("tok-admin", accountSession{Username: qaTestAdminUser, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, time.Hour)
+	s.invalidateSession("tok-admin")
+	if sess, ok := s.lookupSession("tok-admin"); !ok || !sess.IsAdmin {
+		t.Fatalf("管理员会话应回填 admin 标志: %+v %v", sess, ok)
+	}
+	// 账户不存在：会话仍可查找但 IsAdmin=false（后续按端点开关鉴权）
+	s.putSession("tok-ghost", accountSession{Username: "ghost-user", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, time.Hour)
+	s.invalidateSession("tok-ghost")
+	if sess, ok := s.lookupSession("tok-ghost"); !ok || sess.IsAdmin {
+		t.Fatalf("不存在账户的会话不应为 admin: %+v %v", sess, ok)
 	}
 }
 
 // TestAccountRedisFallback Redis 不可用时（连接被拒）自动回退 SQL：
-// 初始化不失败、登录/权限照常工作、进入降级冷却。
+// 初始化不失败、首启引导/登录/权限照常工作、进入降级冷却。
 func TestAccountRedisFallback(t *testing.T) {
-	d, _ := newTestDaemon(t)
 	// 127.0.0.1:1 无监听 → 立即连接拒绝
-	if err := d.initAccounts(accountsConfig{Driver: "sqlite", RedisAddr: "127.0.0.1:1"}); err != nil {
-		t.Fatalf("Redis 不可用时初始化不应失败: %v", err)
-	}
-	t.Cleanup(func() { d.closeAccounts() })
+	d := newBareAccountDaemon(t, accountsConfig{Driver: "sqlite", RedisAddr: "127.0.0.1:1"})
 	if d.accounts.redisReady() {
 		t.Fatalf("Redis 不可用时应进入降级状态")
 	}
-	srv := newTestServer(d)
-	defer srv.Close()
 
-	if _, data := loginAs(t, srv, "root", qaTestApiKey()); data == nil {
-		t.Fatal("Redis 故障时 root 登录应回退 SQL")
+	// 首启引导与登录走 SQL（注意：须在 newTestServer 注入测试管理员之前引导，
+	// 否则库中已有管理员，引导不再生成凭据）
+	u, p, created, err := d.ensureAdminAccount()
+	if err != nil || !created {
+		t.Fatalf("Redis 故障时首启引导应走 SQL: created=%v err=%v", created, err)
 	}
-	code, _ := apiPost(t, srv.URL+"/api/accounts"+qaAccQuery(), map[string]any{
+	srv := newTestServer(t, d)
+	defer srv.Close()
+	adminToken, _ := loginAs(t, srv, u, p)
+
+	// 管理操作（创建账户）经登录 token 走 SQL
+	code, body := doReqToken(t, http.MethodPost, srv.URL+"/api/accounts", adminToken, map[string]any{
 		"username": "frank", "password": "FrankPass123",
 	})
 	if code != 200 {
-		t.Fatalf("Redis 故障时创建账户应回退 SQL: %d", code)
+		t.Fatalf("Redis 故障时创建账户应回退 SQL: %d %s", code, body)
 	}
 	token, _ := loginAs(t, srv, "frank", "FrankPass123")
-	code, body := doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/permissions"+qaAccQuery(), "", map[string]any{
+	code, body = doReqToken(t, http.MethodPut, srv.URL+"/api/accounts/permissions", adminToken, map[string]any{
 		"username": "frank", "permissions": map[string]bool{"GET /api/overview": true},
 	})
 	if code != 200 {

@@ -122,7 +122,7 @@ func (c *wsTestClient) readFrame(timeout time.Duration) (int, []byte) {
 
 // wsURL 构造控制台 WS 地址。
 func wsURL(srvURL, uuid string) string {
-	return srvURL + "/api/instance/console/ws?uuid=" + uuid + "&apikey=test-key"
+	return srvURL + "/api/instance/console/ws?uuid=" + uuid + "&token=test-key"
 }
 
 // stopTestProc 停止测试实例进程。
@@ -143,7 +143,7 @@ func TestConsoleWSHandshakeAndPong(t *testing.T) {
 		Nickname: "WS握手", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	c := dialTestWS(t, wsURL(srv.URL, inst.InstanceUuid))
@@ -164,7 +164,7 @@ func TestConsoleWSOutputStream(t *testing.T) {
 		Nickname: "WS输出", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
@@ -203,7 +203,7 @@ func TestConsoleWSCommand(t *testing.T) {
 		Cwd:          dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
@@ -237,7 +237,7 @@ func TestConsoleWSBackfillSince(t *testing.T) {
 		Nickname: "WS补发", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
@@ -291,7 +291,7 @@ func TestConsoleWSExitNotice(t *testing.T) {
 		Nickname: "WS退出", StartCommand: cmd, Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	if err := d.startInstance(inst); err != nil {
 		t.Fatalf("启动失败: %v", err)
@@ -317,17 +317,17 @@ func TestConsoleWSExitNotice(t *testing.T) {
 	t.Logf("[验证] 进程退出时控制台收到通知")
 }
 
-// TestConsoleWSAuthFailed 错误 apikey 拒绝升级（403）。
+// TestConsoleWSAuthFailed 错误 token 拒绝升级（403）。
 func TestConsoleWSAuthFailed(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	inst := NewInstance("ws-auth-uuid", InstanceConfig{
 		Nickname: "WS认证", StartCommand: echoCommand(), Cwd: dir,
 	})
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	u, _ := url.Parse(srv.URL + "/api/instance/console/ws?uuid=" + inst.InstanceUuid + "&apikey=wrong")
+	u, _ := url.Parse(srv.URL + "/api/instance/console/ws?uuid=" + inst.InstanceUuid + "&token=wrong")
 	conn, err := net.Dial("tcp", u.Host)
 	if err != nil {
 		t.Fatalf("连接失败: %v", err)
@@ -341,7 +341,7 @@ func TestConsoleWSAuthFailed(t *testing.T) {
 		t.Fatalf("读取响应失败: %v", err)
 	}
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("错误 apikey 应返回 403，实际 %d", resp.StatusCode)
+		t.Fatalf("错误 token 应返回 403，实际 %d", resp.StatusCode)
 	}
 	t.Logf("[验证] 认证失败拒绝 WS 升级（403）")
 }
@@ -349,7 +349,7 @@ func TestConsoleWSAuthFailed(t *testing.T) {
 // TestConsoleWSUnknownInstance 未知 uuid 返回 400（不升级）。
 func TestConsoleWSUnknownInstance(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	resp, err := testClient.Get(wsURL(srv.URL, "no-such-uuid"))

@@ -594,13 +594,14 @@ func (d *Daemon) transferDialContext() func(ctx context.Context, network, addr s
 }
 
 // handleClusterTransfer 指示节点从对等节点拉取实例数据到本地同步区（节点间直传）。
-// POST /api/cluster/transfer body: {instanceId, source: {address, apikey, uuid, daemonId}, dest}
+// POST /api/cluster/transfer body: {instanceId, source: {address, token, uuid, daemonId}, dest}
+// source.token 为来源节点的账户会话 token（来源为 MCSM 节点时填其 apikey）。
 func (d *Daemon) handleClusterTransfer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		InstanceID string `json:"instanceId"`
 		Source     struct {
 			Address  string `json:"address"`
-			APIKey   string `json:"apikey"`
+			Token    string `json:"token"`
 			UUID     string `json:"uuid"`
 			DaemonID string `json:"daemonId"`
 		} `json:"source"`
@@ -634,7 +635,7 @@ func (d *Daemon) handleClusterTransfer(w http.ResponseWriter, r *http.Request) {
 	d.transfers[jobID] = job
 	d.clusterMu.Unlock()
 	go d.runTransfer(jobID, job, body.InstanceID, body.Source.Address,
-		body.Source.APIKey, body.Source.UUID, body.Source.DaemonID, dest)
+		body.Source.Token, body.Source.UUID, body.Source.DaemonID, dest)
 	writeOK(w, map[string]any{"jobId": jobID})
 }
 
@@ -655,7 +656,7 @@ func (d *Daemon) handleTransferStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // runTransfer 执行节点间拉取：source 快照 → 直连下载 → 解压到本地同步区。
-func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, apikey, uuid, daemonID, dest string) {
+func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, token, uuid, daemonID, dest string) {
 	fail := func(err error) {
 		job.mu.Lock()
 		job.status = "failed"
@@ -687,8 +688,8 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 		return
 	}
 	auth := ""
-	if apikey != "" {
-		auth = "?apikey=" + url.QueryEscape(apikey)
+	if token != "" {
+		auth = "?token=" + url.QueryEscape(token)
 	}
 	// 1. 申请远端实例快照任务（任务化，docs/irix-node-local-parity.md §4.5）
 	snap, err := postJSON(client, base+"/api/instance/snapshot"+auth, map[string]any{
@@ -707,8 +708,8 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, a
 	var archivePath string
 	pollDeadline := time.Now().Add(15 * time.Minute)
 	progressURL := base + "/api/instance/snapshot-progress?jobId=" + url.QueryEscape(snapJobID)
-	if apikey != "" {
-		progressURL += "&apikey=" + url.QueryEscape(apikey) // 已有查询参数，用 & 拼接
+	if token != "" {
+		progressURL += "&token=" + url.QueryEscape(token) // 已有查询参数，用 & 拼接
 	}
 	for {
 		prog, pErr := getJSON(client, progressURL)

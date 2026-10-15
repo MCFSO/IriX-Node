@@ -1,5 +1,5 @@
 // 审计日志测试：验证每次 API 请求的完整细节（时间/IP/方法/路径与查询/状态码/
-// 耗时/请求体）被记录到审计日志文件，apikey 明文打码、超长请求体截断、
+// 耗时/请求体）被记录到审计日志文件，会话 token 明文打码、超长请求体截断、
 // 关闭开关生效。
 
 package main
@@ -19,7 +19,9 @@ import (
 )
 
 // newAuditServer 启动带审计中间件的测试服务器（与 main 相同的中间件链）。
-func newAuditServer(d *Daemon) *httptest.Server {
+func newAuditServer(t testing.TB, d *Daemon) *httptest.Server {
+	t.Helper()
+	ensureTestAuth(t, d)
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 	return httptest.NewServer(d.auditMiddleware(limitAPIBody(mux)))
@@ -37,19 +39,19 @@ func bodyHasStatus(body []byte, want int) bool {
 	return resp.Status == want
 }
 
-// TestAuditLogRecordsEveryRequest 端到端验证：请求细节全部落盘，apikey 不打明文。
+// TestAuditLogRecordsEveryRequest 端到端验证：请求细节全部落盘，会话 token 不打明文。
 func TestAuditLogRecordsEveryRequest(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	d.AuditLog = newFileLogger(filepath.Join(dir, "logs"), "audit.log", 1<<20)
 	// 提前注册清理：断言失败（Fatalf）时也要排空审计落盘，避免文件句柄泄漏
 	t.Cleanup(func() { d.AuditLog.Close() })
-	srv := newAuditServer(d)
+	srv := newAuditServer(t, d)
 	defer srv.Close()
 
 	// 创建实例（POST，带请求体）
 	cwd := filepath.ToSlash(dir)
 	body := `{"nickname":"审计测试","startCommand":"ping 127.0.0.1 -t","cwd":"` + cwd + `"}`
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/instance?apikey=test-key", strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/instance?token=test-key", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("构造请求失败: %v", err)
 	}
@@ -71,12 +73,12 @@ func TestAuditLogRecordsEveryRequest(t *testing.T) {
 	}
 
 	// 查询实例详情（GET，查询参数）
-	if _, body := doReq(t, srv.URL+"/api/instance?uuid="+created.Data.InstanceUuid+"&apikey=test-key"); !bodyHasStatus(body, 200) {
+	if _, body := doReq(t, srv.URL+"/api/instance?uuid="+created.Data.InstanceUuid+"&token=test-key"); !bodyHasStatus(body, 200) {
 		t.Fatalf("查询详情失败: %s", body)
 	}
 	// 下发命令（GET，command 查询参数；实例未运行 → body.status 400，但审计同样记录命令）
 	if _, body := doReq(t, srv.URL+"/api/protected_instance/command?uuid="+created.Data.InstanceUuid+
-		"&command=stop&apikey=test-key"); bodyHasStatus(body, 200) {
+		"&command=stop&token=test-key"); bodyHasStatus(body, 200) {
 		t.Fatalf("未运行实例下发命令应失败: %s", body)
 	}
 
@@ -92,7 +94,7 @@ func TestAuditLogRecordsEveryRequest(t *testing.T) {
 		"审计测试",               // 请求体内容
 		"GET /api/instance",
 		"command=stop", // 用户下发的命令
-		"apikey=***",   // apikey 打码
+		"token=***",    // 会话 token 打码
 		"200",          // 响应状态码
 	} {
 		if !strings.Contains(got, want) {
@@ -100,7 +102,7 @@ func TestAuditLogRecordsEveryRequest(t *testing.T) {
 		}
 	}
 	if strings.Contains(got, "test-key") {
-		t.Errorf("apikey 明文泄漏进审计日志:\n%s", got)
+		t.Errorf("会话 token 明文泄漏进审计日志:\n%s", got)
 	}
 	// 每条审计行单行（防伪造/防错乱）
 	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
@@ -137,9 +139,9 @@ func TestAuditBodyCaptureTruncates(t *testing.T) {
 // TestAuditDisabledNoFile 关闭审计落盘（AuditLog 为 nil）时不产生文件、不崩溃。
 func TestAuditDisabledNoFile(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newAuditServer(d) // 未设置 AuditLog
+	srv := newAuditServer(t, d) // 未设置 AuditLog
 	defer srv.Close()
-	if code, _ := doReq(t, srv.URL+"/api/overview?apikey=test-key"); code != 200 {
+	if code, _ := doReq(t, srv.URL+"/api/overview?token=test-key"); code != 200 {
 		t.Fatalf("状态码: %d", code)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "logs", "audit.log")); !os.IsNotExist(err) {
@@ -147,10 +149,13 @@ func TestAuditDisabledNoFile(t *testing.T) {
 	}
 }
 
-// TestRedactQuery apikey 打码：任意大小写键名均被打码，其余参数保持原样。
+// TestRedactQuery 会话 token / apikey 打码：任意大小写键名均被打码，其余参数保持原样。
 func TestRedactQuery(t *testing.T) {
 	cases := map[string]string{
 		"":                                    "",
+		"token=secret":                        "?token=***",
+		"uuid=abc&token=secret&command=stop":  "?uuid=abc&token=***&command=stop",
+		"TOKEN=SECRET":                        "?token=***",
 		"apikey=secret":                       "?apikey=***",
 		"uuid=abc&apikey=secret&command=stop": "?uuid=abc&apikey=***&command=stop",
 		"APiKey=SECRET":                       "?apikey=***",
@@ -197,9 +202,9 @@ func TestSanitizeLog(t *testing.T) {
 // GET /api/audit/log 返回 200 与空字符串（docs/backend-requirements.md P0）。
 func TestAuditLogReadDisabled(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
-	code, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	code, body := doReq(t, srv.URL+"/api/audit/log?token=test-key")
 	if code != http.StatusOK || !bodyHasStatus(body, http.StatusOK) {
 		t.Fatalf("期望 200，实际 %d: %s", code, body)
 	}
@@ -225,9 +230,9 @@ func TestAuditLogReadEmpty(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	d.AuditLog = newFileLogger(filepath.Join(dir, "logs"), "audit.log", 1<<20)
 	t.Cleanup(func() { d.AuditLog.Close() })
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
-	code, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	code, body := doReq(t, srv.URL+"/api/audit/log?token=test-key")
 	if code != http.StatusOK {
 		t.Fatalf("期望 200，实际 %d: %s", code, body)
 	}
@@ -242,7 +247,7 @@ func TestAuditLogReadTailSince(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	d.AuditLog = newFileLogger(filepath.Join(dir, "logs"), "audit.log", 1<<20)
 	t.Cleanup(func() { d.AuditLog.Close() })
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 写入 5 条审计行并排空落盘队列（Close 幂等，Cleanup 兜底 Fatalf 路径）
@@ -252,7 +257,7 @@ func TestAuditLogReadTailSince(t *testing.T) {
 	d.AuditLog.Close()
 
 	// tail 缺省（500）→ 包含全部 5 行
-	_, body := doReq(t, srv.URL+"/api/audit/log?apikey=test-key")
+	_, body := doReq(t, srv.URL+"/api/audit/log?token=test-key")
 	got := auditLogData(t, body)
 	for i := 1; i <= 5; i++ {
 		if !strings.Contains(got, fmt.Sprintf("审计读取测试行 %d", i)) {
@@ -260,7 +265,7 @@ func TestAuditLogReadTailSince(t *testing.T) {
 		}
 	}
 	// tail=2 → 恰好最后 2 行（按序：行 4、行 5）
-	_, body = doReq(t, srv.URL+"/api/audit/log?tail=2&apikey=test-key")
+	_, body = doReq(t, srv.URL+"/api/audit/log?tail=2&token=test-key")
 	got = auditLogData(t, body)
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	if len(lines) != 2 ||
@@ -269,18 +274,18 @@ func TestAuditLogReadTailSince(t *testing.T) {
 		t.Errorf("tail=2 应恰好返回最后 2 行，实际 %d 行:\n%s", len(lines), got)
 	}
 	// since=0（1970）→ 全部内容（文件 mtime 恒在其后）
-	_, body = doReq(t, srv.URL+"/api/audit/log?since=0&apikey=test-key")
+	_, body = doReq(t, srv.URL+"/api/audit/log?since=0&token=test-key")
 	got = auditLogData(t, body)
 	if !strings.Contains(got, "审计读取测试行 1") || !strings.Contains(got, "审计读取测试行 5") {
 		t.Errorf("since=0 应返回全部内容:\n%s", got)
 	}
 	// since=未来时间 → 空（mtime 近似过滤）
-	_, body = doReq(t, srv.URL+"/api/audit/log?since="+fmt.Sprint(time.Now().Add(time.Hour).UnixMilli())+"&apikey=test-key")
+	_, body = doReq(t, srv.URL+"/api/audit/log?since="+fmt.Sprint(time.Now().Add(time.Hour).UnixMilli())+"&token=test-key")
 	if got := auditLogData(t, body); got != "" {
 		t.Errorf("since=未来时间应返回空，实际 %q", got)
 	}
 	// tail 上限钳制：超大 tail 应钳到 20000 而非报错
-	code, body := doReq(t, srv.URL+"/api/audit/log?tail=999999&apikey=test-key")
+	code, body := doReq(t, srv.URL+"/api/audit/log?tail=999999&token=test-key")
 	if code != http.StatusOK || !bodyHasStatus(body, http.StatusOK) {
 		t.Errorf("超大 tail 应被钳制而非报错: %d %s", code, body)
 	}

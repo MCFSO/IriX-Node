@@ -77,7 +77,9 @@
 ## 4. 新增 API 设计
 
 通用约定与现有接口一致（见 `cluster-node-api.md` §1 与 `irix-node-container-api.md` §1）：
-`{status, data, time}` 响应、`X-Requested-With: XMLHttpRequest`、`apikey` 查询参数、
+`{status, data, time}` 响应、`X-Requested-With: XMLHttpRequest`、账户会话 token
+（`POST /api/auth/login` 取得；`X-Auth-Token` 头 / `Authorization: Bearer` 头 /
+`?token=` 查询参数，WebSocket 必须用查询参数）、
 错误时 `data` 为可读字符串。**所有耗时操作必须异步任务化**（返回 `jobId`，
 客户端轮询进度），不允许同步阻塞节点 HTTP 请求（如大文件压缩/核心下载）。
 
@@ -86,7 +88,7 @@
 #### 4.1.1 实时日志流（WebSocket）
 
 ```
-WS  /api/instance/console/ws?uuid=<u>&daemonId=<d>&apikey=<key>
+WS  /api/instance/console/ws?uuid=<u>&daemonId=<d>&token=<token>
 ```
 
 - **服务端 → 客户端**：文本帧，一行一条服务器原始输出（**保留 ANSI 转义序列**，

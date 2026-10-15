@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,11 +25,11 @@ import (
 func benchServer(b *testing.B, n int) (*Daemon, *httptest.Server) {
 	b.Helper()
 	dir := b.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	for i := 0; i < n; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(b, d)
 	b.Cleanup(srv.Close)
 	return d, srv
 }
@@ -38,7 +37,7 @@ func benchServer(b *testing.B, n int) (*Daemon, *httptest.Server) {
 // BenchmarkHTTPOverview 概览接口吞吐（单连接压）。
 func BenchmarkHTTPOverview(b *testing.B) {
 	_, srv := benchServer(b, 100)
-	url := srv.URL + "/api/overview?apikey=test-key"
+	url := srv.URL + "/api/overview?token=test-key"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resp, err := http.Get(url)
@@ -53,7 +52,7 @@ func BenchmarkHTTPOverview(b *testing.B) {
 // BenchmarkHTTPInstanceList 实例列表接口吞吐（100 实例）。
 func BenchmarkHTTPInstanceList(b *testing.B) {
 	_, srv := benchServer(b, 100)
-	url := srv.URL + "/api/service/remote_service_instances?apikey=test-key&page=1&page_size=100"
+	url := srv.URL + "/api/service/remote_service_instances?token=test-key&page=1&page_size=100"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resp, err := http.Get(url)
@@ -68,7 +67,7 @@ func BenchmarkHTTPInstanceList(b *testing.B) {
 // BenchmarkHTTPInstanceDetail 实例详情接口吞吐。
 func BenchmarkHTTPInstanceDetail(b *testing.B) {
 	d, srv := benchServer(b, 100)
-	url := srv.URL + "/api/instance?apikey=test-key&uuid=" + d.Instances[0].InstanceUuid
+	url := srv.URL + "/api/instance?token=test-key&uuid=" + d.Instances[0].InstanceUuid
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		resp, err := http.Get(url)
@@ -80,20 +79,20 @@ func BenchmarkHTTPInstanceDetail(b *testing.B) {
 	}
 }
 
-// BenchmarkHTTPAuth 认证开销（配对码 SHA-256 + 恒定时间比较路径）。
+// BenchmarkHTTPAuth 认证开销（会话 token 查找：进程内缓存 → SQL）。
 func BenchmarkHTTPAuth(b *testing.B) {
-	d, _ := benchServer(b, 0)
-	d.APIKey = ""
-	d.PairingHash = pairingHash("12345678901234567890")
-	_ = newTestServer(d)
-	req := &http.Request{Header: http.Header{}, URL: &url.URL{}}
-	q := req.URL.Query()
-	q.Set("apikey", "12345678901234567890")
-	req.URL.RawQuery = q.Encode()
+	_, srv := benchServer(b, 0)
+	url := srv.URL + "/api/overview?token=" + qaTestToken()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if !d.authOK(req) {
-			b.Fatal("认证失败")
+		resp, err := http.Get(url)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("认证失败: %d", resp.StatusCode)
 		}
 	}
 }
@@ -107,7 +106,7 @@ func BenchmarkFind(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			dir := b.TempDir()
-			d := NewDaemon(dir, "k")
+			d := NewDaemon(dir)
 			for i := 0; i < n; i++ {
 				d.Instances = append(d.Instances, sampleInst(i, dir))
 			}
@@ -127,7 +126,7 @@ func BenchmarkList(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			dir := b.TempDir()
-			d := NewDaemon(dir, "k")
+			d := NewDaemon(dir)
 			for i := 0; i < n; i++ {
 				d.Instances = append(d.Instances, sampleInst(i, dir))
 			}
@@ -144,7 +143,7 @@ func BenchmarkSave(b *testing.B) {
 	for _, n := range []int{10, 100, 1000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			dir := b.TempDir()
-			d := NewDaemon(dir, "k")
+			d := NewDaemon(dir)
 			for i := 0; i < n; i++ {
 				d.Instances = append(d.Instances, sampleInst(i, dir))
 			}
@@ -163,7 +162,7 @@ func BenchmarkLoad(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			dir := b.TempDir()
-			d := NewDaemon(dir, "k")
+			d := NewDaemon(dir)
 			for i := 0; i < n; i++ {
 				d.Instances = append(d.Instances, sampleInst(i, dir))
 			}
@@ -172,7 +171,7 @@ func BenchmarkLoad(b *testing.B) {
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				d2 := NewDaemon(dir, "k")
+				d2 := NewDaemon(dir)
 				if err := d2.Load(); err != nil {
 					b.Fatal(err)
 				}
@@ -228,7 +227,7 @@ func BenchmarkFileWriteHandler(b *testing.B) {
 	for _, sizeKB := range []int{64, 1024, 8192} {
 		b.Run(fmt.Sprintf("payload=%dKB", sizeKB), func(b *testing.B) {
 			dir := b.TempDir()
-			d := NewDaemon(dir, "test-key")
+			d := NewDaemon(dir)
 			inst := NewInstance("bench-uuid", InstanceConfig{Nickname: "bench", Cwd: dir})
 			d.Instances = append(d.Instances, inst)
 
@@ -239,7 +238,7 @@ func BenchmarkFileWriteHandler(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			url := "/api/files/?apikey=test-key&uuid=" + inst.InstanceUuid
+			url := "/api/files/?token=test-key&uuid=" + inst.InstanceUuid
 
 			b.SetBytes(int64(len(payload)))
 			b.ReportAllocs()
@@ -285,7 +284,7 @@ func TestLoadTenThousandInstances(t *testing.T) {
 		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
 	}
 	dir := t.TempDir()
-	d := NewDaemon(dir, "k")
+	d := NewDaemon(dir)
 	const n = 10000
 	for i := 0; i < n; i++ {
 		d.Instances = append(d.Instances, sampleInst(i, dir))
@@ -298,7 +297,7 @@ func TestLoadTenThousandInstances(t *testing.T) {
 
 	// 重启加载
 	loadStart := time.Now()
-	d2 := NewDaemon(dir, "k")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("加载 1 万实例失败: %v", err)
 	}
@@ -328,18 +327,19 @@ func TestLargeDirectoryList(t *testing.T) {
 	if testing.Short() {
 		t.Skip("压力/规模测试在 -short 模式下跳过（CI 的 race 用 -short 跑核心并发/安全测试）")
 	}
-	d, dir := newTestDaemon(t)
-	inst := sampleInst(1, dir)
+	d, _ := newTestDaemon(t)
+	cwd := t.TempDir()
+	inst := sampleInst(1, cwd)
 	d.Instances = append(d.Instances, inst)
 	const files = 10000
 	for i := 0; i < files; i++ {
-		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d.dat", i)), []byte{1}, 0o644)
+		os.WriteFile(filepath.Join(cwd, fmt.Sprintf("f%05d.dat", i)), []byte{1}, 0o644)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	start := time.Now()
-	url := srv.URL + "/api/files/list?apikey=test-key&uuid=" + inst.InstanceUuid + "&page=1&page_size=100"
+	url := srv.URL + "/api/files/list?token=test-key&uuid=" + inst.InstanceUuid + "&page=1&page_size=100"
 	code, body := doReq(t, url)
 	if code != http.StatusOK {
 		t.Fatalf("文件列表失败: %d %s", code, body)

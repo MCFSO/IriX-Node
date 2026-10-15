@@ -10,7 +10,7 @@
 | 项 | 约定 |
 |----|------|
 | 基础地址 | `http://<host>:<port>` |
-| 认证 | `?apikey=<key>` 查询参数，或 `X-Api-Key` 请求头（二者取其一，`apikey` 查询参数优先） |
+| 认证 | 账户会话 token：先 `POST /api/auth/login`（body `{"username": "...", "password": "..."}`）取得 `token`，之后携带 `X-Auth-Token: <token>` 头 / `Authorization: Bearer <token>` 头 / `?token=<token>` 查询参数（三选一，WebSocket 只能用查询参数） |
 | 请求头 | 建议携带 `X-Requested-With: XMLHttpRequest`（兼容 MCSM 风格） |
 | 请求体 | `application/json; charset=utf-8`（上传/下载类端点除外） |
 | 字符集 | UTF-8 |
@@ -36,6 +36,8 @@ HTTP 状态码同样等于 `status`。前端统一处理：`status !== 200` 时�
 | HTTP 状态码 | 触发场景 |
 |-------------|----------|
 | `400` | 请求体格式错误、缺少必填参数、参数校验失败（如 jail 名纯数字）、路径越界/无效、长任务不存在或已过期 |
+| `401` | 登录失败（`用户名或密码错误`，仅 `POST /api/auth/login`） |
+| `403` | 未认证/会话已过期（`未认证或会话已过期（请先登录 POST /api/auth/login）`）或权限不足（`权限不足: 当前账户无权访问 <端点模式>`） |
 | `404` | 归档下载时目标归档文件不存在 |
 | `500` | 底层 CLI（docker/bastille）执行失败、内部错误 |
 | `501` | 当前平台不支持该容器能力（`available=false` 时调用操作端点） |
@@ -365,7 +367,7 @@ DELETE /api/container/{id}?force=1
 | `addr` | string | 节点对外地址（含端口） |
 | `fileName` | string | 相对同步区根的路径（`/mirrors` 虚拟前缀下） |
 
-下载方式：`GET /download/{password}/.exports/<fileName>`（直连通道，绕过 apikey）。
+下载方式：`GET /download/{password}/.exports/<fileName>`（直连通道，免会话认证、凭票据）。
 
 ### 3.9 `POST /api/container/{id}/limits`
 

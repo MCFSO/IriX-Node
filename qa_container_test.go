@@ -26,7 +26,7 @@ func containerTestURL(srv *httptest.Server, path string) string {
 	if strings.Contains(path, "?") {
 		sep = "&"
 	}
-	return srv.URL + path + sep + "apikey=test-key"
+	return srv.URL + path + sep + "token=test-key"
 }
 
 // doJSON 发起带 JSON 请求体的请求，返回 HTTP 状态码与解析后的信封。
@@ -126,7 +126,7 @@ func multipartUpload(t *testing.T, filename string, content []byte) (io.Reader, 
 
 func TestArchiveFullFlow(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 源目录：嵌套结构 + 文件内容
@@ -268,7 +268,7 @@ func TestArchiveFullFlow(t *testing.T) {
 
 func TestArchiveSecurity(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 下载文件名穿越
@@ -353,7 +353,7 @@ func TestBastilleRoutesSmoke(t *testing.T) {
 		t.Skip("FreeBSD 上 Bastille 为真实实现（非桩），此冒烟测试仅覆盖桩路径")
 	}
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 新契约 create body（vnet 布尔 / bridge / mac）应能解析通过参数校验，
@@ -508,7 +508,7 @@ func TestBastilleRoutesSmoke(t *testing.T) {
 
 func TestBastilleJailFiles(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// 伪造 jail 根：生产实现把 jail 内路径解析到 jails/<name>/root，

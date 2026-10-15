@@ -157,10 +157,10 @@ func TestPluginsAPI(t *testing.T) {
 	// 非 jar 文件忽略
 	_ = os.WriteFile(filepath.Join(dir, "plugins", "readme.txt"), []byte("x"), 0o644)
 
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	resp, err := testClient.Get(srv.URL + "/api/instance/plugins?uuid=" + inst.InstanceUuid + "&apikey=test-key")
+	resp, err := testClient.Get(srv.URL + "/api/instance/plugins?uuid=" + inst.InstanceUuid + "&token=test-key")
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}

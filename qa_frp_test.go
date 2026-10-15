@@ -97,10 +97,10 @@ func fakeFRPC(t *testing.T, dir string) string {
 func TestFRPTunnelLifecycle(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	fakeFRPC(t, filepath.Join(dir, frpDirName))
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/frp"
-	auth := "?apikey=test-key"
+	auth := "?token=test-key"
 
 	// 状态：二进制存在
 	code, out := doJSONReq(t, http.MethodGet, base+"/status"+auth)
@@ -143,7 +143,7 @@ func TestFRPTunnelLifecycle(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	var logs string
 	for time.Now().Before(deadline) {
-		code, out = doJSONReq(t, http.MethodGet, base+"/tunnels/"+id+"/logs?tail=50&apikey=test-key")
+		code, out = doJSONReq(t, http.MethodGet, base+"/tunnels/"+id+"/logs?tail=50&token=test-key")
 		if code != 200 {
 			t.Fatalf("日志失败: %d", code)
 		}
@@ -196,7 +196,7 @@ func TestFRPTunnelLifecycle(t *testing.T) {
 // TestFRPUploadBinary 二进制上传。
 func TestFRPUploadBinary(t *testing.T) {
 	d, dir := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	var buf bytes.Buffer
@@ -208,7 +208,7 @@ func TestFRPUploadBinary(t *testing.T) {
 	_, _ = fw.Write([]byte("#!/bin/sh\necho fake\n"))
 	mw.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/frp/binary?apikey=test-key", &buf)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/frp/binary?token=test-key", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := testClient.Do(req)
 	if err != nil {
@@ -231,11 +231,11 @@ func TestFRPUploadBinary(t *testing.T) {
 // TestFRPConfigValidation 创建时配置校验失败返回 400。
 func TestFRPConfigValidation(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	body := `{"name":"x","provider":"openfrp","config":{}}`
-	resp, err := testClient.Post(srv.URL+"/api/frp/tunnels?apikey=test-key",
+	resp, err := testClient.Post(srv.URL+"/api/frp/tunnels?token=test-key",
 		"application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)

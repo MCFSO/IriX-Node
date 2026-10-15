@@ -26,7 +26,7 @@
 | D3 | 认证因素三重：TOTP（人）+ 密码（知识）+ 证书签名（设备） | 满足等保二级身份鉴别，且超额实现双因素 |
 | D4 | 解锁后数据主密钥仅驻内存，空闲超时自动销毁 | 剩余信息保护；重启即锁定 |
 | D5 | 密码派生 KEK 包裹主密钥，密码本身不落盘；**所有包裹统一为 `nonce‖ct‖tag` blob 编码** | 换密码 = rewrap，无需重加密数据；编码定死避免客户端/服务端对不上 |
-| D6 | 恢复令牌（一次性打印、仅存哈希）提供兜底恢复路径 | 复用现有配对码机制模式（auth.hash） |
+| D6 | 恢复令牌（一次性打印、仅存哈希）提供兜底恢复路径 | 复用一次性令牌 + 仅存 SHA-256 哈希的模式（同 vault 恢复令牌，见 §5.1） |
 | D7 | TLS **默认 `off`（不强制，由用户显式开启，与现状兼容）**；`tls.mode=auto/manual` 由用户选择；**vault.enabled=true 时要求 TLS 已开启，否则拒绝启动** | 用户修订：TLS 不是强制项，用户自行开启；等保二级「远程管理传输保密」作为部署红线由用户选择。vault 的安全性依赖 TLS，开启 vault（本身即显式选择）时强制 TLS 是底线 |
 | D8 | 加密范围分级（A1 决策）：**instances.json 与系统元数据始终加密；实例文件区默认明文，敏感实例按 `vaultFiles=true` 启用「启停物化加密」** | 本地游戏进程无法透明读取密文对象（无 FS 垫片，纯标准库不可行）；全员物化会让启停变成全量拷贝并破坏崩溃安全。D8 由「默认收窄范围」+「可选物化」两级构成，具体语义见 §8.1 |
 | D9 | 启停物化语义（D8 的物化级细则）：启动前解密物化到工作目录、停止后加密回收；运行期明文窗口与崩溃残留为既定边界，锁定状态不杀运行中实例 | 见 §8.2 |
@@ -113,7 +113,7 @@ masterKey（256-bit，随机，数据域主密钥，仅内存）
 - **DEK 层**：每文件/对象独立数据密钥。某把 DEK 泄露只影响单个文件；copy 生成新 DEK（D14）。
 - **masterKey 层**：只包裹 DEK（含索引 DEK），不直接加密数据。换密码、换证书、新增用户 = 只 rewrap，**无需重加密任何数据**。
 - **索引加密**：用独立 `indexDEK`（masterKey 包裹，存 vault.json）——与「masterKey 只包裹 DEK」的表述统一（评审一致性项）。
-- **恢复令牌**：256-bit 随机；磁盘只存 SHA-256 哈希（复用 `auth.go` 配对码模式）。恢复包裹副本供在线恢复流程使用（§8.10）；离线解包工具不在本期（二期点名，见 §12）。
+- **恢复令牌**：256-bit 随机；磁盘只存 SHA-256 哈希（一次性令牌 + 仅存哈希的模式，恢复时恒定时间比较）。恢复包裹副本供在线恢复流程使用（§8.10）；离线解包工具不在本期（二期点名，见 §12）。
 
 ### 5.2 wrapBlob 编码（协议定死，客户端联调基准）
 
@@ -132,7 +132,7 @@ masterKey（256-bit，随机，数据域主密钥，仅内存）
 | 密钥派生 | PBKDF2-HMAC-SHA256（`crypto/pbkdf2`，Go 1.24 标准库） | 默认 600,000 次迭代，可配置；服务端解锁为一次性成本 |
 | TOTP | RFC 6238，HMAC-SHA1，6 位，30s，窗口 ±1 | 标准实现，兼容主流验证器 APP |
 | 证书 | RSA ≥2048 或 ECDSA P-256/P-384 | 签名：RSA 用 PKCS#1 v1.5 SHA-256，ECDSA 用 ASN.1 DER |
-| 随机源 | `crypto/rand` | 与现有配对码机制一致 |
+| 随机源 | `crypto/rand` | 与现有一次性令牌（恢复令牌 / 会话 token）生成一致 |
 
 ### 5.4 密码的正确性验证方式
 
@@ -305,10 +305,10 @@ User {
     index.json.enc       # 加密索引（indexDEK，D12，原子写）
     vault.json           # 元数据：用户、包裹副本、盐、证书、恢复哈希、迁移标记、seq
   instances/<uuid>/      # 实例明文工作目录（默认模式 / 物化模式的运行期窗口）
+  accounts.db            # 账户库（默认 sqlite；-accounts-driver 可换 mysql/postgres）
   tls/                   # 自签证书（0600）
   backup/audit/          # 审计日志归档
   instances.json         # vault 开启并迁移后不再使用（§8.7）
-  auth.hash              # 配对码哈希（不加密，启动认证所需，非数据）
   logs/                  # 实例日志 + audit.log（不加密，见 D8 范围决策）
 ```
 
@@ -424,19 +424,19 @@ body          (blockNonce[12] + blockCipher[blockSize+16]) × N
 
 ## 10. API 规范（草案，v2）
 
-统一 `{status, data, time}`（`writeJSON`）；认证仍走 apikey/配对码；vault 会话与初始化会话走 `X-Vault-Token` 头（D17）。
+统一 `{status, data, time}`（`writeJSON`）；认证先 `POST /api/auth/login` 取得账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`），直连票据通道（`/download/`、`/upload/`）免会话认证；vault 会话与初始化会话走 `X-Vault-Token` 头（D17）。
 
 | 方法/路径 | 权限 | 说明 |
 | --- | --- | --- |
-| `GET /api/vault/status` | apikey | `{ enabled, initialized, locked, user?, expiresIn?, passwordExpired?, migrating? }` |
-| `POST /api/vault/init` | apikey | `{ user, password }` → `{ initToken, totpSecret, otpauthURI, recoveryToken }`（仅未初始化时） |
+| `GET /api/vault/status` | 登录会话 | `{ enabled, initialized, locked, user?, expiresIn?, passwordExpired?, migrating? }` |
+| `POST /api/vault/init` | 登录会话 | `{ user, password }` → `{ initToken, totpSecret, otpauthURI, recoveryToken }`（仅未初始化时） |
 | `POST /api/vault/totp/verify` | initToken | `{ code }` → 确认 TOTP 绑定（5 次失败作废 initToken） |
-| `POST /api/vault/challenge` | apikey | `{ purpose: "unlock"\|"cert-bind"\|"recovery" }` → `{ challengeId, challenge }`（签发即状态变更，POST） |
+| `POST /api/vault/challenge` | 登录会话 | `{ purpose: "unlock"\|"cert-bind"\|"recovery" }` → `{ challengeId, challenge }`（签发即状态变更，POST） |
 | `POST /api/vault/cert` | initToken / 解锁会话 / recovery 会话 | `{ certPem, challengeId, signature }` → 绑定证书（SPKI 指纹） |
-| `POST /api/vault/unlock` | apikey | `{ user, password, totp, challengeId, signature, newPassword? }` → `{ sessionToken, expiresIn, passwordExpired? }` |
+| `POST /api/vault/unlock` | 登录会话 | `{ user, password, totp, challengeId, signature, newPassword? }` → `{ sessionToken, expiresIn, passwordExpired? }` |
 | `POST /api/vault/lock` | 会话 | 立即锁定（阻塞在途解密后销毁） |
 | `POST /api/vault/password` | 会话 | `{ oldPassword, newPassword }` → rewrap + 作废该用户其他会话 |
-| `POST /api/vault/recovery` | apikey | `{ recoveryToken, newPassword?, newTotp?, newCert? }` → recovery 会话（5 分钟） |
+| `POST /api/vault/recovery` | 登录会话 | `{ recoveryToken, newPassword?, newTotp?, newCert? }` → recovery 会话（5 分钟） |
 | `POST /api/vault/user/add` | 会话 | 新增用户（触发该用户的 totp/cert 绑定流程） |
 | `POST /api/vault/user/remove` | 会话 | 删除用户（禁删最后一个；删当前会话用户 → 会话失效） |
 | `GET /api/vault/users` | 会话 | 用户列表（无秘密材料） |
@@ -448,7 +448,7 @@ body          (blockNonce[12] + blockCipher[blockSize+16]) × N
 
 ## 11. 审计与安全事件
 
-- **掩码扩展**（`audit.go` 现有 apikey 打码机制改为掩码列表）：`password`、`newPassword`、`totp`、`code`、`signature`、`recoveryToken`、`sessionToken`、`vaultToken`（头与 body 同掩）一律打码；`X-Vault-Token` 头请求也记路径但令牌打码。
+- **掩码扩展**（`audit.go` 现有查询串打码机制改为掩码列表，保留 `apikey` 打码以兼容历史日志）：`token`、`apikey`、`password`、`newPassword`、`totp`、`code`、`signature`、`recoveryToken`、`sessionToken`、`vaultToken`（头与 body 同掩）一律打码；`X-Vault-Token` 头请求也记路径但令牌打码。
 - **统一限速（D16/S1/S2）**：unlock、recovery、init 的 totp/verify 全部计入同一限速器（用户+IP 双维度，内存态，定时清理）；`maxAttempts`（默认 5）次失败 → 锁定 `lockoutMinutes`（默认 15）。
 - **新增事件**：`vault.init`、`vault.totp.verify`、`vault.cert.bind`、`vault.unlock`（成功/失败 + 内部失败点）、`vault.lock`、`vault.timeout`、`vault.password.change`、`vault.recovery`（成功/失败）、`vault.lockout`、`vault.user.add/remove`、`vault.migrate`（起止/进度节点）、`vault.orphan.reclaim`、`vault.backup`、`vault.scrub`、`vault.locked.op`（锁定态被拒请求）、`vault.autoRestart.blocked`。
 - **审计记录保护**：轮转时把 `audit.log.1` 归档到 `{data}/backup/audit/<时间戳>.log`，防止轮转覆盖（等保二级「审计记录保护与定期备份」）。
@@ -466,7 +466,7 @@ body          (blockNonce[12] + blockCipher[blockSize+16]) × N
 | GPG 证书 | 本期只支持标准 PEM/X.509（P12 客户端转换）；GPG 走系统 `gpg` 验签或二期 |
 | 离线恢复工具 | 本期恢复走在线 API；离线解包工具（脱离节点进程）二期点名 |
 | 多证书/权限分离（三员分立） | 三级需求，二期 |
-| apikey 明文 | `config.json` 中 apikey 不在加密范围（启动需读）；二期评估随 vault 移除或加密 |
+| 账户凭据与审计日志 | 账户库（默认 `{data}/accounts.db`）与 `{data}/logs/` 不在 vault 加密范围内：前者存用户名与 bcrypt 哈希（不含明文密码），后者为审计与实例日志。二期评估是否纳入加密 |
 
 ## 13. 测试计划（qa_vault_test.go）
 

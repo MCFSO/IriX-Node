@@ -16,8 +16,8 @@ go build -o irix-node .       # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试
 go test -race -count=1 ./...  # 带竞态检测的测试（Windows 本地需 gcc）
-go run . -port 12346 -data <目录> [-apikey <key>]   # 本地运行
-go run . -bind 0.0.0.0 -port 23333 -apikey <key>    # 监听全部网卡（局域网访问）
+go run . -port 12346 -data <目录>   # 本地运行
+go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
 go run . -port 12346 -data <目录> -instance-log=false  # 关闭实例日志落盘
 go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）
 ```
@@ -28,19 +28,19 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 
 | 文件 | 职责 |
 | --- | --- |
-| `main.go` | 入口：flag 解析、配对码初始化、路由注册、`NormalizePath`/`SplitCommand`/`FormatSize` 通用工具、HTTP 中间件（body 限额、请求日志）、优雅关停 |
+| `main.go` | 入口：flag 解析、首次启动管理员账户引导（`ensureAdminAccount`）、路由注册、`NormalizePath`/`SplitCommand`/`FormatSize` 通用工具、HTTP 中间件（body 限额、请求日志）、优雅关停 |
 | `daemon.go` | 核心模型：`Daemon`/`Instance`/`InstanceConfig`/`PersistedInstance`、`instances.json` 持久化（原子写）、增删改查、`newUUID` |
 | `instance.go` | 实例 API 处理器（CRUD + 启动/停止/重启/强杀/命令/日志）、路由注册表 `RegisterRoutes`、`auth` 认证包装器、`StopAll` 优雅关停、`autoRestart` 防抖 |
 | `process.go` | 进程管理：`startProcess`、`Process` 结构、`LogBuffer` 环形日志缓冲、`stdinPipe`、`Stop`/`Kill`、`IsRunning`（通过 done channel 而非 Signal） |
 | `logger.go` | 异步日志：全局 `alog`（访问/错误日志异步写 stderr，满则丢弃计数）+ `fileLogger`（实例日志异步落盘到 `{data}/logs/`，轮转 `.1`，Write 永不阻塞） |
 | `process_windows.go` / `process_other.go` | 按 `//go:build` 标签区分的 `sysProcAttr`（Windows 隐藏控制台窗口） |
 | `files.go` | 文件管理 API：列表/读写/删除/移动/复制/压缩(zip)/解压/新建目录/新建文件，所有操作限定在实例 cwd 内 |
-| `audit.go` | 审计日志：每次 API 请求完整细节（时间/来源 IP/方法/路径+查询/状态码/耗时/请求体前缀），apikey 打码、控制字符转义，异步落盘 `{data}/logs/audit.log` |
+| `audit.go` | 审计日志：每次 API 请求完整细节（时间/来源 IP/方法/路径+查询/状态码/耗时/请求体前缀），会话 token 与 apikey 打码、控制字符转义，异步落盘 `{data}/logs/audit.log` |
 | `download.go` | 带票据的下载/上传直连通道：`ticketStore`（密码票据，10 分钟过期，上限 10000，定时清理） |
 | `overview.go` | `GET /api/overview` 主机信息（MCSM 格式响应，含系统信息与远程节点列表） |
-| `auth.go` | 配对码机制：20 位随机码生成（`crypto/rand`，无偏差）、SHA-256 哈希持久化、恒定时间比较 |
+| `auth.go` | 首次启动引导：账户库无管理员时用 `crypto/rand` 生成管理员用户名（12 位）与密码（20 位），`bcrypt` 入库并仅在启动日志显示一次 |
 | `accounts.go` | 账户管理数据面：SQL 存储（sqlite/mysql/postgres 驱动 + database/sql 连接池）、会话、bcrypt、Redis 热缓存与 30 秒冷却降级 |
-| `accounts_handlers.go` | 账户管理 API：登录/登出/改密（root 首次强制改密）/账户 CRUD/权限开关；`authenticate`（apikey → root；Bearer token → 账户身份） |
+| `accounts_handlers.go` | 账户管理 API：登录/登出/改密/账户 CRUD/权限开关；`authenticate`（Bearer / X-Auth-Token / ?token= 会话 token → 账户身份） |
 | `perm_catalog.go` | 端点权限目录：`perm(组, 模式, 描述)` 织入、分组、`permAllowed` 逐端点判定 |
 | `cors.go` | CORS 中间件：跨源响应头、预检 204 终结、错误响应同样带 CORS 头 |
 | `sysinfo.go` + `sysinfo_{windows,linux,bsd,other}.go` | 跨平台系统信息采集（构建标签区分）：运行时间、内存、CPU |
@@ -70,9 +70,12 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 ## API 约定
 
 - 路由用 Go 1.22+ 方法前缀模式（如 `"GET /api/instance"`），全部集中在 `RegisterRoutes`。
-- 认证三通道：`?apikey=`/`X-Api-Key`（配对码，root 管理员，不受权限开关限制）、
-  `Authorization: Bearer <token>`（账户会话，按端点权限开关判定；root 首次登录强制改密）、
-  直连票据（/download/ /upload/）。见 `docs/accounts-design.md`。
+- 认证：先 `POST /api/auth/login`（body `{username,password}`）换取会话 token（30 天有效，滑动续期），
+  之后的请求携带 `X-Auth-Token: <token>` 头 / `Authorization: Bearer <token>` 头 / `?token=` 参数
+  （WebSocket 必须用查询参数）。管理员（`is_admin`）不受端点权限开关限制，普通账户逐端点判定；
+  另有直连票据通道（/download/ /upload/）免会话认证。见 `docs/accounts-design.md`。
+- 已移除的旧机制：`-apikey` / `apiKey` 固定密钥与配对码（`auth.hash`）自 v1.2.0 起不再存在，
+  `?apikey=` / `X-Api-Key` 已不再被接受。
 - 文件路径必须经过 `NormalizePath` 防止 `..` 越界。`/` 前缀的路径代表实例 cwd 根（跨平台一致）。
 - 实例状态常量：`StatusBusy=-1, StatusStopped=0, StatusStopping=1, StatusStarting=2, StatusRunning=3`。
 - API 请求体上限 16 MiB（`/upload/` 直连通道除外）。
@@ -82,7 +85,7 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 ```
 {data}/
   instances.json   # 实例配置列表（原子写：先写 .tmp 再 rename）
-  auth.hash        # 配对码 SHA-256 哈希（首次启动生成，仅显示一次）
+  accounts.db      # 账户库（sqlite 默认；-accounts-driver 可换 mysql/postgres）
   logs/            # 实例日志落盘（-instance-log 开启时）：{uuid}.log + 轮转 {uuid}.log.1
                    # 审计日志（-audit-log 开启时）：audit.log + 轮转 audit.log.1
 ```
@@ -96,7 +99,8 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 - **进程存活检测**：通过 `done` channel（`cmd.Wait()` 返回时关闭），不能用 `Signal(0)`（Windows 不支持）。
 - **异步日志**：所有 `log.Printf` 一律走全局 `alog`（有界缓冲，满则丢弃计数，`main` 退出前 `alog.Close()` 排空）。实例 stdout/stderr 在写内存环形缓冲的同时镜像异步落盘（`fileLogger`：非阻塞 `Write`、`bufio` + 大小轮转、磁盘追不上丢弃——磁盘慢绝不能阻塞游戏进程的 stdout 管道）。`done` 在输出复制结束（3s 超时兜底）且日志 flush 后才关闭，保证退出即完整落盘。
 - **票据系统**：下载/上传通过票据密码（10 分钟过期、10000 上限）直连，绕过 API 认证但受限于实例 cwd。
-- **审计日志**：`auditMiddleware` 记录每次 API 请求的完整细节（时间、来源 IP、方法、路径与查询参数、状态码、耗时、请求体前 2KB），`apikey` 一律打码防明文落盘，控制字符转义防伪造日志行；落盘复用 `fileLogger`（有界队列 + 大小轮转，磁盘慢不阻塞请求）。`/download/`、`/upload/` 直连通道同样在审计范围内。
+- **审计日志**：`auditMiddleware` 记录每次 API 请求的完整细节（时间、来源 IP、方法、路径与查询参数、状态码、耗时、请求体前 2KB），查询串里的会话 `token`（及历史 `apikey`）一律打码防明文落盘，控制字符转义防伪造日志行；落盘复用 `fileLogger`（有界队列 + 大小轮转，磁盘慢不阻塞请求）。`/download/`、`/upload/` 直连通道同样在审计范围内。
+- **首启引导**：`Daemon.ensureAdminAccount`（`auth.go`）在账户库无管理员账户时随机生成管理员用户名/密码并入库，凭据只在启动日志出现一次；共享账户库多节点并发启动时以「已有管理员即让位」避免重复创建。凭据丢失只能删除账户库重新生成（或直接操作账户库）。
 
 ## 测试
 
@@ -104,16 +108,16 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 
 | 文件 | 聚焦 |
 | --- | --- |
-| `qa_test.go` | 核心功能测试：并发 CRUD、日志缓冲、票据、持久化、配对认证、AutoRestart、路径安全、路由冒烟 |
+| `qa_test.go` | 核心功能测试：并发 CRUD、日志缓冲、票据、持久化、账户登录/会话认证、AutoRestart、路径安全、路由冒烟 |
 | `qa_security_test.go` | 安全测试：路径越界、zip slip、上传文件名穿越、票据范围、body 限额、孤儿进程、slowloris 防御 |
-| `qa_audit_test.go` | 审计日志测试：请求细节落盘、apikey 打码、请求体捕获与截断、关闭开关、查询打码/控制字符转义 |
+| `qa_audit_test.go` | 审计日志测试：请求细节落盘、token/apikey 打码、请求体捕获与截断、关闭开关、查询打码/控制字符转义 |
 | `qa_perf_test.go` | 性能测试：万实例加载、大目录列表、大日志截取 |
 | `qa_scale_test.go` | 规模测试：十万实例、日志缓冲内存占用、Tail 开销 |
 
 测试辅助函数（在 `qa_test.go` 中定义，所有测试文件共享）：
-- `newTestDaemon(t)` — 创建临时数据目录的守护进程（`apikey="test-key"`）
-- `newTestServer(d)` — 启动 httptest 服务器
-- `doReq(t, url)` — 发起带 apikey 的 GET 请求
+- `newTestDaemon(t)` — 创建临时数据目录的守护进程，并初始化账户系统、注入固定测试管理员会话（`qaTestToken()`，可用环境变量 `IRIX_QA_TOKEN` 覆盖）
+- `newTestServer(d)` — 启动 httptest 服务器（注册路由并确保测试会话就绪）
+- `doReq(t, url)` — 发起 GET 请求（`?token=<token>` 已含在 URL 查询串中）
 - `sampleUUID(i)` / `sampleInst(i, cwd)` — 构造测试实例
 
 运行单个测试：`go test -race -run TestName ./...`

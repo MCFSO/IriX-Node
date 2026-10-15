@@ -15,7 +15,6 @@ func baseOptions() *nodeOptions {
 		Port:           12346,
 		BindHost:       "",
 		DataDir:        "",
-		APIKey:         "",
 		InstanceLog:    true,
 		InstanceLogMax: 64,
 		AuditLog:       true,
@@ -56,7 +55,6 @@ func TestLoadConfigFile(t *testing.T) {
 		"bind": "0.0.0.0",
 		"port": 23333,
 		"data": "/srv/irix",
-		"apiKey": "secret",
 		"instanceLog": false,
 		"instanceLogMax": 128,
 		"auditLog": false,
@@ -70,7 +68,7 @@ func TestLoadConfigFile(t *testing.T) {
 	if err != nil || !loaded {
 		t.Fatalf("加载合法配置失败: %v", err)
 	}
-	if cfg.Bind != "0.0.0.0" || cfg.Port != 23333 || cfg.Data != "/srv/irix" || cfg.APIKey != "secret" {
+	if cfg.Bind != "0.0.0.0" || cfg.Port != 23333 || cfg.Data != "/srv/irix" {
 		t.Fatalf("字符串/整数字段解析错误: %+v", cfg)
 	}
 	if cfg.TransferAllowCIDR != "192.168.0.0/16,10.0.0.0/8" {
@@ -176,11 +174,10 @@ func TestApplyConfig(t *testing.T) {
 		Port:           23333,
 		Bind:           "192.168.1.5",
 		Data:           "/srv/irix",
-		APIKey:         "secret",
 		InstanceLog:    &no,
 		InstanceLogMax: &mb,
 	}, map[string]bool{})
-	if o.Port != 23333 || o.BindHost != "192.168.1.5" || o.DataDir != "/srv/irix" || o.APIKey != "secret" {
+	if o.Port != 23333 || o.BindHost != "192.168.1.5" || o.DataDir != "/srv/irix" {
 		t.Fatalf("配置文件未覆盖默认值: %+v", o)
 	}
 	if o.InstanceLog || o.InstanceLogMax != 128 {

@@ -18,7 +18,7 @@ import (
 // 运行时关停测试：验证配置刷盘和重复关停不会重复执行资源释放流程。
 func TestNodeRuntimeShutdownFlushesAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = 0
 	inst := NewInstance("", InstanceConfig{Nickname: "shutdown", Cwd: dir})
 	if err := d.Add(inst); err != nil {
@@ -35,7 +35,7 @@ func TestNodeRuntimeShutdownFlushesAndIsIdempotent(t *testing.T) {
 	if _, err := os.Stat(d.instanceFile()); err != nil {
 		t.Fatalf("关停后 instances.json 未落盘: %v", err)
 	}
-	restarted := NewDaemon(dir, "test-key")
+	restarted := NewDaemon(dir)
 	if err := restarted.Load(); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func lifecycleResult(t *testing.T, done <-chan error) error {
 // 已进入处理器的请求可以完成其状态修改；数据库必须保持可用直到它返回。
 func TestNodeRuntimeDrainsRequestsBeforeClosingStores(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = time.Hour
 	if err := d.initAccounts(accountsConfig{}); err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestNodeRuntimeDrainsRequestsBeforeClosingStores(t *testing.T) {
 	if err := d.accounts.db.Ping(); err == nil {
 		t.Fatal("关停后账户数据库仍然打开")
 	}
-	restarted := NewDaemon(dir, "test-key")
+	restarted := NewDaemon(dir)
 	if err := restarted.Load(); err != nil || restarted.Find(inst.InstanceUuid) == nil {
 		t.Fatalf("排空请求后产生的最后配置未保存: %v", err)
 	}
@@ -172,7 +172,7 @@ func (l *lifecycleFailedListener) Close() error {
 
 // Accept 永久失败也必须清理已初始化资源，不能停在等待信号的路径上。
 func TestNodeRuntimeCleansUpAfterServeFailure(t *testing.T) {
-	d := NewDaemon(t.TempDir(), "test-key")
+	d := NewDaemon(t.TempDir())
 	if err := d.initAccounts(accountsConfig{}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestNodeRuntimeCleansUpAfterServeFailure(t *testing.T) {
 // 配置写入失败必须向上报告，同时继续关闭其余资源，并保留待重试标记。
 func TestNodeRuntimeReportsPersistenceFailureAndContinuesCleanup(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	if err := d.initAccounts(accountsConfig{}); err != nil {
 		t.Fatal(err)
 	}
@@ -228,14 +228,15 @@ func TestNodeRuntimeReportsPersistenceFailureAndContinuesCleanup(t *testing.T) {
 
 // 即使实例未运行，劫持的 WebSocket 也要关闭，否则在途请求永远无法排空。
 func TestNodeRuntimeClosesIdleConsoleAndRejectsNewWork(t *testing.T) {
-	d := NewDaemon(t.TempDir(), "test-key")
+	d := NewDaemon(t.TempDir())
+	ensureTestAuth(t, d)
 	inst := NewInstance("", InstanceConfig{Cwd: d.DataDir})
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
 	server := d.newHTTPServer("")
 	_, baseURL, cancel, done := lifecycleRuntime(t, d, server)
-	client := dialTestWS(t, baseURL+"/api/instance/console/ws?uuid="+inst.InstanceUuid+"&apikey=test-key")
+	client := dialTestWS(t, baseURL+"/api/instance/console/ws?uuid="+inst.InstanceUuid+"&token=test-key")
 	defer client.conn.Close()
 	cancel()
 	if err := lifecycleResult(t, done); err != nil {
@@ -251,7 +252,7 @@ func TestNodeRuntimeClosesIdleConsoleAndRejectsNewWork(t *testing.T) {
 		t.Fatalf("节点关停后仍能启动实例: %v", err)
 	}
 	w := httptest.NewRecorder()
-	server.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/overview?apikey=test-key", nil))
+	server.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/overview?token=test-key", nil))
 	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Access-Control-Allow-Origin") == "" {
 		t.Fatalf("关停响应没有保留状态和 CORS: %d %v", w.Code, w.Header())
 	}
@@ -259,7 +260,7 @@ func TestNodeRuntimeClosesIdleConsoleAndRejectsNewWork(t *testing.T) {
 
 // 网络排空超时时强制关闭连接，处理器看到取消后退出，再执行配置刷盘。
 func TestNodeRuntimeForcesHTTPClosureAfterDrainTimeout(t *testing.T) {
-	d := NewDaemon(t.TempDir(), "test-key")
+	d := NewDaemon(t.TempDir())
 	entered, canceled := make(chan struct{}), make(chan struct{})
 	server := &http.Server{Handler: d.trackRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(entered)
@@ -318,7 +319,7 @@ func TestBackgroundWorkersWaitsForCanceledTasks(t *testing.T) {
 
 // 并发触发多个关停入口只会释放一次监听器，并共享同一个完成信号。
 func TestNodeRuntimeConcurrentShutdown(t *testing.T) {
-	d := NewDaemon(t.TempDir(), "test-key")
+	d := NewDaemon(t.TempDir())
 	listener := &lifecycleFailedListener{}
 	rt := newNodeRuntime(d, nil, listener)
 	var wg sync.WaitGroup

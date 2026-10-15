@@ -218,6 +218,8 @@ var javaVendors = []struct{ marker, name string }{
 	{"liberica", "BellSoft Liberica"},
 	{"dragonwell", "Alibaba Dragonwell"},
 	{"sap machine", "SAP SapMachine"},
+	{"openj9", "Eclipse OpenJ9"},
+	{"java(tm) se runtime environment", "Oracle"}, // Oracle JDK 输出不含「Oracle」字样
 	{"oracle", "Oracle"},
 	{"openjdk", "OpenJDK"},
 }

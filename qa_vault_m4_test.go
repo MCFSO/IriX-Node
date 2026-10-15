@@ -261,7 +261,7 @@ func TestStoreIndexReloadAndOrphanSweep(t *testing.T) {
 	}
 
 	// 重启：新守护进程同一数据目录（复用 onboard 凭据走真实解锁流程）
-	d2 := NewDaemon(e.dir, "test-key")
+	d2 := NewDaemon(e.dir)
 	d2.vault.enabled = true
 	d2.vault.file = filepath.Join(e.dir, "vault", "vault.json")
 	d2.vault.pbkdf2Iterations = 1000
@@ -273,7 +273,7 @@ func TestStoreIndexReloadAndOrphanSweep(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	d2.RegisterRoutes(mux)
-	srv2 := newTestServer(d2)
+	srv2 := newTestServer(t, d2)
 	defer srv2.Close()
 	e2 := &vaultTestEnv{d: d2, srv: srv2, dir: e.dir}
 	m4UnlockAndMigrate(t, e2, creds)
@@ -427,7 +427,7 @@ func TestMigrationAndVaultFilesFlow(t *testing.T) {
 	if err := e.d.vault.store.flush(); err != nil {
 		t.Fatal(err)
 	}
-	d2 := NewDaemon(e.dir, "test-key")
+	d2 := NewDaemon(e.dir)
 	d2.vault.enabled = true
 	d2.vault.file = filepath.Join(e.dir, "vault", "vault.json")
 	d2.vault.pbkdf2Iterations = 1000
@@ -448,7 +448,7 @@ func TestMigrationAndVaultFilesFlow(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	d2.RegisterRoutes(mux)
-	srv2 := newTestServer(d2)
+	srv2 := newTestServer(t, d2)
 	defer srv2.Close()
 	e2 := &vaultTestEnv{d: d2, srv: srv2, dir: e.dir}
 	token2 := m4UnlockAndMigrate(t, e2, creds)
@@ -497,7 +497,7 @@ func TestVaultBackup(t *testing.T) {
 	// vreq 返回 JSON 解析结果，zip 二进制不在其中 —— 直接读响应体验证类型头
 	// （此路径由 vreq 已消费；改用原始请求验证 zip 魔数）
 	req, _ := http.NewRequest("POST", e.srv.URL+"/api/vault/backup", nil)
-	req.Header.Set("X-Api-Key", "test-key")
+	req.Header.Set("X-Auth-Token", qaTestToken())
 	req.Header.Set("X-Vault-Token", token)
 	r, err := testClient.Do(req)
 	if err != nil {

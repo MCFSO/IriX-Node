@@ -13,24 +13,83 @@
 
 ### 1.1 认证方式
 
-每个 API 请求（除直连通道 `/download/`、`/upload/`）都需认证，任选其一：
+自 v1.2.0 起本节点采用**账户会话 token** 认证：先登录换取 token，之后每个 API 请求
+（除直连通道 `/download/`、`/upload/`）都携带该 token。
+
+**第一步：登录（公开端点，无需认证）**
+
+`POST /api/auth/login`，请求体：
+
+```json
+{ "username": "<启动日志给出的用户名>", "password": "<启动日志给出的密码>" }
+```
+
+成功响应 `data`（`accountLoginResponse`）：
+
+```json
+{
+  "status": 200,
+  "data": { "token": "<token>", "username": "<账户名>", "isAdmin": true, "expiresAt": 1712592000000 },
+  "time": 1710000000000
+}
+```
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `token` | string | 会话 token，后续请求的凭证 |
+| `username` | string | 登录账户名 |
+| `isAdmin` | bool | 是否管理员（`is_admin`） |
+| `expiresAt` | int64 | 会话过期时间，unix 毫秒 |
+
+失败返回 **HTTP 401**，`data` 为 `用户名或密码错误`。
+
+> **首次启动引导**：账户库（默认 `{data}/accounts.db`）中不存在任何管理员账户时，
+> 节点用 `crypto/rand` 随机生成 12 位用户名 + 20 位密码，bcrypt 入库，
+> **仅在启动日志显示一次**。凭据丢失的处理方式：删除账户库后重启，重新生成。
+
+**第二步：后续请求携带 token（三选一）**
 
 | 方式 | 位置 | 说明 |
 | --- | --- | --- |
-| 查询参数 | `?apikey=<key>` | 最常用，WebSocket 也支持 |
-| 请求头 | `X-Api-Key: <key>` | 与查询参数等效 |
+| 请求头 | `X-Auth-Token: <token>` | 首选（token 不进 URL） |
+| 请求头 | `Authorization: Bearer <token>` | 与 `X-Auth-Token` 等效 |
+| 查询参数 | `?token=<token>` | WebSocket 只能用它（见 §10） |
 
-服务端判定逻辑（`authOK`）：
+服务端按 `X-Auth-Token` → `Authorization: Bearer` → `?token=` 的顺序取 token，
+再查会话；**会话有效期 30 天**，请求时剩余不足一半会自动滑动续期。
 
-1. 先取 `apikey` 查询参数，为空再取 `X-Api-Key` 头。
-2. 若节点配置了 `-apikey`，则必须与该值完全相等。
-3. 若未配置 `-apikey`，则校验配对码（首次启动生成、仅显示一次的 20 位码的 SHA-256 哈希）。
+示例：`GET /api/instance?uuid=<uuid>&token=<token>`
 
-认证失败统一返回 **HTTP 403**，`data` 为错误字符串：
+**WebSocket 必须用 `?token=`**（浏览器无法自定义请求头）：
+`WS /api/instance/console/ws?uuid=<u>&token=<token>&since=<unix_ms>`
+
+**失败响应**
+
+- 未认证或会话已过期 → **HTTP 403**，`data` 为
+  `未认证或会话已过期（请先登录 POST /api/auth/login）`；
+- 已认证但权限不足 → **HTTP 403**，`data` 为
+  `权限不足: 当前账户无权访问 <端点模式>`。
 
 ```json
-{ "status": 403, "data": "API 密钥无效", "time": 1710000000000 }
+{ "status": 403, "data": "未认证或会话已过期（请先登录 POST /api/auth/login）", "time": 1710000000000 }
 ```
+
+**权限判定**
+
+- 管理员（`is_admin`）不受端点权限开关限制，可访问全部端点；
+- 普通账户按端点权限目录（`perm_catalog.go`）逐条判定；
+- 账户自身端点任何已登录账户都可用：`GET /api/accounts/me`、`GET /api/accounts/catalog`、
+  `PUT /api/accounts/password`、`POST /api/auth/logout`。
+
+退出登录：`POST /api/auth/logout`（携带 token，删除当前会话）。
+
+**例外：直连票据通道**（`GET /download/{票据密码}/...`、`POST /upload/{票据密码}`）
+绕过 API 认证，凭 10 分钟有效的票据授权。
+
+> **历史版本**：v1.1.0 及更早版本使用 `-apikey` 命令行参数 / 配置文件 `apiKey` 字段 /
+> `{data}/auth.hash` 配对码哈希，并接受 `?apikey=` 与 `X-Api-Key`；这些机制自 v1.2.0
+> 起已彻底移除，本节点**不再接受 MCSM 风格的 apikey 认证**（响应体 `{status,data,time}`
+> 格式不变）。「root 首次登录强制改密」流程同样已不存在。
 
 ### 1.2 响应包装格式（所有 JSON 接口统一）
 
@@ -61,7 +120,8 @@
 | 状态码 | 场景 |
 | --- | --- |
 | 400 | 参数缺失/非法、实例不存在、实例未运行、请求体格式错误、目录校验失败 |
-| 403 | 认证失败（`API 密钥无效`） |
+| 401 | 登录失败（`用户名或密码错误`），见 §1.1 |
+| 403 | 未认证/会话已过期（`未认证或会话已过期（请先登录 POST /api/auth/login）`）或权限不足（`权限不足: 当前账户无权访问 <端点模式>`） |
 | 500 | 内部错误（保存失败、启动失败、终止进程失败、读日志失败等） |
 
 > 注意：部分业务错误（如 `启动失败`、`实例正在执行其他操作`）返回 **500**，前端需以
@@ -790,14 +850,14 @@ Go 来源：`daemon.go` 的 `Instance.Detail()`。列表每条与详情接口返
 | 参数 | 必填 | 含义 |
 | --- | --- | --- |
 | `uuid` | **是** | 实例 UUID |
-| `apikey` | **是**（或用头） | 认证密钥；也可用 `X-Api-Key` 头（与 REST 一致） |
+| `token` | **是** | 会话 token（**必须**用查询参数：浏览器 WebSocket 无法自定义请求头） |
 | `daemonId` | 否 | 忽略 |
 | `since` | 否 | unix 毫秒；断线重连时补发该时间点之后的日志 |
 
 - 握手为标准 RFC 6455：客户端必须带 `Upgrade: websocket`、`Connection: Upgrade`、
   `Sec-WebSocket-Key`。服务端回 `101 Switching Protocols` 与 `Sec-WebSocket-Accept`。
 - **无需** `Sec-WebSocket-Protocol` 子协议头（服务端不校验、不协商）。
-- 认证失败（apikey 错）时**不会升级**，返回 HTTP 403（REST 风格错误体），
+- 认证失败（token 缺失/无效/过期）时**不会升级**，返回 HTTP 403（REST 风格错误体），
   客户端应将「非 101」视为握手失败并回退到 outputlog 轮询 + command。
 
 ### 10.2 帧约定（RFC 6455）
@@ -914,4 +974,4 @@ Go 来源：`daemon.go` 的 `Instance.Detail()`。列表每条与详情接口返
 | `DELETE /api/runtime/java` | 卸载 JDK | 相邻 |
 | `GET/PUT/DELETE /api/files/*` 等 | 文件管理 | 相邻（files.go） |
 | `/api/frp/*`、`/api/container/*`、集群、保险库 | 其他能力 | 相邻 |
-| `GET /download/`、`POST /upload/` | 票据直连（免 apikey） | 相邻（download.go） |
+| `GET /download/`、`POST /upload/` | 票据直连（免会话认证，凭票据） | 相邻（download.go） |

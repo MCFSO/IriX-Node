@@ -22,10 +22,10 @@ import (
 	"time"
 )
 
-// qaKV 返回 apikey=VALUE 查询键值对（键名拆开书写规避静态凭据扫描）。
-func qaKV() string { return "api" + "key=" + qaTestApiKey() }
+// qaKV 返回 token=VALUE 查询键值对（会话 token 由 ensureTestAuth 注入）。
+func qaKV() string { return "token=" + qaTestToken() }
 
-// apiPost 发送带 apikey 的 JSON POST 请求。
+// apiPost 发送带会话 token（URL 查询串）的 JSON POST 请求。
 func apiPost(t *testing.T, u string, body any) (int, []byte) {
 	t.Helper()
 	b, _ := json.Marshal(body)
@@ -43,7 +43,7 @@ func apiPost(t *testing.T, u string, body any) (int, []byte) {
 	return resp.StatusCode, out
 }
 
-// apiDelete 发送带 apikey 的 JSON DELETE 请求。
+// apiDelete 发送带会话 token（URL 查询串）的 JSON DELETE 请求。
 func apiDelete(t *testing.T, u string, body any) (int, []byte) {
 	t.Helper()
 	b, _ := json.Marshal(body)
@@ -77,7 +77,7 @@ func decodeData(t *testing.T, body []byte) map[string]any {
 // TestClusterFileStore P0 节点级文件存储：mkdir/list/票据/删除/越界防护。
 func TestClusterFileStore(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	// 同步端口到 httptest 端口，使票据 addr 指向测试服务器
 	u, _ := url.Parse(srv.URL)
@@ -189,7 +189,7 @@ func TestClusterSyncList(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "region", "r.0.0.mca"), []byte("region"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := doReq(t, srv.URL+"/api/cluster/sync/list?"+qaKV()+"&path=/mirrors/i-abcd")
@@ -220,13 +220,14 @@ func TestClusterSyncList(t *testing.T) {
 
 // TestInstanceSyncList P1 实例级递归快照。
 func TestInstanceSyncList(t *testing.T) {
-	d, dir := newTestDaemon(t)
-	if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte("a=1"), 0o644); err != nil {
+	d, _ := newTestDaemon(t)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "server.properties"), []byte("a=1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	inst := sampleInst(1, dir)
+	inst := sampleInst(1, cwd)
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := doReq(t, srv.URL+"/api/instance/sync/list?"+qaKV()+"&uuid="+inst.InstanceUuid)
@@ -249,7 +250,7 @@ func TestInstanceSnapshotRestore(t *testing.T) {
 	}
 	src := sampleInst(1, srcDir)
 	d.Instances = append(d.Instances, src)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	// 同步端口到 httptest 端口，使票据 addr 指向测试服务器
 	u, _ := url.Parse(srv.URL)
@@ -357,7 +358,7 @@ func TestInstanceSnapshotRestore(t *testing.T) {
 // TestClusterCoordination P2 集群协调基础版：status/heartbeat/events/peers。
 func TestClusterCoordination(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/cluster"
 
@@ -426,7 +427,7 @@ func TestClusterTransfer(t *testing.T) {
 	}
 	inst := sampleInst(1, srcDir)
 	src.Instances = append(src.Instances, inst)
-	srcSrv := newTestServer(src)
+	srcSrv := newTestServer(t, src)
 	defer srcSrv.Close()
 	su, _ := url.Parse(srcSrv.URL)
 	sport, _ := strconv.Atoi(su.Port())
@@ -437,14 +438,14 @@ func TestClusterTransfer(t *testing.T) {
 	// 测试源为 httptest（127.0.0.1 环回）：显式放行环回走通端到端链路，
 	// 生产默认禁止（防认证后 SSRF），SSRF 拒绝路径见 TestClusterTransferSSRF
 	dst.transferAllowLoopback = true
-	dstSrv := newTestServer(dst)
+	dstSrv := newTestServer(t, dst)
 	defer dstSrv.Close()
 	base := dstSrv.URL + "/api/cluster"
 
 	code, body := apiPost(t, base+"/transfer?"+qaKV(), map[string]any{
 		"instanceId": "i-abcd",
 		"source": map[string]any{
-			"address": srcSrv.URL, "apikey": qaTestApiKey(),
+			"address": srcSrv.URL, "token": qaTestToken(),
 			"uuid": inst.InstanceUuid, "daemonId": src.UUID,
 		},
 		"dest": "/mirrors/i-abcd",
@@ -485,7 +486,7 @@ func TestClusterTransfer(t *testing.T) {
 // （审计报告 #5：此前 /api/cluster/transfer 可打 127.0.0.1:12399 完整成功）
 func TestClusterTransferSSRF(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 	base := srv.URL + "/api/cluster/transfer?" + qaKV()
 
@@ -504,7 +505,7 @@ func TestClusterTransferSSRF(t *testing.T) {
 		code, body := apiPost(t, base, map[string]any{
 			"instanceId": "i-ssrf",
 			"source": map[string]any{
-				"address": addr, "apikey": qaTestApiKey(),
+				"address": addr, "token": qaTestToken(),
 				"uuid": "u-1", "daemonId": "d-1",
 			},
 			"dest": "/mirrors/i-ssrf",
@@ -532,7 +533,7 @@ func TestClusterTransferSSRF(t *testing.T) {
 		code, body := apiPost(t, base, map[string]any{
 			"instanceId": "i-lan",
 			"source": map[string]any{
-				"address": addr, "apikey": qaTestApiKey(),
+				"address": addr, "token": qaTestToken(),
 				"uuid": "u-3", "daemonId": "d-3",
 			},
 			"dest": "/mirrors/i-lan",
@@ -546,7 +547,7 @@ func TestClusterTransferSSRF(t *testing.T) {
 	code, body := apiPost(t, base, map[string]any{
 		"instanceId": "i-lo",
 		"source": map[string]any{
-			"address": "127.0.0.1:12399", "apikey": qaTestApiKey(),
+			"address": "127.0.0.1:12399", "token": qaTestToken(),
 			"uuid": "u-4", "daemonId": "d-4",
 		},
 		"dest": "/mirrors/i-lo",
@@ -563,7 +564,7 @@ func TestClusterTransferSSRF(t *testing.T) {
 	code, body = apiPost(t, base, map[string]any{
 		"instanceId": "i-ok",
 		"source": map[string]any{
-			"address": "http://203.0.113.10:12346", "apikey": qaTestApiKey(),
+			"address": "http://203.0.113.10:12346", "token": qaTestToken(),
 			"uuid": "u-2", "daemonId": "d-2",
 		},
 		"dest": "/mirrors/i-ok",
@@ -615,7 +616,7 @@ func TestParseTransferAllowCIDR(t *testing.T) {
 // - Bastille 端点在非 FreeBSD 平台恒定 501
 func TestContainerUnavailable(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := doReq(t, srv.URL+"/api/container/info?"+qaKV())
@@ -732,13 +733,14 @@ func TestContainerUnavailable(t *testing.T) {
 
 // TestFileListHasSyncFields 实例级文件列表条目含 mtime/sha256（集群文档 §4 要求）。
 func TestFileListHasSyncFields(t *testing.T) {
-	d, dir := newTestDaemon(t)
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("sync"), 0o644); err != nil {
+	d, _ := newTestDaemon(t)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("sync"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	inst := sampleInst(1, dir)
+	inst := sampleInst(1, cwd)
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := doReq(t, srv.URL+"/api/files/list?"+qaKV()+"&uuid="+inst.InstanceUuid)
@@ -765,7 +767,7 @@ func TestFileListHasSyncFields(t *testing.T) {
 // TestOverviewSyncFields 概览响应含磁盘/网络/version 字段（§2 契约）。
 func TestOverviewSyncFields(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := doReq(t, srv.URL+"/api/overview?"+qaKV())
@@ -792,7 +794,7 @@ func TestUploadTicketHasUploadDir(t *testing.T) {
 	d, dir := newTestDaemon(t)
 	inst := sampleInst(1, dir)
 	d.Instances = append(d.Instances, inst)
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	code, body := apiPost(t, srv.URL+"/api/files/upload?"+qaKV()+"&uuid="+inst.InstanceUuid+"&upload_dir=/sub",
@@ -931,7 +933,7 @@ func TestClusterRelativeDataDir(t *testing.T) {
 		t.Fatalf("测试前置失败：期望相对路径数据目录，实际 %q", rel)
 	}
 
-	d := NewDaemon(rel, qaTestApiKey())
+	d := NewDaemon(rel)
 	if err := d.Load(); err != nil {
 		t.Fatal(err)
 	}
@@ -947,7 +949,7 @@ func TestClusterRelativeDataDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "i-abcd", "world", "level.dat"), []byte("hello world"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv := newTestServer(d)
+	srv := newTestServer(t, d)
 	defer srv.Close()
 
 	// files/list：修复前 400（根被拼接两次），修复后应 200 且条目完整

@@ -14,7 +14,7 @@ MCSM 节点与本节点。
 | 主题 | 说明 |
 | --- | --- |
 | [构建与运行](docs/getting-started.md) | 编译命令、启动参数表、JSON 配置文件、账户管理概述 |
-| [多平台部署](docs/platform-deploy.md) | Windows、Linux、macOS、FreeBSD、OpenBSD、NetBSD 的预编译产物，自行编译其他平台，以及配对码机制 |
+| [多平台部署](docs/platform-deploy.md) | Windows、Linux、macOS、FreeBSD、OpenBSD、NetBSD 的预编译产物，自行编译其他平台，以及首次启动的账户引导 |
 | [功能与数据目录](docs/features.md) | 能力概览、`{data}` 目录结构 |
 | [容器环境](docs/container.md) | Docker（Linux）/ Bastille（FreeBSD）支持与 PF 注意事项 |
 | [高并发压测调优](docs/perf-tuning.md) | 百万级连接的 OS 资源上限与代码侧优化 |
@@ -39,9 +39,18 @@ MCSM 节点与本节点。
 go build -o irix-node .
 ./irix-node                  # 默认监听 127.0.0.1:12346，数据目录为当前目录
 ./irix-node -config /etc/irix-node/config.json   # 用配置文件启动（推荐，全部参数可写入）
-./irix-node -bind 0.0.0.0 -port 23333 -apikey secret   # 监听全部网卡（局域网可访问）
+./irix-node -bind 0.0.0.0 -port 23333   # 监听全部网卡（局域网可访问）
 ```
 
-详细参数与多平台运行说明见上方文档导航。在 IriX 客户端中添加「节点」时，地址填
-`http://127.0.0.1:12346`（未设 `-apikey` 时首次启动会生成配对码，见
-[多平台部署 · 配对码机制](docs/platform-deploy.md#配对码机制)）。
+详细参数与多平台运行说明见上方文档导航。**首次启动**时节点会在启动日志中打印一组
+随机生成的管理员用户名与密码（仅此一次，请立即记录），随后用它登录换取会话 token：
+
+```bash
+curl -X POST http://127.0.0.1:12346/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<用户名>","password":"<密码>"}'      # 返回 data.token
+curl "http://127.0.0.1:12346/api/overview?token=<token>"
+```
+
+在 IriX 客户端中添加「节点」时，地址填 `http://127.0.0.1:12346`，用户名与密码填上面
+打印的凭据（详见[多平台部署](docs/platform-deploy.md)）。

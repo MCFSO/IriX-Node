@@ -43,7 +43,6 @@ func runNode() error {
 		port           = flag.Int("port", 12346, "监听端口（1-65535）")
 		bindHost       = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时依次读配置文件 bind、IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
 		dataDir        = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
-		apiKey         = flag.String("apikey", "", "可选固定 API 密钥；留空则启用配对码机制（首次启动生成 20 位随机配对码，仅显示一次）")
 		instanceLog    = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
 		instanceLogMB  = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		logBufferKB    = flag.Int("log-buffer-kb", 0, "每实例内存日志环形缓冲上限（KB，0 = 用默认值；嵌入式档位默认 512KB，否则 2MB）")
@@ -85,8 +84,7 @@ func runNode() error {
 		fmt.Fprintf(os.Stderr, "  irix-node\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -config /etc/irix-node/config.json  # 用配置文件启动（推荐）\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
-		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data -apikey mykey\n")
-		fmt.Fprintf(os.Stderr, "  irix-node -bind 0.0.0.0 -port 23333 -apikey mykey  # 监听全部网卡的 23333 端口（局域网可访问）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡的 23333 端口（局域网可访问）\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -bind 192.168.1.5 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
 		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
@@ -116,7 +114,6 @@ func runNode() error {
 		Port:                  *port,
 		BindHost:              *bindHost,
 		DataDir:               *dataDir,
-		APIKey:                *apiKey,
 		InstanceLog:           *instanceLog,
 		InstanceLogMax:        *instanceLogMB,
 		AuditLog:              *auditLog,
@@ -235,7 +232,7 @@ func runNode() error {
 		return fmt.Errorf("无法创建数据目录 %s: %w", opts.DataDir, err)
 	}
 
-	d := NewDaemon(opts.DataDir, opts.APIKey)
+	d := NewDaemon(opts.DataDir)
 	runtimeOwned := false
 	defer func() {
 		if !runtimeOwned {
@@ -334,21 +331,21 @@ func runNode() error {
 		return fmt.Errorf("恢复上次运行的实例进程失败: %w", err)
 	}
 	d.frpLoad()
-	if opts.APIKey == "" {
-		code, isNew, err := d.LoadPairing()
-		if err != nil {
-			return fmt.Errorf("初始化配对码失败: %w", err)
-		}
-		if isNew {
-			alog.Printf("======================================================")
-			alog.Printf("首次启动：已生成配对码（仅此一次显示，请立即记录）")
-			alog.Printf("")
-			alog.Printf("  配对码: %s", code)
-			alog.Printf("")
-			alog.Printf("后续所有 API 请求必须携带配对码：")
-			alog.Printf("  ?apikey=%s 或请求头 X-Api-Key: %s", code, code)
-			alog.Printf("======================================================")
-		}
+	// 首次启动引导：账户库中不存在管理员账户时，随机生成管理员用户名与
+	// 密码（仅此一次显示，请立即记录并登录后修改）。已存在管理员账户则跳过。
+	if username, password, created, err := d.ensureAdminAccount(); err != nil {
+		return fmt.Errorf("初始化管理员账户失败: %w", err)
+	} else if created {
+		alog.Printf("======================================================")
+		alog.Printf("首次启动：已生成管理员账户（用户名/密码仅此一次显示，请立即记录）")
+		alog.Printf("")
+		alog.Printf("  用户名: %s", username)
+		alog.Printf("  密码  : %s", password)
+		alog.Printf("")
+		alog.Printf("登录方式: POST /api/auth/login  {\"username\":\"%s\",\"password\":\"<密码>\"}", username)
+		alog.Printf("随后的 API 请求携带会话 token：Authorization: Bearer <token> 或 X-Auth-Token 头")
+		alog.Printf("提示: 登录后请立即在账户管理中修改密码（凭据丢失只能删除账户库重新生成）")
+		alog.Printf("======================================================")
 	}
 
 	bind := resolveBind(opts.BindHost, os.Getenv("IRIX_NODE_BIND_ALL"))
@@ -422,9 +419,6 @@ func runNode() error {
 	if d.AuditLog != nil {
 		alog.Printf("审计日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", filepath.Join(logDir, "audit.log"), opts.AuditLogMax)
 	}
-	if opts.APIKey == "" {
-		alog.Printf("已启用配对码认证：所有 API 请求需携带配对码（apikey 参数或 X-Api-Key 头）")
-	}
 
 	// 运行时编排：停止接受新请求、刷入持久化、关停子进程和释放外部连接。
 	// 信号注册（忽略 SIGHUP + Interrupt/SIGTERM）拆到平台文件，js/wasm
@@ -494,9 +488,11 @@ func limitAPIBody(next http.Handler) http.Handler {
 }
 
 // Version 守护进程版本号。
+// 1.2.0：认证机制调整——移除配对码/固定 apikey 通道，首次启动随机生成
+// 管理员用户名与密码（仅显示一次），全部 API 请求走账户会话 token。
 // 1.1.0：新增实时控制台 WebSocket、实例日志持久化查询、Java 检测/安装、
 // 核心下载、导入目录（docs/irix-node-local-parity.md M1）。
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 // resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
 // 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量

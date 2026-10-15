@@ -69,10 +69,10 @@ func permKeyExists(key string) bool {
 }
 
 // permAllowed 判断账户是否放行指定端点（admin 在调用方旁路）。
-// 账户系统未启用时恒 true（此时只有 apikey 通道可达，向后兼容）。
+// 账户系统未启用时恒 false（authenticate 已先行拒绝，此处仅为防御）。
 func (d *Daemon) permAllowed(username, pattern string) bool {
 	if pattern == "" || d.accounts == nil {
-		return d.accounts == nil
+		return false
 	}
 	v, ok := d.accounts.loadPermissions(username)[pattern]
 	return ok && v

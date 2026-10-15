@@ -7,8 +7,10 @@
 //     错误凭据解锁被拒（认证路径存活）。
 //
 // 用法：
-//   .\irix-node.exe -tls-mode auto -vault -apikey e2e-key -port 19997 -data <dir> ...
-//   $env:VAULT_E2E=1; go test -run TestVaultRealServerE2E -count=1 -v .
+//   .\irix-node.exe -tls-mode auto -vault -port 19997 -data <dir> ...
+//   （首启终端会打印随机管理员用户名/密码；或使用已有账户）
+//   $env:VAULT_E2E=1; $env:IRIX_E2E_USER="<用户名>"; $env:IRIX_E2E_PASS="<密码>";
+//   go test -run TestVaultRealServerE2E -count=1 -v .
 //   重启进程后：$env:VAULT_E2E=phase2; go test -run TestVaultRealServerE2E -count=1 -v .
 
 package main
@@ -44,7 +46,38 @@ var e2eClient = &http.Client{
 	Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // E2E 冒烟专用
 }
 
-// e2eReq 向真实进程发起请求。
+// e2eSessionToken 本测试进程内缓存的会话 token（e2eLogin 获取）。
+var e2eSessionToken string
+
+// e2eLogin 用环境变量中的账户凭据登录真实进程（IRIX_E2E_USER / IRIX_E2E_PASS），
+// 获取会话 token 并缓存（后续请求以 X-Auth-Token 认证）。
+func e2eLogin(t *testing.T) string {
+	t.Helper()
+	if e2eSessionToken != "" {
+		return e2eSessionToken
+	}
+	user, pass := os.Getenv("IRIX_E2E_USER"), os.Getenv("IRIX_E2E_PASS")
+	if user == "" || pass == "" {
+		t.Fatalf("需要设置 IRIX_E2E_USER / IRIX_E2E_PASS（真实进程的账户凭据）")
+	}
+	payload, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+	resp, err := e2eClient.Post(e2eURL+"/api/auth/login", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("登录请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	token := e2eStr(out, "token")
+	if resp.StatusCode != http.StatusOK || token == "" {
+		t.Fatalf("E2E 登录失败: %d %s", resp.StatusCode, raw)
+	}
+	e2eSessionToken = token
+	return token
+}
+
+// e2eReq 向真实进程发起请求（会话 token 认证）。
 func e2eReq(t *testing.T, method, path string, body any, token string) (int, map[string]any) {
 	t.Helper()
 	var rd io.Reader
@@ -59,7 +92,7 @@ func e2eReq(t *testing.T, method, path string, body any, token string) (int, map
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("X-Api-Key", "e2e-key")
+	req.Header.Set("X-Auth-Token", e2eLogin(t))
 	if token != "" {
 		req.Header.Set("X-Vault-Token", token)
 	}
@@ -257,7 +290,7 @@ func TestVaultRealServerE2E(t *testing.T) {
 // TestVaultRealServerE2EM4 真实进程 M4 E2E（vaultFiles 物化生命周期）。
 // 用法：VAULT_E2E=m4（全新数据目录启动节点）：
 //
-//	.\irix-node.exe -tls-mode auto -vault -apikey e2e-key -port 19997 -data <dir> ...
+//	.\irix-node.exe -tls-mode auto -vault -port 19997 -data <dir> ...
 //	$env:VAULT_E2E='m4'; go test -run TestVaultRealServerE2EM4 -count=1 -v .
 func TestVaultRealServerE2EM4(t *testing.T) {
 	if os.Getenv("VAULT_E2E") != "m4" {

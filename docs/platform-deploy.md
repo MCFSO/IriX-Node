@@ -38,13 +38,20 @@ DragonFly BSD、Plan 9 等目标不再进入 CI 构建矩阵，也不提供 Rele
 WebAssembly 运行环境无法承载本项目的常驻 TCP 服务，因此不编译为节点产物。
 iOS 与 32 位 Windows ARM 不在 Go 当前可用的本项目构建目标内。
 
-## 配对码机制
+## 首次启动的账户引导
 
-不指定 `-apikey` 时启用配对码机制：
+节点不再有配对码机制（v1.2.0 起移除）：
 
-- 首次启动自动生成一个 20 位随机配对码，并在终端仅显示一次；
-- 磁盘只保存配对码的 SHA-256 哈希（`{data}/auth.hash`）；
-- API 请求携带 `?apikey=<配对码>` 查询参数或 `X-Api-Key: <配对码>` 请求头；
-- 配对码丢失后可删除 `auth.hash`，重启时生成新配对码。
+- 首次启动时若账户库（默认 `{data}/accounts.db`）中不存在任何管理员账户，
+  节点会随机生成一个管理员账户（12 位用户名 + 20 位密码，字符集 `[a-zA-Z0-9]`），
+  bcrypt 入库，并在启动日志中**仅显示一次**；
+- 已存在管理员账户时跳过引导，不打印任何凭据；
+- 登录：`POST /api/auth/login`（body `{"username":"...","password":"..."}`）→
+  `{status,data:{token,username,isAdmin,expiresAt},time}`；
+- 后续 API 请求携带会话 token：`X-Auth-Token: <token>` 头 /
+  `Authorization: Bearer <token>` 头 / `?token=<token>` 查询参数
+  （WebSocket 与浏览器场景必须用查询参数）；
+- 凭据丢失后，删除账户库重启可重新生成初始管理员，或直接操作账户库恢复
+  （也可用 `-accounts-driver` / `-accounts-dsn` 指向自有数据库）。
 
 在 IriX 客户端中添加「节点」类型的节点时，地址填 `http://127.0.0.1:12346`。

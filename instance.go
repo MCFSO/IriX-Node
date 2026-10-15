@@ -50,21 +50,6 @@ func queryParam(r *http.Request, key string) string {
 	return strings.TrimSpace(r.URL.Query().Get(key))
 }
 
-// authOK 校验请求凭证：优先校验 -apikey，否则校验配对码（apikey 参数 / X-Api-Key 头）。
-func (d *Daemon) authOK(r *http.Request) bool {
-	got := r.URL.Query().Get("apikey")
-	if got == "" {
-		got = r.Header.Get("X-Api-Key")
-	}
-	if d.APIKey != "" {
-		return got == d.APIKey
-	}
-	if d.PairingHash == "" {
-		return true
-	}
-	return checkPairing(got, d.PairingHash)
-}
-
 // RegisterRoutes 注册全部路由。除直连通道与登录入口外，
 // 每个端点同时通过 perm() 织入权限目录（组名 + 端点 + 中文描述），
 // 供账户管理的「每一步开关」使用（docs/accounts-design.md）。
@@ -228,19 +213,13 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	d.registerVaultRoutes(mux)
 }
 
-// auth 包装器：校验 API 密钥或账户会话，并按端点权限开关放行。
-// 管理员（配对码 / 固定 apikey / root 或 is_admin 账户会话）不受端点开关限制。
-// root 首次登录（尚未设置独立密码）的会话处于强制改密状态：
-// 除改密/登出/查看自身与权限目录外一律 403。
+// auth 包装器：校验账户会话，并按端点权限开关放行。
+// 管理员（is_admin 账户会话）不受端点开关限制。
 func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := d.authenticate(r)
 		if id == nil {
-			writeError(w, http.StatusForbidden, "API 密钥无效")
-			return
-		}
-		if id.mustChange && !permMustChangeExempt(r.Pattern) {
-			writeError(w, http.StatusForbidden, "首次登录必须先修改密码（PUT /api/accounts/password）")
+			writeError(w, http.StatusForbidden, "未认证或会话已过期（请先登录 POST /api/auth/login）")
 			return
 		}
 		if !id.isAdmin && !permIdentityExempt(r.Pattern) && !d.permAllowed(id.username, r.Pattern) {
@@ -249,16 +228,6 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, withIdentity(r, id))
 	}
-}
-
-// permMustChangeExempt 强制改密状态下仍可访问的端点。
-func permMustChangeExempt(pattern string) bool {
-	switch pattern {
-	case "PUT /api/accounts/password", "POST /api/auth/logout",
-		"GET /api/accounts/me", "GET /api/accounts/catalog":
-		return true
-	}
-	return false
 }
 
 // permIdentityExempt 账户自身端点（查看自身/权限目录/自己改密/登出）：

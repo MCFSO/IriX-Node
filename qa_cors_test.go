@@ -12,7 +12,9 @@ import (
 
 // newCORSServer 用与生产一致的中间件链启动测试服务器
 // （audit → cors → vaultGate → limitAPIBody → 路由）。
-func newCORSServer(d *Daemon) *httptest.Server {
+func newCORSServer(t testing.TB, d *Daemon) *httptest.Server {
+	t.Helper()
+	ensureTestAuth(t, d)
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 	return httptest.NewServer(d.auditMiddleware(corsMiddleware(d.vaultGate(limitAPIBody(mux)))))
@@ -21,7 +23,7 @@ func newCORSServer(d *Daemon) *httptest.Server {
 // TestCORSPreflight CORS 预检：204 终结，来源与请求头回显，预检结果缓存 24 小时。
 func TestCORSPreflight(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newCORSServer(d)
+	srv := newCORSServer(t, d)
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/api/instance", nil)
@@ -30,7 +32,7 @@ func TestCORSPreflight(t *testing.T) {
 	}
 	req.Header.Set("Origin", "http://127.0.0.1:3080")
 	req.Header.Set("Access-Control-Request-Method", "POST")
-	req.Header.Set("Access-Control-Request-Headers", "Content-Type, X-Api-Key")
+	req.Header.Set("Access-Control-Request-Headers", "Content-Type, X-Auth-Token")
 	resp, err := testClient.Do(req)
 	if err != nil {
 		t.Fatalf("预检请求失败: %v", err)
@@ -45,8 +47,8 @@ func TestCORSPreflight(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
 		t.Errorf("Allow-Methods 应包含 POST，实际 %q", got)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-Api-Key") {
-		t.Errorf("Allow-Headers 应回显 X-Api-Key，实际 %q", got)
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "X-Auth-Token") {
+		t.Errorf("Allow-Headers 应回显 X-Auth-Token，实际 %q", got)
 	}
 	if got := resp.Header.Get("Access-Control-Max-Age"); got != "86400" {
 		t.Errorf("Max-Age 错误: %q", got)
@@ -60,11 +62,11 @@ func TestCORSPreflight(t *testing.T) {
 // 200/403 均带 CORS 头（错误不带头前端读不到失败原因）；无 Origin 时放行 *。
 func TestCORSActualAndError(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newCORSServer(d)
+	srv := newCORSServer(t, d)
 	defer srv.Close()
 
 	// 正常跨源请求：200 + 回显来源 + 暴露 Content-Disposition
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/overview?apikey=test-key", nil)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/overview?token=test-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +90,7 @@ func TestCORSActualAndError(t *testing.T) {
 	}
 
 	// 认证失败（403）：错误响应同样必须带 CORS 头
-	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/overview?apikey=wrong-key", nil)
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/overview?token=wrong-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +101,14 @@ func TestCORSActualAndError(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("错误 apikey 应 403，实际 %d", resp.StatusCode)
+		t.Fatalf("错误 token 应 403，实际 %d", resp.StatusCode)
 	}
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "http://localhost:3080" {
 		t.Errorf("403 响应应回显来源，实际 %q", got)
 	}
 
 	// 无 Origin（curl / 服务间调用）：放行全部来源
-	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/overview?apikey=test-key", nil)
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/overview?token=test-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +128,7 @@ func TestCORSActualAndError(t *testing.T) {
 func TestCORSPreflightBypassesVaultGate(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.vault = &vaultState{enabled: true, initialized: true} // 已初始化但锁定
-	srv := newCORSServer(d)
+	srv := newCORSServer(t, d)
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/api/instance", nil)
@@ -148,7 +150,7 @@ func TestCORSPreflightBypassesVaultGate(t *testing.T) {
 	}
 
 	// 锁定态实际请求：403 但带 CORS 头
-	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/instance?apikey=test-key", nil)
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/instance?token=test-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +172,7 @@ func TestCORSPreflightBypassesVaultGate(t *testing.T) {
 // OPTIONS 不属于 CORS 预检：透传到路由，由 ServeMux 返回 405（与原行为一致）。
 func TestCORSOptionsWithoutPreflight(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	srv := newCORSServer(d)
+	srv := newCORSServer(t, d)
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodOptions, srv.URL+"/api/overview", nil)

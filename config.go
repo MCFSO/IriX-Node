@@ -68,12 +68,11 @@ type AccountsConfig struct {
 // 布尔/整数字段用指针：nil = 配置未写该字段（回退默认值）；
 // 非 nil = 显式设置（含 false/0，会覆盖内置默认值）。
 // 字符串字段零值（""）与「未设置」语义天然一致（bind 回退环境变量/默认值、
-// apiKey 空 = 配对码机制、data 空 = 当前目录），无需指针。
+// data 空 = 当前目录），无需指针。
 type Config struct {
 	Bind              string          `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
 	Port              int             `json:"port"`              // 监听端口（1-65535；0 = 未设置）
 	Data              string          `json:"data"`              // 数据目录（空 = 当前目录）
-	APIKey            string          `json:"apiKey"`            // 固定 API 密钥（空 = 启用配对码机制）
 	InstanceLog       *bool           `json:"instanceLog"`       // 实例日志落盘开关
 	InstanceLogMax    *int            `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
 	AuditLog          *bool           `json:"auditLog"`          // 审计日志落盘开关
@@ -135,7 +134,6 @@ type nodeOptions struct {
 	Port              int
 	BindHost          string
 	DataDir           string
-	APIKey            string
 	InstanceLog       bool
 	InstanceLogMax    int
 	AuditLog          bool
@@ -187,9 +185,6 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 	}
 	if !setFlags["data"] && cfg.Data != "" {
 		o.DataDir = cfg.Data
-	}
-	if !setFlags["apikey"] && cfg.APIKey != "" {
-		o.APIKey = cfg.APIKey
 	}
 	if !setFlags["instance-log"] && cfg.InstanceLog != nil {
 		o.InstanceLog = *cfg.InstanceLog

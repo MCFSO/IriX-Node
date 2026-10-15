@@ -29,7 +29,7 @@ func waitDirtyFlushed(t *testing.T, dir string) {
 // 停止信号发出时写盘可能仍在进行，StopAutoSave 必须等待这次写入完成。
 func TestAsyncSaveStopWaitsForInFlightWrite(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = time.Millisecond
 	d.saveMu.Lock()
 	var unlockOnce sync.Once
@@ -62,7 +62,7 @@ func TestAsyncSaveStopWaitsForInFlightWrite(t *testing.T) {
 	lifecycleWait(t, stopped)
 	d.StartAutoSave() // 停止后重启为空操作
 	d.StopAutoSave()
-	restarted := NewDaemon(dir, "test-key")
+	restarted := NewDaemon(dir)
 	if err := restarted.Load(); err != nil || restarted.Find(inst.InstanceUuid) == nil {
 		t.Fatalf("停止前已经开始的写入未完成: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestAsyncSaveStopWaitsForInFlightWrite(t *testing.T) {
 
 func TestAsyncSaveDirtyAndFlush(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = 0 // 本用例不开后台循环，手动控制 flush
 
 	inst := NewInstance("", InstanceConfig{Nickname: "async", Cwd: dir})
@@ -91,7 +91,7 @@ func TestAsyncSaveDirtyAndFlush(t *testing.T) {
 	}
 
 	// 落盘后新实例可被重新加载（重启语义保持）
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatalf("Load 失败: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAsyncSaveDirtyAndFlush(t *testing.T) {
 
 func TestAsyncSaveUpdateAndRemove(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = 0
 
 	inst := NewInstance("", InstanceConfig{Nickname: "u", Cwd: dir})
@@ -128,7 +128,7 @@ func TestAsyncSaveUpdateAndRemove(t *testing.T) {
 	if err := d.FlushDirty(); err != nil {
 		t.Fatalf("FlushDirty 失败: %v", err)
 	}
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	_ = d2.Load()
 	if got := d2.Find(inst.InstanceUuid); got == nil || got.Config.Nickname != "u2" {
 		t.Fatalf("重启后昵称应为 u2，实际 %+v", got)
@@ -141,7 +141,7 @@ func TestAsyncSaveUpdateAndRemove(t *testing.T) {
 	if err := d.FlushDirty(); err != nil {
 		t.Fatalf("FlushDirty 失败: %v", err)
 	}
-	d3 := NewDaemon(dir, "test-key")
+	d3 := NewDaemon(dir)
 	_ = d3.Load()
 	if d3.Find(inst.InstanceUuid) != nil {
 		t.Fatal("Remove + FlushDirty 后重启不应再找到该实例")
@@ -150,7 +150,7 @@ func TestAsyncSaveUpdateAndRemove(t *testing.T) {
 
 func TestAsyncSaveLoopDebounce(t *testing.T) {
 	dir := t.TempDir()
-	d := NewDaemon(dir, "test-key")
+	d := NewDaemon(dir)
 	d.SaveDebounce = 20 * time.Millisecond
 	d.StartAutoSave()
 	defer d.StopAutoSave()
@@ -161,7 +161,7 @@ func TestAsyncSaveLoopDebounce(t *testing.T) {
 	}
 	waitDirtyFlushed(t, dir)
 
-	d2 := NewDaemon(dir, "test-key")
+	d2 := NewDaemon(dir)
 	if err := d2.Load(); err != nil {
 		t.Fatal(err)
 	}

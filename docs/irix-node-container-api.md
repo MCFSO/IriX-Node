@@ -24,14 +24,19 @@
 | 项 | 约定 |
 |----|------|
 | 基础地址 | `http://<host>:<port>` |
-| 认证 | `apikey` 查询参数（本地节点可省略） |
+| 认证 | 账户会话 token（`POST /api/auth/login` 取得）：`X-Auth-Token` 头 / `Authorization: Bearer` 头 / `?token=` 查询参数 |
 | 请求头 | `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
 | 请求体 | `application/json; charset=utf-8` |
 | 响应体 | 统一 `{ "status": 200, "data": <payload>, "time": <unix_ms> }` |
 | 错误 | `status != 200` 时 `data` 为错误消息字符串；HTTP 层错误（4xx/5xx）客户端会转成 `HTTP <code>: <body>` 展示 |
 | 字符集 | UTF-8 |
 
-客户端所有请求都带 `apikey` 查询参数（配置了密钥时），响应 `status != 200` 即抛异常并把 `data` 字符串显示给用户。**错误信息请写清楚可读的中文/英文原因**，不要只返回 exit code。
+客户端所有请求都必须先登录取得会话 token 并随请求携带（WebSocket 与浏览器场景用
+`?token=` 查询参数），响应 `status != 200` 即抛异常并把 `data` 字符串显示给用户。
+**错误信息请写清楚可读的中文/英文原因**，不要只返回 exit code。
+
+> v1.2.0 起配对码与固定 `apikey` 认证通道已移除：`?apikey=` / `X-Api-Key`
+> 不再被本节点接受，客户端必须先登录取得 token。
 
 ---
 
@@ -496,27 +501,34 @@ DELETE /api/bastille/jails/{name}/config?key=<key>
 
 ---
 
-## 5. 自测清单（curl 示例，假设 apikey=KEY）
+## 5. 自测清单（curl 示例，先用管理员账户登录取得 TOKEN）
 
 ```bash
+# 0. 登录取得会话 token（首次启动的管理员凭据见启动日志，仅显示一次）
+TOKEN=$(curl -s -X POST "http://<node>:<port>/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<用户名>","password":"<密码>"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
 # 1. 能力探测
-curl "http://<node>:<port>/api/container/info?apikey=KEY"
+curl "http://<node>:<port>/api/container/info?token=$TOKEN"
 
 # 2. 发行版列表 —— 必须含 sizeBytes（问题 #1）
-curl "http://<node>:<port>/api/bastille/releases?apikey=KEY"
+curl "http://<node>:<port>/api/bastille/releases?token=$TOKEN"
 
 # 3. 创建 Jail —— 用客户端真实 body 验证（问题 #2）
-curl -X POST "http://<node>:<port>/api/bastille/jails/create?apikey=KEY" \
+curl -X POST "http://<node>:<port>/api/bastille/jails/create?token=$TOKEN" \
   -H 'Content-Type: application/json' -H 'X-Requested-With: XMLHttpRequest' \
   -d '{"name":"mc-test","release":"14.2-RELEASE","ip":"192.168.1.50/24","type":"thin","vnet":"none","interface":null,"volumes":[],"workdir":null,"memoryLimitMb":null,"cpus":null,"diskLimitMb":null}'
 
 # 4. rdr（创建后客户端会自动调用）
-curl -X POST "http://<node>:<port>/api/bastille/rdr?apikey=KEY" \
+curl -X POST "http://<node>:<port>/api/bastille/rdr?token=$TOKEN" \
   -H 'Content-Type: application/json' -H 'X-Requested-With: XMLHttpRequest' \
   -d '{"jail":"mc-test","proto":"tcp","hostPort":25565,"jailPort":25565}'
 ```
 
-预期：全部返回 `status: 200`；任何一步非 200，前端对应功能即报错。
+上述请求也可改用 `X-Auth-Token: $TOKEN` 请求头。预期：全部返回 `status: 200`；
+任何一步非 200，前端对应功能即报错。
 
 ---
 

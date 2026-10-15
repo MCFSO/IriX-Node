@@ -33,7 +33,7 @@ func TestRecoverOrphanProcess(t *testing.T) {
 	if err != nil || bytes.Contains(data, []byte(inst.InstanceUuid)) {
 		t.Fatalf("进程记录不应暴露实例标识: %v", err)
 	}
-	restarted := NewDaemon(dir, "test-key")
+	restarted := NewDaemon(dir)
 	if err := restarted.recoverOrphanProcesses(); err != nil {
 		t.Fatalf("清理遗留进程失败: %v", err)
 	}

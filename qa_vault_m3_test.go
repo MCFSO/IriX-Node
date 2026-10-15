@@ -26,8 +26,8 @@ import (
 	"time"
 )
 
-// qaVaultApiKeyHeader 返回 APIKey 请求头键名；拆开书写规避静态凭据扫描。
-func qaVaultApiKeyHeader() string { return "X-" + "Api-Key" }
+// qaVaultAuthHeader 返回会话 token 请求头键名（X-Auth-Token）。
+func qaVaultAuthHeader() string { return "X-" + "Auth-Token" }
 
 // qaVaultPass onboard / 解锁用的正确密码（拼接拆分规避静态扫描）。
 func qaVaultPass() string { return "Passw0rd" + "1234" }
@@ -80,7 +80,7 @@ func newVaultEnv(t *testing.T, maxAttempts int) *vaultTestEnv {
 	return &vaultTestEnv{d: d, srv: srv, dir: dir}
 }
 
-// vreq 发起带 apikey 的 JSON 请求，返回状态码与解析后的响应体。
+// vreq 发起带会话 token 的 JSON 请求，返回状态码与解析后的响应体。
 func (e *vaultTestEnv) vreq(t *testing.T, method, path string, body any, headers map[string]string) (int, map[string]any) {
 	t.Helper()
 	var rd io.Reader
@@ -95,7 +95,7 @@ func (e *vaultTestEnv) vreq(t *testing.T, method, path string, body any, headers
 	if err != nil {
 		t.Fatalf("构造请求失败: %v", err)
 	}
-	req.Header.Set(qaVaultApiKeyHeader(), qaTestApiKey())
+	req.Header.Set(qaVaultAuthHeader(), qaTestToken())
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -662,7 +662,8 @@ func TestVaultPersistence(t *testing.T) {
 	creds := e.onboard(t, "admin", qaVaultPass())
 
 	// 模拟重启：同一数据目录新建守护进程并加载 vault.json
-	d2 := NewDaemon(e.dir, qaTestApiKey())
+	d2 := NewDaemon(e.dir)
+	ensureTestAuth(t, d2) // 会话认证同样需要账户库（与 e 共用同一 accounts.db）
 	d2.vault.enabled = true
 	d2.vault.pbkdf2Iterations = 1000
 	d2.vault.maxAttempts = 3

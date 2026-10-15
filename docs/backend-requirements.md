@@ -18,7 +18,8 @@
 GET /api/audit/log?tail=<行数>&since=<unix_ms>
 ```
 
-- 认证：与其他 API 一致（`apikey` 查询参数或 `X-Api-Key` 请求头），走现有 `d.auth` 包装。
+- 认证：与其他 API 一致（`X-Auth-Token` 头 / `Authorization: Bearer <token>` 头 /
+  `?token=<token>` 查询参数，凭 `POST /api/auth/login` 取得的会话 token），走现有 `d.auth` 包装。
 - 响应：统一信封 `{status, data, time}`；`data` 为**纯文本字符串**（审计行，`\n` 分隔）。
 - 错误：`status != 200` 时 `data` 为中文错误消息（与现有 `writeError` 一致）。
 
@@ -35,7 +36,8 @@ GET /api/audit/log?tail=<行数>&since=<unix_ms>
 2. 内容来源：`{data}/logs/audit.log` 与轮转文件 `.1`（旧→新拼接；实现可直接复用
    `instance_logs.go` 里的 `readLogTail(paths, n)` / `readLogSince(paths, sinceMs)`，
    传入 `[]string{审计文件路径 + ".1", 审计文件路径}`）。
-3. 审计行本身已由 `auditMiddleware` 做 apikey 打码与控制字符转义，接口**不要再做任何改动**，
+3. 审计行本身已由 `auditMiddleware` 做查询串打码（会话 `token` 与历史字段 `apikey`）
+   与控制字符转义，接口**不要再做任何改动**，
    原样输出即可（前端按行渲染）。
 4. 该接口自身也会被审计中间件记录（与其他 API 一致），无需特殊处理。
 
@@ -46,7 +48,7 @@ GET /api/audit/log?tail=<行数>&since=<unix_ms>
 mux.HandleFunc("GET /api/audit/log", d.auth(d.handleAuditLog))
 
 // 处理器（audit.go 末尾追加）：
-// handleAuditLog 读取审计日志（只读查看；内容已经过 apikey 打码与控制字符转义）。
+// handleAuditLog 读取审计日志（只读查看；内容已经过查询串打码与控制字符转义）。
 // GET /api/audit/log?tail=<行数>&since=<unix_ms>
 //   - tail：返回最后 N 行（默认 500；显式 0 表示全部，上限 20000）
 //   - since：返回该时间点之后新增的内容（前端轮询增量用，按文件 mtime 近似过滤）

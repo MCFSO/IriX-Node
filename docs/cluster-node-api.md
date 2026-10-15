@@ -19,7 +19,7 @@
 | 项 | 约定 |
 |----|------|
 | 基础地址 | `http://<host>:<port>` |
-| 认证 | `apikey` 查询参数（本地节点可省略）；请求头 `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
+| 认证 | 账户会话 token（`POST /api/auth/login` 取得）：`X-Auth-Token` 头 / `Authorization: Bearer` 头 / `?token=` 查询参数（WebSocket 与浏览器场景必须用查询参数）；请求头 `X-Requested-With: XMLHttpRequest`（MCSM 必需，irix-node 建议兼容） |
 | 请求体 | `application/json; charset=utf-8` |
 | 响应体 | 统一 `{ "status": 200, "data": <payload>, "time": <unix_ms> }` |
 | 错误 | `status != 200` 时 `data` 为错误消息字符串；**HTTP 状态码与 `body.status` 一致** |
@@ -190,7 +190,7 @@
 // 请求体：指示本节点从 source 拉取实例数据到本节点同步区
 {
   "instanceId": "i-abcd",
-  "source": { "address": "http://192.168.1.6:12346", "apikey": "", "uuid": "…", "daemonId": "…" },
+  "source": { "address": "http://192.168.1.6:12346", "token": "<对端会话 token>", "uuid": "…", "daemonId": "…" },
   "dest": "/mirrors/i-abcd"
 }
 // 响应 data
@@ -199,13 +199,18 @@
 
 > 轮询 `GET /api/cluster/transfer?jobId=job-1` 返回 `{ "status": "running|done|failed", "bytes": 12345 }`。
 
+> `source.token` 为**来源节点的账户会话 token**（本节点会以 `?token=` 拼到远端查询参数）。
+> 来源为 MCSM 面板节点时该节点的认证仍是其自身的 `apikey`；`apikey` 不是本节点
+> （irix-node）的认证方式，自 v1.2.0 起本节点也不接受 `?apikey=` / `X-Api-Key`。
+
 > **安全限制**：`source.address` 仅允许 http/https 协议；以下目标一律拒绝：
 > 环回（127.0.0.1/::1）、未指定、链路本地（含云元数据 169.254.x.x）、组播、
 > 广播、指向本节点自身的地址，以及 **RFC1918 内网地址（10/8、172.16/12、
 > 192.168/16，含 IPv6 ULA fc00::/7）**。重定向目标与远端响应中的直连地址
 > 同样逐跳校验。
 >
-> **信任假设与配置**：内网地址默认拒绝——若认证失守（弱 apikey / 配对码泄漏），
+> **信任假设与配置**：内网地址默认拒绝——若认证失守（弱管理员密码 / 会话
+> token 泄漏 / 对端 MCSM 面板 apikey 泄漏），
 > 放行内网意味着节点可被用作内网扫描跳板（SSRF）。集群 **LAN 节点间直传**是
 > 该接口的设计用途，需要放行内网时由管理员显式配置：
 >

@@ -205,14 +205,12 @@ type Daemon struct {
 	consoles        map[*wsConn]struct{} // HTTP 已劫持的控制台连接，需要显式关闭
 	consoleClosed   bool
 
-	DataDir     string
-	APIKey      string
-	PairingHash string
-	Port        int
-	BindHost    string // 实际监听主机（空 = 127.0.0.1），决定下载/上传直连地址
-	UUID        string
-	Instances   []*Instance
-	StartedAt   time.Time
+	DataDir   string
+	Port      int
+	BindHost  string // 实际监听主机（空 = 127.0.0.1），决定下载/上传直连地址
+	UUID      string
+	Instances []*Instance
+	StartedAt time.Time
 
 	LogDir      string         // 实例日志落盘目录（空 = 不落盘）
 	LogMaxBytes int64          // 单实例日志文件轮转上限（字节）
@@ -263,10 +261,9 @@ type Daemon struct {
 }
 
 // NewDaemon 创建守护进程实例。
-func NewDaemon(dataDir, apiKey string) *Daemon {
+func NewDaemon(dataDir string) *Daemon {
 	d := &Daemon{
 		DataDir:         dataDir,
-		APIKey:          apiKey,
 		Port:            12346,
 		UUID:            newUUID(),
 		Instances:       []*Instance{},
