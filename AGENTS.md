@@ -10,17 +10,34 @@ IriX 客户端「节点」类型的本地节点守护进程，Go 语言实现。
 ## 常用命令
 
 ```powershell
-go build -o irix-node .       # 构建
+go build -o bin/irix-node ./cmd/irix-node   # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试（CI 必跑）
-go run . -port 12346 -data <目录>   # 本地运行
-go run . -config config.json  # 用配置文件启动（全部启动参数可写入）
-go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
+go run ./cmd/irix-node -port 12346 -data <目录>   # 本地运行
+go run ./cmd/irix-node -config config.json  # 用配置文件启动（全部启动参数可写入）
+go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
 ```
 
-修改代码后必须通过 `go vet ./...` 与 `go build .`。
+修改代码后必须通过 `go vet ./...` 与 `go build ./cmd/irix-node`。
+
+## 目录结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `cmd/irix-node/` | 程序入口与核心（`package main`）：HTTP API、实例与进程管理、账户、保险库、集群等。`Daemon` 的所有方法必须与 `Daemon` 同包，故集中于此目录 |
+| `internal/sysinfo/` | 系统与进程探测：主机指标（CPU/内存/网络/运行时间）、磁盘余量、数据目录选址、进程身份核对与资源占用（含 `_windows`/`_linux`/`_bsd` 平台实现） |
+| `internal/platform/` | 进程级 OS 适配：OpenBSD pledge(2)/unveil(2) 权限自限制、RLIMIT_NOFILE 提升、平台信号装配 |
+| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 密钥派生、AES-GCM 包裹、TOTP、挑战签名校验、自签/手动 TLS |
+| `docs/` | 设计与接口文档（`api/` 为接口分册，`audit/` 为审计报告） |
+| `scripts/` | 部署脚本（systemd 安装） |
+| `bin/` | 本地构建产物（已被 `.gitignore` 忽略） |
+
+`internal/` 各包不反向依赖主包；`internal/platform` 需要日志时由主包在启动时调用
+`platform.SetLogf(alog.Printf)` 注入。
 
 ## 架构
+
+下表文件均位于 `cmd/irix-node/`，`internal/` 下的包另见「目录结构」。
 
 | 文件 | 职责 |
 | --- | --- |
@@ -33,7 +50,6 @@ go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
 | `files.go` | 文件管理 API：列表/读写/删除/移动/复制/压缩/解压/新建 |
 | `download.go` | 带票据的下载/上传直连通道 `ticketStore` |
 | `overview.go` | `GET /api/overview` 主机信息 |
-| `sysinfo.go` + `sysinfo_{windows,linux,bsd,other}.go` | 跨平台系统信息采集（构建标签区分） |
 | `auth.go` | 首次启动引导：`ensureAdminAccount` 在账户库无管理员时随机生成用户名（12 位）与密码（20 位）并 bcrypt 入库，仅显示一次 |
 | `accounts.go` | 账户管理数据面：SQL 存储（sqlite/mysql/postgres，连接池）、会话、bcrypt、Redis 热缓存与降级 |
 | `accounts_handlers.go` | 账户管理 API：登录/登出/改密/账户 CRUD/权限开关、`authenticate` 身份认证 |
@@ -51,7 +67,8 @@ go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
   规则见 `docs/accounts-design.md`。
 - **风格**：`gofmt` 排版；导出符号带中文注释；类型为 `*Daemon` 的方法。
 - **平台差异**：系统相关代码拆成 `_windows`/`_linux`/`_bsd`/`_other` 后缀文件，
-  用 `//go:build` 标签区分，新平台能力必须补齐对应文件。
+  用 `//go:build` 标签区分，新平台能力必须补齐对应文件（现主要位于 `internal/sysinfo`、
+  `internal/platform` 与 `cmd/irix-node`）。
 - **错误处理**：HTTP 处理器出错时用 `writeError` 返回；错误消息为中文。
 - **并发**：`Daemon.mu` 保护实例列表，`Instance.mu` 保护单个实例；
   访问 `inst.Status`/`inst.Config` 前必须加锁。
@@ -79,6 +96,6 @@ go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
 
 - `config.json`：启动参数配置（JSON，可用 `-config` 指定路径；不存在时首次启动
   自动生成一份示例配置，生成失败仅告警不阻断启动）。
-  字段见 `config.example.json`；优先级为 **命令行显式参数 > 配置文件 > 默认值**。
+  字段见 `cmd/irix-node/config.example.json`；优先级为 **命令行显式参数 > 配置文件 > 默认值**。
   布尔/整数字段用指针区分「未设置」（回退默认值）与「显式 false/0」。
 - Linux systemd 安装脚本生成 `/etc/irix-node/config.json` 并以 `-config` 启动。

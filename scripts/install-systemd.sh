@@ -7,11 +7,11 @@
 #
 # 用法：
 #   sudo sh install-systemd.sh                          # 使用默认配置
-#   sudo sh install-systemd.sh -bin ./irix-node \
+#   sudo sh install-systemd.sh -bin ./bin/irix-node \
 #        -bind 0.0.0.0 -port 23333                    # 自定义监听地址与端口
 #
 # 参数：
-#   -bin <路径>      irix-node 二进制路径（默认脚本同目录 irix-node）
+#   -bin <路径>      irix-node 二进制路径（默认仓库 bin/irix-node）
 #   -url <URL>       从 URL 下载二进制（覆盖 -bin）
 #   -bind <地址>     监听地址（默认 127.0.0.1；局域网访问用 0.0.0.0）
 #   -port <端口>     监听端口（默认 12346）
@@ -34,7 +34,7 @@
 
 set -eu
 
-BIN_SRC="$(dirname "$0")/irix-node"
+BIN_SRC="$(dirname "$0")/../bin/irix-node"
 BIN_URL=""
 BIND_ADDR="127.0.0.1"
 PORT="12346"

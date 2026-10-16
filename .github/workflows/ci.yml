@@ -36,7 +36,7 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 -short ./...
       - name: Build
-        run: go build -o irix-node .
+        run: go build -o irix-node ./cmd/irix-node
 
   build:
     name: Cross-build (${{ matrix.goos }}-${{ matrix.goarch }})
@@ -92,7 +92,7 @@ jobs:
           GOARM: ${{ matrix.goarm }}
         run: |
           bin="irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w" -o "$bin" .
+          go build -trimpath -ldflags "-s -w" -o "$bin" ./cmd/irix-node
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

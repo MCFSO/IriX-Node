@@ -7,7 +7,7 @@
 - **文件描述符上限（最关键）**：每个 TCP 连接占用一个 fd。Linux 默认软上限常是
   1024，百万连接会瞬间耗尽，Accept 返回 `EMFILE`，客户端表现为大量
   `connection refused`。节点在 Unix 上启动时会**自动把 `RLIMIT_NOFILE` 软上限
-  提升到硬上限**（见 `rlimit_unix.go`），但硬上限本身仍需部署侧调高：
+  提升到硬上限**（见 `internal/platform/rlimit_unix.go`），但硬上限本身仍需部署侧调高：
   ```bash
   # 临时（当前 shell / systemd 服务）
   ulimit -n 2000000

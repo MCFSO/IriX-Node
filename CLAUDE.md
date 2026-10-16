@@ -12,19 +12,34 @@ IriX 客户端「节点」类型的本地节点守护进程，Go 语言实现。
 ## 常用命令
 
 ```bash
-go build -o irix-node .       # 构建
+go build -o bin/irix-node ./cmd/irix-node   # 构建
 go vet ./...                  # 静态检查（CI 必跑）
 go test ./...                 # 测试
 go test -race -count=1 ./...  # 带竞态检测的测试（Windows 本地需 gcc）
-go run . -port 12346 -data <目录>   # 本地运行
-go run . -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
-go run . -port 12346 -data <目录> -instance-log=false  # 关闭实例日志落盘
-go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）
+go run ./cmd/irix-node -port 12346 -data <目录>   # 本地运行
+go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域网访问）
+go run ./cmd/irix-node -port 12346 -data <目录> -instance-log=false  # 关闭实例日志落盘
+go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）
 ```
 
-修改代码后必须通过 `go vet ./...` 与 `go build .`。
+修改代码后必须通过 `go vet ./...` 与 `go build ./cmd/irix-node`。
+
+## 目录结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `cmd/irix-node/` | 程序入口与核心（`package main`）。Go 要求方法与其类型同包，`Daemon` 的 260+ 方法因此集中在此目录 |
+| `internal/sysinfo/` | 系统与进程探测：主机指标、磁盘余量、数据目录选址、进程身份与资源占用（含各平台实现） |
+| `internal/platform/` | 进程级 OS 适配：OpenBSD pledge/unveil 权限自限制、RLIMIT_NOFILE 提升、信号装配 |
+| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 派生、AES-GCM 包裹、TOTP、挑战签名校验、TLS |
+| `docs/` | 设计与接口文档（`api/` 接口分册、`audit/` 审计报告） |
+| `scripts/` | 部署脚本；`bin/` 为本地构建产物（已 gitignore） |
+
+`internal/` 各包不反向依赖主包；`internal/platform` 需要日志时由主包 `platform.SetLogf(alog.Printf)` 注入。
 
 ## 架构
+
+下表文件均位于 `cmd/irix-node/`。
 
 | 文件 | 职责 |
 | --- | --- |
@@ -43,7 +58,6 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
 | `accounts_handlers.go` | 账户管理 API：登录/登出/改密/账户 CRUD/权限开关；`authenticate`（Bearer / X-Auth-Token / ?token= 会话 token → 账户身份） |
 | `perm_catalog.go` | 端点权限目录：`perm(组, 模式, 描述)` 织入、分组、`permAllowed` 逐端点判定 |
 | `cors.go` | CORS 中间件：跨源响应头、预检 204 终结、错误响应同样带 CORS 头 |
-| `sysinfo.go` + `sysinfo_{windows,linux,bsd,other}.go` | 跨平台系统信息采集（构建标签区分）：运行时间、内存、CPU |
 
 ## 锁与并发
 
@@ -63,7 +77,7 @@ go run . -port 12346 -data <目录> -audit-log=false  # 关闭审计日志落盘
   纳入端点权限目录（`qa_perms_test.go` 反向扫描源码校验漏标注）。
   规则见 `docs/accounts-design.md`。
 - **风格**：`gofmt` 排版；导出符号带中文注释；类型为 `*Daemon`/`*Instance` 的方法。
-- **平台差异**：系统相关代码拆成 `_windows`/`_linux`/`_bsd`/`_other` 后缀文件，用 `//go:build` 标签区分。新平台能力必须补齐对应文件。
+- **平台差异**：系统相关代码拆成 `_windows`/`_linux`/`_bsd`/`_other` 后缀文件，用 `//go:build` 标签区分。新平台能力必须补齐对应文件（现主要位于 `internal/sysinfo`、`internal/platform` 与 `cmd/irix-node`）。
 - **错误处理**：HTTP 处理器出错时用 `writeError` 返回；错误消息为中文。
 - **响应格式**：统一 MCSM 风格 `{status, data, time}`（通过 `writeJSON`/`writeOK`）。
 

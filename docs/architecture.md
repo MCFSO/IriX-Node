@@ -23,10 +23,10 @@
 | 传输层 | `http_server.go`、`instance.go`、`cors.go`、`audit.go`、`console_ws.go` | HTTP/WS 组装、路由、认证/权限、CORS、请求体限制、统一响应 | 调用现有 `Daemon` 用例方法 |
 | 应用模块 | `files.go`、`backup.go`、`cluster.go`、`container.go`、`vault_handlers.go`、`accounts_handlers.go` | 编排一个用例，校验输入，映射错误和异步任务 | 通过 `Daemon` 访问领域和适配器 |
 | 核心模型 | `daemon.go`、`instance.go` 的实例用例、`process.go`、`jobs.go` | 实例状态、进程状态、任务状态、并发边界、状态迁移 | 当前仍与 HTTP 方法共用包；逐步减少跨模块字段访问 |
-| 基础设施适配器 | `accounts*.go`、`vault_store.go`、`logger.go`、`sysinfo_*.go`、`process_*.go` | SQL/Redis、加密对象、日志、平台能力 | 只实现领域需要的能力 |
+| 基础设施适配器 | `accounts*.go`、`vault_store.go`、`logger.go`、`process_*.go`，以及 `internal/sysinfo`（系统/进程探测）、`internal/platform`（进程级 OS 适配）、`internal/vaultcrypto`（密码学原语） | SQL/Redis、加密对象、日志、平台能力 | 只实现领域需要的能力 |
 | 持久化边界 | `instances.json`、`accounts.db`、`vault/`、`logs/`、外部 SQL/Redis | 保存配置、账户、密文对象、审计与实例日志 | 不直接参与请求路由 |
 
-目标依赖方向为“入口 → 传输 → 应用 → 核心模型 → 适配器”。当前所有代码仍在 `package main`，这是一份组件职责约束，并不是已由 Go 包系统强制执行的独立分层。`instance.go` 同时含路由和实例用例，部分基础设施文件也含处理器；本次没有把现有模块包装成空接口。异步任务继续通过任务表报告进度。
+目标依赖方向为“入口 → 传输 → 应用 → 核心模型 → 适配器”。核心仍集中在 `cmd/irix-node/` 的 `package main`（因为 `Daemon` 的 260+ 方法必须与 `Daemon` 同包），可独立复用的叶子能力已拆到 `internal/sysinfo`、`internal/platform`、`internal/vaultcrypto` 三个包。这是一份组件职责约束，并不是已由 Go 包系统全量强制执行的独立分层。`instance.go` 同时含路由和实例用例，部分基础设施文件也含处理器；本次没有把现有模块包装成空接口。异步任务继续通过任务表报告进度。
 
 ## 启动与资源所有权
 

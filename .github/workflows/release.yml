@@ -57,7 +57,7 @@ jobs:
           GOARM: ${{ matrix.goarm }}
         run: |
           bin="irix-node-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w" -o "$bin" .
+          go build -trimpath -ldflags "-s -w" -o "$bin" ./cmd/irix-node
           sha256sum "$bin" > "$bin.sha256"
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

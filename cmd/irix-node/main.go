@@ -1,0 +1,766 @@
+// IriX Node Daemon
+// IriX 本地节点守护进程（Go 实现）。
+//
+// 提供与 MCSManager 面板一致风格的 HTTP API（见 apis/node_api.md），
+// 使得 IriX 客户端可以用同一套客户端代码同时管理 MCSM 节点与本节点。
+// 核心以标准库为主；账户存储使用 go.mod 中批准的数据库与缓存依赖。
+
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"irix/node/internal/platform"
+	"irix/node/internal/sysinfo"
+	"irix/node/internal/vaultcrypto"
+)
+
+func main() {
+	err := runNode()
+	if err != nil {
+		log.Print(err)
+	}
+	alog.Close()
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// runNode 是组合根：解析配置、初始化依赖，再交由运行时管理服务生命周期。
+// 返回错误而不是在初始化中直接退出，确保已经创建的资源能被释放。
+func runNode() error {
+	var (
+		configPath     = flag.String("config", "config.json", "配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件（字段见 cmd/irix-node/config.example.json），命令行显式参数优先级高于配置文件")
+		port           = flag.Int("port", 12346, "监听端口（1-65535）")
+		bindHost       = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时依次读配置文件 bind、IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
+		dataDir        = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
+		instanceLog    = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
+		instanceLogMB  = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
+		logBufferKB    = flag.Int("log-buffer-kb", 0, "每实例内存日志环形缓冲上限（KB，0 = 用默认值；嵌入式档位默认 512KB，否则 2MB）")
+		logLines       = flag.Int("log-lines", 0, "每实例断线重连补发行缓冲上限（行，0 = 用默认值；嵌入式档位默认 300，否则 1000）")
+		auditLog       = flag.Bool("audit-log", true, "将用户操作审计日志异步落盘到 {data}/logs/audit.log（记录每次 API 请求的完整细节）")
+		auditLogMB     = flag.Int("audit-log-max", 64, "审计日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
+		loadTune       = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
+		lowResource    = flag.Bool("low-resource", false, "强制启用嵌入式预设（更小的每实例日志缓冲/内存软上限 GOMEMLIMIT/更低的 PBKDF2 默认迭代）；留空则按 CPU 核数与物理内存自动判定（≤2 核或 ≤512MB 即套用）")
+		transferCIDR   = flag.String("transfer-allow-cidr", "", "集群拉取（POST /api/cluster/transfer）额外放行的内网 CIDR 列表（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置（环回/链路本地/本机地址任何配置都不可放行）")
+		tlsMode        = flag.String("tls-mode", "off", "TLS 模式：off（默认，明文 HTTP，与既有部署兼容）/ auto（自动生成自签证书，启动日志打印指纹，客户端按指纹固定校验）/ manual（使用 -tls-cert / -tls-key 指定的正式证书）；开启加密保险库（-vault）时强制要求 TLS")
+		tlsCertFile    = flag.String("tls-cert", "", "manual 模式：TLS 证书文件路径（PEM）")
+		tlsKeyFile     = flag.String("tls-key", "", "manual 模式：TLS 私钥文件路径（PEM）")
+		vaultEnabled   = flag.Bool("vault", false, "启用加密保险库：数据加密存储，访问需 TOTP+密码+证书签名解锁（见 docs/vault-design.md；开启时强制要求 TLS，否则拒绝启动）")
+		vaultIdle      = flag.Int("vault-idle-timeout", 30, "保险库解锁会话空闲超时（分钟），到期自动锁定")
+		vaultAttempts  = flag.Int("vault-max-attempts", 5, "保险库 unlock/recovery/初始化验证的统一失败限速阈值（用户+IP 双维度）")
+		vaultLockout   = flag.Int("vault-lockout-minutes", 15, "保险库失败限速触发后的锁定时长（分钟）")
+		vaultKDFIter   = flag.Int("vault-pbkdf2-iterations", 0, "保险库密码派生 KEK 的 PBKDF2 迭代次数（0 = 按平台架构自适应：arm64 等具硬件 SHA 用 600000，MIPS/armv7 无硬件加速用更低默认）")
+		vaultPwMinLen  = flag.Int("vault-password-min-length", 12, "保险库密码最小长度（须含大写、小写与数字）")
+		vaultPwExpire  = flag.Int("vault-password-expire-days", 90, "保险库密码有效期（天，0=不过期），到期解锁响应提示 passwordExpired")
+		vaultForceExp  = flag.Bool("vault-force-expire", false, "保险库密码到期强制改密：解锁请求必须携带 newPassword 同请求完成解锁+改密")
+		vaultBindIP    = flag.Bool("vault-bind-session-ip", false, "保险库会话令牌绑定来源 IP（防令牌跨机器盗用；动态 IP 场景请保持关闭）")
+		vaultBlockKB   = flag.Int("vault-block-size-kb", 1024, "保险库密文对象块大小（KB，1-65536；分块随机读的粒度）")
+		vaultScrub     = flag.Bool("vault-scrub-on-delete", false, "保险库回收/删除明文前覆盖随机数据（best-effort，防介质残留）")
+		vaultFilesDef  = flag.String("vault-default-files-mode", "plaintext", "保险库新实例文件区默认模式：plaintext（明文，默认）/ materialize（启停物化加密）")
+		accountsDriver = flag.String("accounts-driver", "sqlite", "账户管理数据库驱动：sqlite（默认，{data}/accounts.db）/ mysql / postgres（需配合 -accounts-dsn 连接串；连接池参数见配置文件 accounts 块）")
+		accountsDSN    = flag.String("accounts-dsn", "", "账户管理数据库连接串（sqlite 为文件路径，空 = {data}/accounts.db；mysql 如 user:pass@tcp(127.0.0.1:3306)/irix?charset=utf8mb4；postgres 如 postgres://user:pass@127.0.0.1:5432/irix?sslmode=disable）")
+		redisAddr      = flag.String("redis-addr", "", "Redis 地址（如 127.0.0.1:6379；空 = 不启用 Redis 缓存，账户会话与权限直接走数据库）")
+		redisPassword  = flag.String("redis-password", "", "Redis 密码（无密码留空）")
+		redisDB        = flag.Int("redis-db", 0, "Redis 库号（0-15）")
+	)
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
+		fmt.Fprintf(os.Stderr, "用法: irix-node [选项]\n\n")
+		fmt.Fprintf(os.Stderr, "所有参数均可写入配置文件（默认 ./config.json，可用 -config 指定路径，\n")
+		fmt.Fprintf(os.Stderr, "首次启动无配置文件时自动生成示例配置；字段说明见 cmd/irix-node/config.example.json）。\n")
+		fmt.Fprintf(os.Stderr, "优先级：命令行显式参数 > 配置文件 > 默认值。\n\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n示例:\n")
+		fmt.Fprintf(os.Stderr, "  irix-node\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -config /etc/irix-node/config.json  # 用配置文件启动（推荐）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -port 12346 -data C:\\irix-node-data\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡的 23333 端口（局域网可访问）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -bind 192.168.1.5 -data C:\\irix-node-data\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -instance-log-max 128 -data C:\\irix-node-data\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -audit-log=false  # 关闭审计日志落盘（stderr 仍输出审计行）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -transfer-allow-cidr 192.168.0.0/16  # 集群 LAN 直传放行内网网段\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -tls-mode auto              # 开启 TLS（自签证书，按启动日志指纹校验）\n")
+		fmt.Fprintf(os.Stderr, "  irix-node -tls-mode auto -vault       # 开启 TLS 与加密保险库（TOTP+密码+证书解锁）\n")
+	}
+	flag.Parse()
+
+	// 命令行显式设置的参数名集合：这些参数不被配置文件覆盖
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// 首次启动无配置文件时自动生成示例配置（生成失败仅告警，不阻断启动）
+	if created, err := ensureConfigFile(*configPath); err != nil {
+		log.Printf("警告: 自动生成配置文件 %s 失败: %v（将继续按命令行参数与默认值启动）", *configPath, err)
+	} else if created {
+		log.Printf("未检测到配置文件 %s，已自动生成示例配置（字段说明见文件内注释，按需修改后重启生效）", *configPath)
+	}
+
+	// 加载配置文件并合并启动选项（不存在则静默跳过，与纯命令行启动一致）
+	cfg, cfgLoaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		return err
+	}
+	opts := &nodeOptions{
+		Port:                  *port,
+		BindHost:              *bindHost,
+		DataDir:               *dataDir,
+		InstanceLog:           *instanceLog,
+		InstanceLogMax:        *instanceLogMB,
+		AuditLog:              *auditLog,
+		AuditLogMax:           *auditLogMB,
+		LoadTune:              *loadTune,
+		LogBufferKB:           *logBufferKB,
+		LogLines:              *logLines,
+		TransferAllowCIDR:     *transferCIDR,
+		TLSMode:               *tlsMode,
+		TLSCert:               *tlsCertFile,
+		TLSKey:                *tlsKeyFile,
+		VaultEnabled:          *vaultEnabled,
+		VaultIdleTimeout:      *vaultIdle,
+		VaultMaxAttempts:      *vaultAttempts,
+		VaultLockoutMinutes:   *vaultLockout,
+		VaultPBKDF2Iterations: *vaultKDFIter,
+		VaultPasswordMinLen:   *vaultPwMinLen,
+		VaultPasswordExpire:   *vaultPwExpire,
+		VaultForceExpire:      *vaultForceExp,
+		VaultBindSessionIP:    *vaultBindIP,
+		VaultBlockSizeKB:      *vaultBlockKB,
+		VaultScrubOnDelete:    *vaultScrub,
+		VaultDefaultFilesMode: *vaultFilesDef,
+		AccountsDriver:        *accountsDriver,
+		AccountsDSN:           *accountsDSN,
+		RedisAddr:             *redisAddr,
+		RedisPassword:         *redisPassword,
+		RedisDB:               *redisDB,
+	}
+	opts.applyConfig(cfg, setFlags)
+
+	// 应用嵌入式/低资源预设开关：命令行显式设置时按用户意图强制开/关，
+	// 配置文件显式设置时同理；两者都未设则保持自动检测结果（nil）。
+	applyLowResourceExplicit := func() {
+		var forced *bool
+		switch {
+		case setFlags["low-resource"]:
+			v := *lowResource
+			forced = &v
+		case cfg != nil && cfg.LowResource != nil:
+			forced = cfg.LowResource
+		}
+		embedded.applyLowResourceOverride(forced)
+	}
+	applyLowResourceExplicit()
+	alog.Printf("嵌入式/低资源档位：%v（原因：%s，CPU=%d 核，内存=%dMB）",
+		embedded.isEmbedded(), embedded.reason, embedded.cpu, embedded.mem>>20)
+
+	if opts.Port <= 0 || opts.Port > 65535 {
+		return fmt.Errorf("端口无效: %d（须在 1-65535 之间；请检查命令行参数或配置文件 %s）", opts.Port, *configPath)
+	}
+	if opts.InstanceLogMax < 1 || opts.AuditLogMax < 1 {
+		return fmt.Errorf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
+			opts.InstanceLogMax, opts.AuditLogMax, *configPath)
+	}
+	switch opts.TLSMode {
+	case "off", "auto", "manual":
+	default:
+		return fmt.Errorf("tls-mode 无效: %q（须为 off / auto / manual；请检查命令行参数或配置文件 %s）", opts.TLSMode, *configPath)
+	}
+	if opts.TLSMode == "manual" && (opts.TLSCert == "" || opts.TLSKey == "") {
+		return fmt.Errorf("tls-mode=manual 需要同时配置 tls-cert 与 tls-key（请检查命令行参数或配置文件 %s）", *configPath)
+	}
+	if opts.VaultEnabled && opts.TLSMode == "off" {
+		return errors.New("启用加密保险库（-vault）必须开启 TLS（tls-mode=auto 或 manual）：密码/TOTP/签名明文传输将完全破坏 Vault 的安全模型")
+	}
+	if opts.VaultEnabled {
+		if opts.VaultIdleTimeout < 1 {
+			return fmt.Errorf("vault-idle-timeout 无效: %d 分钟（须 ≥1）", opts.VaultIdleTimeout)
+		}
+		if opts.VaultMaxAttempts < 1 {
+			return fmt.Errorf("vault-max-attempts 无效: %d（须 ≥1）", opts.VaultMaxAttempts)
+		}
+		if opts.VaultLockoutMinutes < 1 {
+			return fmt.Errorf("vault-lockout-minutes 无效: %d 分钟（须 ≥1）", opts.VaultLockoutMinutes)
+		}
+		if opts.VaultPBKDF2Iterations < 10000 {
+			return fmt.Errorf("vault-pbkdf2-iterations 无效: %d（须 ≥10000）", opts.VaultPBKDF2Iterations)
+		}
+		if opts.VaultPasswordMinLen < 1 {
+			return fmt.Errorf("vault-password-min-length 无效: %d（须 ≥1）", opts.VaultPasswordMinLen)
+		}
+		if opts.VaultPasswordExpire < 0 {
+			return fmt.Errorf("vault-password-expire-days 无效: %d（须 ≥0）", opts.VaultPasswordExpire)
+		}
+		if opts.VaultBlockSizeKB < 1 || opts.VaultBlockSizeKB > 65536 {
+			return fmt.Errorf("vault-block-size-kb 无效: %d（须在 1-65536 之间）", opts.VaultBlockSizeKB)
+		}
+		switch opts.VaultDefaultFilesMode {
+		case "plaintext", "materialize":
+		default:
+			return fmt.Errorf("vault-default-files-mode 无效: %q（须为 plaintext 或 materialize）", opts.VaultDefaultFilesMode)
+		}
+	}
+	if opts.DataDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("无法获取当前目录: %w", err)
+		}
+		// Windows 上默认位置（当前工作目录）若位于系统盘，自动改用可用空间
+		// 最大的非系统固定盘，避免实例文件/日志/账户库把系统盘撑满
+		// （datadir_windows.go；其他平台恒返回原目录）。
+		if picked, moved := sysinfo.AvoidSystemDrive(wd); moved {
+			alog.Printf("数据目录默认位置 %s 位于系统盘 %s，已改用 %s（可用 -data 显式指定）",
+				wd, sysinfo.SystemDrive(), picked)
+			opts.DataDir = picked
+		} else {
+			opts.DataDir = wd
+		}
+	} else if sysinfo.OnSystemDrive(opts.DataDir) {
+		// 显式指定的目录落在系统盘：尊重用户意图，仅告警
+		alog.Printf("警告: 数据目录 %s 位于系统盘 %s，实例文件/日志/账户库都会写入系统盘，建议改用其他盘",
+			opts.DataDir, sysinfo.SystemDrive())
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
+		return fmt.Errorf("无法创建数据目录 %s: %w", opts.DataDir, err)
+	}
+
+	d := NewDaemon(opts.DataDir)
+	runtimeOwned := false
+	defer func() {
+		if !runtimeOwned {
+			d.workers.stop()
+			d.closeAccounts()
+		}
+		// 所有请求与受管进程退出后，再排空审计文件；main 最后排空 stderr。
+		if d.AuditLog != nil {
+			d.AuditLog.Close()
+		}
+	}()
+	d.Port = opts.Port
+	d.transferAllowCIDR = opts.TransferAllowCIDR
+	if err := d.parseTransferAllowCIDR(); err != nil {
+		return fmt.Errorf("transfer-allow-cidr 配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
+	}
+	logDir := filepath.Join(opts.DataDir, "logs")
+	if opts.InstanceLog {
+		d.LogDir = logDir
+		d.LogMaxBytes = int64(opts.InstanceLogMax) << 20
+	}
+	// 每实例内存缓冲上限：命令行/配置显式设置优先；未设则沿用 NewDaemon 中的
+	// 默认（嵌入式档位已自动调小，见 daemon.go）。
+	if opts.LogBufferKB > 0 {
+		d.LogBufferKB = opts.LogBufferKB
+	}
+	if opts.LogLines > 0 {
+		d.LogLines = opts.LogLines
+	}
+	if opts.AuditLog {
+		d.AuditLog = newFileLogger(logDir, "audit.log", int64(opts.AuditLogMax)<<20)
+		// 审计日志轮转归档（等保二级「审计记录保护与定期备份」）：
+		// 每次轮转把将被覆盖的审计段复制到 {data}/backup/audit/
+		d.AuditLog.archiveDir = filepath.Join(opts.DataDir, "backup", "audit")
+	}
+
+	// 账户管理初始化（docs/accounts-design.md）：默认 SQLite {data}/accounts.db，
+	// 可选 MySQL/PostgreSQL + Redis 热缓存；连接池参数见配置文件 accounts 块。
+	if err := d.initAccounts(accountsConfig{
+		Driver:             opts.AccountsDriver,
+		DSN:                opts.AccountsDSN,
+		MaxOpen:            opts.AccountsMaxOpen,
+		MaxIdle:            opts.AccountsMaxIdle,
+		ConnMaxLifetimeMin: opts.AccountsConnMaxLifetimeMin,
+		RedisAddr:          opts.RedisAddr,
+		RedisPassword:      opts.RedisPassword,
+		RedisDB:            opts.RedisDB,
+		RedisPoolSize:      opts.RedisPoolSize,
+	}); err != nil {
+		return fmt.Errorf("账户管理初始化失败: %w（请检查 accounts 配置或 -accounts-* / -redis-* 参数）", err)
+	}
+	redisNote := ""
+	if d.accounts.redis != nil {
+		redisNote = "，Redis 缓存 " + d.accounts.redis.Options().Addr
+	}
+	alog.Printf("账户管理已就绪：驱动 %s，连接池上限 %d%s",
+		d.accounts.driver, d.accounts.db.Stats().MaxOpenConnections, redisNote)
+
+	// 加密保险库初始化（vault.go）：加载 vault.json、应用调优配置。
+	// 数据面门禁（vaultGate）在下方处理链中挂载。
+	if opts.VaultEnabled {
+		d.vault.enabled = true
+		d.vault.idleTimeout = time.Duration(opts.VaultIdleTimeout) * time.Minute
+		d.vault.maxAttempts = opts.VaultMaxAttempts
+		d.vault.lockoutDuration = time.Duration(opts.VaultLockoutMinutes) * time.Minute
+		// PBKDF2 迭代：用户显式传 -vault-pbkdf2-iterations 时按用户意图，
+		// 否则保留 newVaultState 中按平台架构设定的默认（arm64 600000；MIPS/armv7 更低）。
+		if setFlags["vault-pbkdf2-iterations"] {
+			d.vault.pbkdf2Iterations = opts.VaultPBKDF2Iterations
+		}
+		d.vault.passwordMinLen = opts.VaultPasswordMinLen
+		d.vault.passwordExpire = time.Duration(opts.VaultPasswordExpire) * 24 * time.Hour
+		d.vault.forceExpire = opts.VaultForceExpire
+		d.vault.bindSessionIP = opts.VaultBindSessionIP
+		d.vault.scrubOnDelete = opts.VaultScrubOnDelete
+		d.vault.defaultFilesMode = opts.VaultDefaultFilesMode
+		if opts.VaultBlockSizeKB != 0 {
+			d.vault.blockSizeKB = opts.VaultBlockSizeKB
+			d.vault.store.blockSize = opts.VaultBlockSizeKB * 1024
+		}
+		if err := d.vault.load(filepath.Join(opts.DataDir, "vault", "vault.json")); err != nil {
+			return fmt.Errorf("加载保险库状态失败: %w", err)
+		}
+		if d.vault.initialized {
+			alog.Printf("加密保险库已启用（已初始化，当前锁定：请先解锁再访问数据）")
+		} else {
+			alog.Printf("加密保险库已启用（未初始化：请调用 POST /api/vault/init 完成初始化）")
+		}
+	}
+
+	// 先加载保险库迁移标记，再选择明文或加密的实例加载路径。
+	if err := d.Load(); err != nil {
+		return fmt.Errorf("加载实例数据失败: %w", err)
+	}
+	if err := d.recoverOrphanProcesses(); err != nil {
+		return fmt.Errorf("恢复上次运行的实例进程失败: %w", err)
+	}
+	d.frpLoad()
+	// 首次启动引导：账户库中不存在管理员账户时，随机生成管理员用户名与
+	// 密码（仅此一次显示，请立即记录并登录后修改）。已存在管理员账户则跳过。
+	if username, password, created, err := d.ensureAdminAccount(); err != nil {
+		return fmt.Errorf("初始化管理员账户失败: %w", err)
+	} else if created {
+		alog.Printf("======================================================")
+		alog.Printf("首次启动：已生成管理员账户（用户名/密码仅此一次显示，请立即记录）")
+		alog.Printf("")
+		alog.Printf("  用户名: %s", username)
+		alog.Printf("  密码  : %s", password)
+		alog.Printf("")
+		alog.Printf("登录方式: POST /api/auth/login  {\"username\":\"%s\",\"password\":\"<密码>\"}", username)
+		alog.Printf("随后的 API 请求携带会话 token：Authorization: Bearer <token> 或 X-Auth-Token 头")
+		alog.Printf("提示: 登录后请立即在账户管理中修改密码（凭据丢失只能删除账户库重新生成）")
+		alog.Printf("======================================================")
+	}
+
+	bind := resolveBind(opts.BindHost, os.Getenv("IRIX_NODE_BIND_ALL"))
+	// 记录实际监听主机：下载/上传票据据此生成客户端可达的直连地址
+	d.BindHost = bind
+	addr := net.JoinHostPort(bind, strconv.Itoa(opts.Port))
+
+	// TLS 初始化：auto 生成自签证书 / manual 加载正式证书 / off 保持明文（打印一行提示）
+	var tlsCfg *tls.Config
+	tlsFingerprint := ""
+	switch opts.TLSMode {
+	case "auto":
+		tlsCfg, tlsFingerprint, err = vaultcrypto.EnsureSelfSignedTLS(filepath.Join(opts.DataDir, "tls"))
+		if err != nil {
+			return fmt.Errorf("TLS 自签证书初始化失败: %w", err)
+		}
+	case "manual":
+		tlsCfg, tlsFingerprint, err = vaultcrypto.LoadManualTLS(opts.TLSCert, opts.TLSKey)
+		if err != nil {
+			return err
+		}
+	default:
+		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
+	}
+
+	// 平台适配层不反向依赖主包日志器，这里注入异步日志输出（仅 OpenBSD 的
+	// pledge/unveil 自限制会用它输出一行启用日志）。
+	platform.SetLogf(alog.Printf)
+
+	// 权限自限制（OpenBSD 上 pledge+unveil 收敛进程能力；其他平台为空操作）。
+	// 必须在 net.Listen 之前、数据目录与 TLS 证书就绪之后调用：unveil 锁定后
+	// 仅数据目录与系统二进制目录可见，pledge 收敛 syscall 到最小集。
+	if err := platform.RestrictPrivileges(opts.DataDir); err != nil {
+		return fmt.Errorf("权限自限制失败: %w", err)
+	}
+
+	// 提升文件描述符上限（Unix 平台）到硬上限：百万级并发连接压测下，
+	// 连接数受 RLIMIT_NOFILE 软上限制约，耗尽即 Accept 返回 EMFILE → 客户端
+	// 大量 connection refused。监听端口前把软上限拉满，是接受海量连接的前提。
+	if soft, rerr := platform.RaiseFDLimit(); rerr != nil {
+		alog.Printf("提示: 文件描述符上限未提升（%v），高并发连接可能受 fd 上限制约", rerr)
+	} else if soft > 0 {
+		alog.Printf("文件描述符上限已提升：RLIMIT_NOFILE 软上限 %d", soft)
+	}
+
+	// 显式监听并把监听器交给 Server：连接层日志需要包装 Accept。
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("HTTP 服务启动失败: %w", err)
+	}
+	// TLS 开启时在监听器上包一层 tls.NewListener（日志包装保持最外层）
+	var serveLn net.Listener = &connLogListener{Listener: ln, d: d}
+	scheme := "http"
+	if tlsCfg != nil {
+		scheme = "https"
+		serveLn = &connLogListener{Listener: tls.NewListener(ln, tlsCfg), d: d}
+		if tlsFingerprint != "" {
+			alog.Printf("TLS 已开启（%s 模式），证书指纹（SHA-256）: %s", opts.TLSMode, tlsFingerprint)
+		} else {
+			alog.Printf("TLS 已开启（%s 模式）", opts.TLSMode)
+		}
+	}
+
+	srv := d.newHTTPServer(addr)
+
+	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
+	if cfgLoaded {
+		d.auditLogf("已加载配置文件: %s", *configPath)
+	}
+	d.auditLogf("数据目录: %s", opts.DataDir)
+	d.auditLogf("监听地址: %s://%s/api/overview", scheme, addr)
+	if d.LogDir != "" {
+		alog.Printf("实例日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", d.LogDir, opts.InstanceLogMax)
+	}
+	if d.AuditLog != nil {
+		alog.Printf("审计日志落盘: %s（单文件上限 %dMB，轮转保留 .1）", filepath.Join(logDir, "audit.log"), opts.AuditLogMax)
+	}
+
+	// 运行时编排：停止接受新请求、刷入持久化、关停子进程和释放外部连接。
+	// 信号注册（忽略 SIGHUP + Interrupt/SIGTERM）拆到平台文件，js/wasm
+	// 无 Unix 信号机制（signals_js.go 为空操作）。
+	app := newNodeRuntime(d, srv, serveLn)
+	app.loadTune = opts.LoadTune
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	signals := make(chan os.Signal, 1)
+	stopSignals := platform.SetupSignalHandler(signals)
+	defer stopSignals()
+	go func() {
+		select {
+		case sig := <-signals:
+			alog.Printf("收到信号 %v，开始优雅关停…", sig)
+			cancelRun()
+		case <-runCtx.Done():
+		}
+	}()
+
+	runtimeOwned = true
+	err = app.run(runCtx)
+	d.auditLogf("已退出")
+	return err
+}
+
+// connLogListener 包装 net.Listener：仅在 Accept 出错（如句柄耗尽）时记录。
+// 审计中间件只覆盖到达 HTTP 层的请求；连接层失败（SYN 未到达节点、被防火墙
+// 丢弃、半开等）在日志中天然不可见，排查「客户端连不上」时全靠 Accept 错误日志。
+// 注：每连接成功日志已被刻意移除——高并发下它拖慢唯一的 Accept 循环，
+// 导致 accept 队列溢出、客户端大量 connection refused（见 Accept 注释）。
+type connLogListener struct {
+	net.Listener
+	d *Daemon
+}
+
+// Accept 接受连接。
+// 设计取舍：高并发（百万级连接）压测下，若对每一次 Accept 都写审计日志，
+// 会把 http.Server.Serve 唯一的 Accept 循环拖慢——连接到达速率超过接受速率时，
+// 内核 SYN/accept 队列溢出，客户端表现为大量 connection refused。
+// 因此每连接成功日志被移除（来源 IP 信息价值低且淹没在噪声中），
+// 仅记录 Accept 出错（如句柄耗尽），这才是「客户端连不上」的关键诊断信号。
+func (l *connLogListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		if !errors.Is(err, net.ErrClosed) {
+			l.d.auditLogf("接受连接失败: %v", err)
+		}
+		return nil, err
+	}
+	return c, err
+}
+
+// maxAPIBodyBytes API 请求体上限（不含 /upload/ 直连通道）。
+// 文件写入接口把整个正文读进内存并做 JSON 解码，无上限时单请求可放大数倍内存。
+const maxAPIBodyBytes = 16 << 20 // 16 MiB
+
+// limitAPIBody 为 /api/ 路由的请求体设置大小上限。
+// /upload/ 直连通道不限制：它通过 multipart 落盘，内存占用恒定。
+func limitAPIBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && strings.HasPrefix(r.URL.Path, "/api/") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Version 守护进程版本号。
+// 1.2.0：认证机制调整——移除配对码/固定 apikey 通道，首次启动随机生成
+// 管理员用户名与密码（仅显示一次），全部 API 请求走账户会话 token。
+// 1.1.0：新增实时控制台 WebSocket、实例日志持久化查询、Java 检测/安装、
+// 核心下载、导入目录（docs/irix-node-local-parity.md M1）。
+const Version = "1.2.0"
+
+// resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
+// 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量
+// （=1 则 0.0.0.0），否则默认 127.0.0.1。
+func resolveBind(flagValue, envValue string) string {
+	if strings.TrimSpace(flagValue) != "" {
+		return strings.TrimSpace(flagValue)
+	}
+	if strings.EqualFold(strings.TrimSpace(envValue), "1") {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
+}
+
+// NormalizePath 将 API 传入的路径规范化为相对目录的绝对路径。
+//
+// 路径以 '/' 开头表示实例工作目录（cwd）的根（跨平台一致）；
+// 已是文件系统绝对路径且位于 cwd 内（cwd 本身或其子目录）时按原样使用；
+// 仅 Windows 盘符绝对路径（如 C:\x）例外——直接使用，越界即拒绝。
+// 任何试图逃逸 cwd 的路径（.. 越界）都会被拒绝。
+func NormalizePath(cwd, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return cwd, nil
+	}
+	cleaned := filepath.Clean(target)
+	if filepath.IsAbs(cleaned) {
+		if isDriveAbs(cleaned) {
+			// Windows 盘符绝对路径：只接受位于 cwd 内的，否则拒绝
+			if !pathWithin(cwd, cleaned) {
+				return "", fmt.Errorf("路径越界: %s", target)
+			}
+			return cleaned, nil
+		}
+		// Unix 绝对路径：位于 cwd 内（cwd 本身或其子目录）则原样使用，
+		// 否则视为 cwd 根下的相对路径（/uploads 约定，与 Windows 一致）
+		if pathWithin(cwd, cleaned) {
+			return cleaned, nil
+		}
+	}
+	full := filepath.Clean(filepath.Join(cwd, target))
+	if !pathWithin(cwd, full) {
+		return "", fmt.Errorf("路径越界: %s", target)
+	}
+	return full, nil
+}
+
+// isDriveAbs 判断是否为 Windows 盘符绝对路径（C:\x 或 C:/x）。
+func isDriveAbs(p string) bool {
+	return runtime.GOOS == "windows" && len(p) >= 3 && p[1] == ':' &&
+		(p[2] == '/' || p[2] == '\\')
+}
+
+// pathWithin 判断 p 是否位于 base 之内（允许相等）。
+func pathWithin(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// forbiddenCwdDirs 返回系统目录黑名单：实例工作目录位于这些目录内
+// （含本身）时拒绝创建/更新。防止认证后把 cwd 指向系统目录，配合文件 API
+// 形成全盘读写（审计报告 #4）。
+// Windows 含 \Users（各用户 Profile 根）：Profile 内是横向渗透的高价值目标
+// （浏览器凭据 / .ssh 密钥 / 启动目录持久化），整树拒绝，仅豁免系统临时目录
+// （见 validateCwd）。Unix 的 /home 未列入：Linux 游戏服常驻 /home 且无
+// Profile 凭据集中存放问题，敏感子目录（.ssh 等）建议用独立账户/系统策略。
+func forbiddenCwdDirs() []string {
+	if runtime.GOOS == "windows" {
+		return []string{
+			`\Windows`, `\Program Files`, `\Program Files (x86)`,
+			`\ProgramData`, `\Users`, `\System Volume Information`, `\$Recycle.Bin`,
+		}
+	}
+	return []string{
+		"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
+		"/boot", "/dev", "/proc", "/sys", "/var/log", "/var/run", "/root",
+	}
+}
+
+// safeIDPattern 进入文件路径拼接的单段标识白名单：字母数字开头，
+// 仅含字母数字与 ._-，长度 ≤ 64。覆盖实例 uuid、jail 名、Docker id、
+// 会话 id 等（红队审计 严重-2 / 高-2：%2F、.. 等形态一律不在此集合内）。
+var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// safePathSegment 校验单个路径段是否可安全进入文件路径拼接：
+// 白名单字符 + 拒绝 ".."（含 a..b 等含点形态，双保险）。
+func safePathSegment(s string) bool {
+	return safeIDPattern.MatchString(s) && !strings.Contains(s, "..")
+}
+
+// validateInstanceCwd 在 validateCwd 基础上追加数据目录校验：
+// 实例工作目录不得位于节点数据目录内（含相等），否则文件 API 可经 cwd
+// 读写账户库/保险库/实例表（红队审计 严重-3）。
+func (d *Daemon) validateInstanceCwd(cwd string) error {
+	if err := validateCwd(cwd); err != nil {
+		return err
+	}
+	if d.DataDir != "" {
+		abs, err := filepath.Abs(strings.TrimSpace(cwd))
+		if err != nil {
+			return fmt.Errorf("工作目录解析失败: %v", err)
+		}
+		dataDir, err := filepath.Abs(d.DataDir)
+		if err != nil {
+			return fmt.Errorf("数据目录解析失败: %v", err)
+		}
+		if pathWithin(filepath.Clean(dataDir), filepath.Clean(abs)) {
+			return fmt.Errorf("工作目录不能位于节点数据目录内: %s", cwd)
+		}
+	}
+	return nil
+}
+
+// normalizeInstanceCwd 规范化 + 校验实例工作目录（含数据目录禁区），
+// 供实例创建/更新/导入入口统一调用。
+func (d *Daemon) normalizeInstanceCwd(cwd string) (string, error) {
+	abs, err := normalizeCwd(cwd)
+	if err != nil {
+		return "", err
+	}
+	if err := d.validateInstanceCwd(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// validateCwd 校验实例工作目录：拒绝空目录、文件系统/磁盘根目录与系统目录。
+// 相对路径按守护进程当前目录解析为绝对路径后再做黑名单比对。
+func validateCwd(cwd string) error {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return errors.New("工作目录不能为空")
+	}
+	cleaned := filepath.Clean(cwd)
+	if cleaned == string(filepath.Separator) {
+		return fmt.Errorf("工作目录不能是文件系统根目录: %s", cwd)
+	}
+	if runtime.GOOS == "windows" {
+		if isDriveRoot(cleaned) {
+			return fmt.Errorf("工作目录不能是磁盘根目录（含盘符根与 UNC 共享根）: %s", cwd)
+		}
+	}
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return fmt.Errorf("工作目录解析失败: %v", err)
+	}
+	for _, bad := range forbiddenCwdDirs() {
+		// Windows 黑名单为卷内相对路径（如 \Users）：挂到各盘符卷根后比对；
+		// Unix 黑名单为绝对路径，直接比对。
+		base := bad
+		if runtime.GOOS == "windows" {
+			vol := filepath.VolumeName(abs)
+			if vol == "" {
+				continue
+			}
+			base = filepath.Clean(vol + bad)
+		}
+		if pathWithin(base, abs) {
+			// \Users 整树拒绝，但豁免系统临时目录（%TEMP%，通常为
+			// <用户>\AppData\Local\Temp）：临时目录无浏览器凭据/SSH 密钥/
+			// 启动项等敏感数据，且大量部署与测试依赖它（Go 测试临时目录）。
+			if runtime.GOOS == "windows" && bad == `\Users` && pathWithin(os.TempDir(), abs) {
+				continue
+			}
+			return fmt.Errorf("工作目录不能位于系统目录内: %s", cwd)
+		}
+	}
+	return nil
+}
+
+// normalizeCwd 校验并规范化实例工作目录：相对路径按节点进程当前目录
+// （systemd 下为 /）转成绝对路径后返回，供入库保存。
+// 此前相对路径被原样保存，同一实例的 cwd 会随节点启动目录漂移，
+// 导致进程在错误目录启动（相对 jar 找不到、配置写错位置）。
+func normalizeCwd(cwd string) (string, error) {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return "", errors.New("工作目录不能为空")
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("工作目录解析失败: %v", err)
+	}
+	abs = filepath.Clean(abs)
+	if err := validateCwd(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// isDriveRoot 判断 Windows 路径是否为磁盘根（C:\、C:）或 UNC 共享根（\\server\share）。
+// 注意 filepath.Clean("C:") 会得到 "C:."（盘符相对路径），尾点同样视为根。
+func isDriveRoot(p string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	p = filepath.Clean(p)
+	vol := filepath.VolumeName(p)
+	if vol == "" {
+		return false
+	}
+	switch strings.TrimPrefix(p, vol) {
+	case "", "/", "\\", ".":
+		return true
+	}
+	return false
+}
+
+// SplitCommand 将启动命令字符串拆分为参数列表，支持单/双引号。
+func SplitCommand(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if cur.Len() > 0 {
+			args = append(args, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range s {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return args
+}
+
+// FormatSize 将字节数格式化为人类可读字符串。
+func FormatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// atoiDefault 解析整数字符串，非法或为空时返回默认值。
+func atoiDefault(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return v
+	}
+	return def
+}

@@ -81,16 +81,16 @@
                          └──────────────────────────────┘
 ```
 
-新增文件（全部标准库）：
+新增文件（全部标准库；下表密码学与磁盘探测部分已移至 `internal/`，见括号内路径）：
 
 | 文件 | 职责 |
 | --- | --- |
 | `vault.go` | 路由注册、会话管理（内存密钥 + 令牌 + 超时 + **RWMutex 生命周期锁**）、限速器、解锁/锁定/状态、用户管理 |
-| `vault_crypto.go` | TOTP（RFC 6238）、PBKDF2、AES-256-GCM 信封（wrapBlob 编码）、挑战签发/验签、密钥树 |
+| `internal/vaultcrypto/vault_crypto.go` | TOTP（RFC 6238）、PBKDF2、AES-256-GCM 信封（wrapBlob 编码）、挑战签发/验签、密钥树 |
 | `vault_store.go` | 加密存储层：密文对象、分块、追加日志化、索引（DEK+脏落盘）、孤儿回收 |
 | `vault_migrate.go` | 两阶段迁移：instances.json + 物化实例文件树，幂等游标、进度、磁盘余量检查 |
-| `vault_tls.go` | 自签证书生成/加载、TLS 配置校验 |
-| `disk_free_{windows,other}.go` | 磁盘余量探测（构建标签区分，平台不支持时告警降级） |
+| `internal/vaultcrypto/vault_tls.go` | 自签证书生成/加载、TLS 配置校验 |
+| `internal/sysinfo/disk_free_*.go` | 磁盘余量探测（构建标签区分，平台不支持时告警降级） |
 | `qa_vault_test.go` | 测试（见 §13） |
 
 改造点：`config.go`（配置项）、`main.go`（TLS 启动、vault 初始化）、`files.go`/`daemon.go`（数据面接入加密层）、`audit.go`（掩码与安全事件）、`download.go`（直连通道 vault 适配）。

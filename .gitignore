@@ -38,7 +38,9 @@ logs/
 config.json
 accounts.db*
 
-# 本地构建产物（交叉编译输出，如 irix-node / node 及带平台后缀的产物）
+# 本地构建产物：`go build -o bin/irix-node ./cmd/irix-node` 输出到 bin/
+/bin/
+# 兼容在仓库根直接构建的情形，以及 CI 的交叉编译产物（irix-node-<goos>-<goarch>）
 /irix-node
 /node
 irix-node-*

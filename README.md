@@ -31,15 +31,33 @@ MCSM 节点与本节点。
 - `docs/compliance-l2.md` — 等保二级合规要点
 - `docs/irix-node-local-parity.md` — 与 MCSM 节点的本地一致性说明
 - `docs/backend-requirements.md` — 后端需求背景
-- `NODE_API.md` / `docs/api/` — HTTP API 接口文档
+- `docs/NODE_API.md` / `docs/api/` — HTTP API 接口文档
+
+## 项目结构
+
+```
+cmd/irix-node/        程序入口与核心（HTTP API、实例与进程管理、账户、保险库、集群等）
+internal/sysinfo/     系统与进程探测（主机指标、磁盘余量、数据目录选址、进程身份）
+internal/platform/    进程级 OS 适配（OpenBSD pledge/unveil、RLIMIT_NOFILE、信号装配）
+internal/vaultcrypto/ 保险库密码学原语（PBKDF2、AES-GCM、TOTP、证书校验与 TLS）
+docs/                 设计与接口文档（api/ 为分册，audit/ 为审计报告）
+scripts/              部署脚本（systemd 安装）
+bin/                  本地构建产物（已被 .gitignore 忽略）
+```
+
+`internal/` 下的包不反向依赖主包，可独立编译与测试。
+
+`cmd/irix-node/` 内源码按职责命名：`accounts_*.go` 账户、`container_*.go` 容器、
+`vault_*.go` 保险库、`process_*.go` 进程、`cluster.go`/`frp.go` 集群、`qa_*_test.go` 测试。
+带平台后缀（`_windows`/`_linux`/`_bsd`…）的文件按构建标签区分平台实现。
 
 ## 快速开始
 
 ```bash
-go build -o irix-node .
-./irix-node                  # 默认监听 127.0.0.1:12346，数据目录为当前目录
-./irix-node -config /etc/irix-node/config.json   # 用配置文件启动（推荐，全部参数可写入）
-./irix-node -bind 0.0.0.0 -port 23333   # 监听全部网卡（局域网可访问）
+go build -o bin/irix-node ./cmd/irix-node
+./bin/irix-node                  # 默认监听 127.0.0.1:12346，数据目录为当前目录
+./bin/irix-node -config /etc/irix-node/config.json   # 用配置文件启动（推荐，全部参数可写入）
+./bin/irix-node -bind 0.0.0.0 -port 23333   # 监听全部网卡（局域网可访问）
 ```
 
 详细参数与多平台运行说明见上方文档导航。**首次启动**时节点会在启动日志中打印一组
