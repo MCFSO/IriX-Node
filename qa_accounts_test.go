@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -594,13 +595,21 @@ func TestLoginBruteForceLockout(t *testing.T) {
 	}); code != http.StatusTooManyRequests {
 		t.Fatalf("锁定期内正确密码也应 429: %d %s", code, body)
 	}
-	// IP 维度同锁：换一个用户名登录也被拒（同来源 IP）
+	// IP 维度同锁：同来源 IP 累计失败达到 IP 阈值后，换用户名登录也被拒。
+	// 「账户+IP」组合键 5 次锁定目标账户（不锁其他账户），IP 维度阈值更高
+	// （NAT/反代后多用户共享出口 IP，避免少量失败连坐封禁）。
+	for i := accountLoginMaxFails; i < accountLoginMaxFailsIP; i++ {
+		apiPost(t, srv.URL+"/api/auth/login", map[string]any{
+			"username": fmt.Sprintf("spray-%d", i), "password": "WrongPass999",
+		})
+	}
 	if code, _ := apiPost(t, srv.URL+"/api/auth/login", map[string]any{
 		"username": qaTestAdminUser, "password": "whatever-pass",
 	}); code != http.StatusTooManyRequests {
 		t.Fatalf("IP 维度限速应拒绝同 IP 其他用户名登录: %d", code)
 	}
-	t.Logf("[验证] %d 次失败后登录锁定生效（用户名+IP 双维度，锁定 %s）", accountLoginMaxFails, accountLoginLockout)
+	t.Logf("[验证] 「账户+IP」%d 次锁定目标账户，IP 维度 %d 次锁定出口（锁定 %s）",
+		accountLoginMaxFails, accountLoginMaxFailsIP, accountLoginLockout)
 
 	// 对照组：无失败记录的用户名不受影响（新守护进程避免 IP 锁干扰）
 	d2 := newTestAccountsDaemon(t)

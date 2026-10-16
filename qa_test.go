@@ -107,6 +107,14 @@ func newTestServer(t testing.TB, d *Daemon) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// worldDir 返回位于数据目录之外的临时工作目录。
+// 实例 cwd 不得位于节点数据目录内（红队审计 严重-3 修复），
+// 测试里实例工作区需与数据目录分开布局。
+func worldDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
 // newTestServerWithHandler 用指定 handler 启动 httptest 服务器（用于测试中间件）。
 func newTestServerWithHandler(h http.Handler) *httptest.Server {
 	return httptest.NewServer(h)
@@ -415,8 +423,9 @@ func loadInstanceCount(t *testing.T, dir string) int {
 // TestPersistenceRoundTrip 持久化往返：Add -> FlushDirty（兜底落盘）-> 模拟重启（新 Daemon Load）-> 数据完整。
 func TestPersistenceRoundTrip(t *testing.T) {
 	d, dir := newTestDaemon(t)
+	world := worldDir(t) // 实例 cwd 不得位于数据目录内（严重-3 修复后 Load 会校验）
 	for i := 0; i < 50; i++ {
-		if err := d.Add(sampleInst(i, dir)); err != nil {
+		if err := d.Add(sampleInst(i, world)); err != nil {
 			t.Fatalf("Add 失败: %v", err)
 		}
 	}
@@ -973,6 +982,7 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 	}
 	srv := newTestServer(t, d)
 	defer srv.Close()
+	world := worldDir(t) // 创建实例的 cwd 不得位于数据目录内（严重-3 修复）
 
 	var wg sync.WaitGroup
 	var errCount int32
@@ -988,7 +998,7 @@ func TestConcurrentMixedHTTP(t *testing.T) {
 					cfg := map[string]any{
 						"nickname":     fmt.Sprintf("压测-%d", g*100+i),
 						"startCommand": "ping 127.0.0.1 -t",
-						"cwd":          dir,
+						"cwd":          world,
 					}
 					payload, _ := json.Marshal(cfg)
 					body = bytes.NewReader(payload)

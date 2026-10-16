@@ -15,7 +15,7 @@ func TestRecoverOrphanProcess(t *testing.T) {
 		t.Skip("当前平台尚未实现持久化进程身份")
 	}
 	d, dir := newTestDaemon(t)
-	inst := NewInstance("recovery-case", InstanceConfig{StartCommand: longRunCommand(), Cwd: dir})
+	inst := NewInstance("recovery-case", InstanceConfig{StartCommand: longRunCommand(), Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}

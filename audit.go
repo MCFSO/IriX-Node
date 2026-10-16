@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -107,19 +108,32 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// redactQuery 将查询串中的会话 token 与 apikey 明文打码
-// （?a=b&token=***&apikey=***&...），其余保持原样。
+// sensitiveQueryKeys 查询串中需打码的凭据参数（键名小写比对）。
+var sensitiveQueryKeys = map[string]bool{
+	"token": true, "apikey": true, "api_key": true,
+	"password": true, "secret": true, "key": true, "authorization": true,
+}
+
+// redactQuery 将查询串中的会话凭据参数值打码（?a=b&token=***&...）。
+// 键名先 URL 解码再比对：认证侧 Query().Get 是解码后取值，
+// ?toke%6E=x 与 ?token=x 同等认证、必须同等打码（红队审计 高-1 绕过 1）；
+// ";" 分隔的非标准形态同样处理，防伪造/窃取审计记录（绕过 3）。
 func redactQuery(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	parts := strings.Split(raw, "&")
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == '&' || r == ';' })
 	for i, p := range parts {
-		lower := strings.ToLower(p)
-		if strings.HasPrefix(lower, "token=") {
-			parts[i] = "token=***"
-		} else if strings.HasPrefix(lower, "apikey=") {
-			parts[i] = "apikey=***"
+		eq := strings.IndexByte(p, '=')
+		if eq <= 0 {
+			continue
+		}
+		key, err := url.QueryUnescape(p[:eq])
+		if err != nil {
+			key = p[:eq]
+		}
+		if sensitiveQueryKeys[strings.ToLower(key)] {
+			parts[i] = p[:eq] + "=***"
 		}
 	}
 	return "?" + strings.Join(parts, "&")
@@ -164,22 +178,27 @@ func (d *Daemon) auditLogf(format string, args ...any) {
 	}
 }
 
-// vaultMaskFields 保险库请求体中的敏感字段（值一律打码，docs/vault-design.md §11）。
-// 覆盖：密码类、TOTP 验证码、挑战签名、恢复令牌、会话令牌。
+// vaultMaskFields 请求体中的敏感字段（值一律打码，docs/vault-design.md §11）。
+// 覆盖：密码类、TOTP 验证码、挑战签名、恢复令牌、会话令牌，以及
+// 集群 transfer 的 source.token、FRP 隧道 config.token 等凭据字段
+// （红队审计 高-1 绕过 2：此前掩码表不含 "token"，凭据明文落盘）。
+// 键名匹配不区分大小写（"token"/"Token"/"TOKEN" 同等打码）。
 var vaultMaskFields = []string{
-	`"password"`, `"newPassword"`, `"oldPassword"`,
-	`"totp"`, `"signature"`, `"recoveryToken"`, `"sessionToken"`,
+	`password`, `newPassword`, `oldPassword`,
+	`totp`, `signature`, `recoveryToken`, `sessionToken`,
+	`token`, `secret`, `apikey`, `apiKey`, `key`, `authorization`,
 }
 
 // vaultMaskCodeRE 打码 "code" 字段（TOTP 验证码）。该字段名通用，仅在
 // /api/vault/* 路径打码，避免误伤其他 API 的同名字段。
-var vaultMaskCodeRE = regexp.MustCompile(`"code"\s*:\s*"[^"]*"`)
+var vaultMaskCodeRE = regexp.MustCompile(`(?i)"code"\s*:\s*"[^"]*"`)
 
 // vaultMaskRedactors 预编译的敏感字段替换器（"field":"值" → "field":"***"）。
+// 不区分大小写匹配键名；同时覆盖非字符串值（数字/布尔）与 null。
 var vaultMaskRedactors = func() []*regexp.Regexp {
 	reds := make([]*regexp.Regexp, 0, len(vaultMaskFields))
 	for _, f := range vaultMaskFields {
-		reds = append(reds, regexp.MustCompile(regexp.QuoteMeta(f)+`\s*:\s*"[^"]*"`))
+		reds = append(reds, regexp.MustCompile(`(?i)"`+regexp.QuoteMeta(f)+`"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)`))
 	}
 	return reds
 }()

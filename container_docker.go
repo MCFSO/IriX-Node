@@ -385,6 +385,11 @@ func dockerClone(id, name string) (map[string]any, error) {
 // dockerExport 导出容器文件系统为 tar 到同步区，返回下载票据。
 // 响应: {password, addr, fileName}（fileName 相对同步区根，如 ".exports/xxx.tar"）
 func dockerExport(d *Daemon, id string) (map[string]any, error) {
+	// id 进入导出文件名（os.Create）：必须过白名单，防 %2F 编码的 ../
+	// 在任意目录创建/截断文件（红队审计 高-2）。
+	if !safePathSegment(id) {
+		return nil, fmt.Errorf("容器 id 无效: %s", id)
+	}
 	expDir := filepath.Join(d.clusterRoot(), ".exports")
 	if err := os.MkdirAll(expDir, 0o755); err != nil {
 		return nil, err

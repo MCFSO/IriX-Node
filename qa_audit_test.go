@@ -48,8 +48,8 @@ func TestAuditLogRecordsEveryRequest(t *testing.T) {
 	srv := newAuditServer(t, d)
 	defer srv.Close()
 
-	// 创建实例（POST，带请求体）
-	cwd := filepath.ToSlash(dir)
+	// 创建实例（POST，带请求体；cwd 不得位于数据目录内，见严重-3 修复）
+	cwd := filepath.ToSlash(worldDir(t))
 	body := `{"nickname":"审计测试","startCommand":"ping 127.0.0.1 -t","cwd":"` + cwd + `"}`
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/instance?token=test-key", strings.NewReader(body))
 	if err != nil {
@@ -150,16 +150,22 @@ func TestAuditDisabledNoFile(t *testing.T) {
 }
 
 // TestRedactQuery 会话 token / apikey 打码：任意大小写键名均被打码，其余参数保持原样。
+// 覆盖红队审计 高-1 的绕过形态：百分号编码键名（?toke%6E=）与 ";" 分隔。
 func TestRedactQuery(t *testing.T) {
 	cases := map[string]string{
 		"":                                    "",
 		"token=secret":                        "?token=***",
 		"uuid=abc&token=secret&command=stop":  "?uuid=abc&token=***&command=stop",
-		"TOKEN=SECRET":                        "?token=***",
+		"TOKEN=SECRET":                        "?TOKEN=***",
 		"apikey=secret":                       "?apikey=***",
 		"uuid=abc&apikey=secret&command=stop": "?uuid=abc&apikey=***&command=stop",
-		"APiKey=SECRET":                       "?apikey=***",
+		"APiKey=SECRET":                       "?APiKey=***",
 		"a=1&b=2":                             "?a=1&b=2",
+		// 百分号编码键名（认证侧解码后取值，打码必须同等处理）
+		"toke%6E=test-key": "?toke%6E=***",
+		"toke%6E=x&a=1":    "?toke%6E=***&a=1",
+		// ";" 分隔的非标准形态同样打码
+		"a=1;token=secret": "?a=1&token=***",
 	}
 	for in, want := range cases {
 		if got := redactQuery(in); got != want {

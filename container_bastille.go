@@ -472,6 +472,9 @@ var configKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // bastilleConfigGet 解析 jail.conf 为扁平键值对象（docs/irix-node-container-api.md §4.12）。
 // 仅解析 "key = value;" 形式的参数行；注释 / 块结构 / 无法解析的行跳过。
 func bastilleConfigGet(name string) (map[string]string, error) {
+	if !safePathSegment(name) {
+		return nil, fmt.Errorf("jail 名无效: %s", name)
+	}
 	data, err := os.ReadFile(filepath.Join(bastilleRoot, "jails", name, "jail.conf"))
 	if err != nil {
 		return nil, fmt.Errorf("读取 jail.conf 失败: %w", err)
@@ -504,6 +507,9 @@ func bastilleConfigGet(name string) (map[string]string, error) {
 
 // bastilleConfigSet 设置配置项：bastille config <name> <key> <value>。
 func bastilleConfigSet(name, key, value string) error {
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
 	if !configKeyPattern.MatchString(key) {
 		return fmt.Errorf("配置键格式无效（仅允许字母/数字/._-）: %s", key)
 	}
@@ -514,6 +520,9 @@ func bastilleConfigSet(name, key, value string) error {
 // bastilleConfigUnset 从 jail.conf 移除配置项（直接改写文件，幂等）。
 // 形如 "key = ...;" 的参数行整行删除；不存在的 key 返回 nil。
 func bastilleConfigUnset(name, key string) error {
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
 	confPath := filepath.Join(bastilleRoot, "jails", name, "jail.conf")
 	data, err := os.ReadFile(confPath)
 	if err != nil {
@@ -554,8 +563,9 @@ const mountBin = "/sbin/mount"
 // bastilleJailHostPath 把 jail 内路径解析为宿主机绝对路径（NODE_API.md §6.1 文件管理）。
 // jail 名必须对应 jails/ 下的真实目录；thin jail 的 root 符号链接解析与
 // .. / 符号链接越界校验由 resolveJailHostPath 处理。
+// jail 名先过 safePathSegment：%2F 等编码可把 ../ 带进 PathValue（红队审计 高-2）。
 func bastilleJailHostPath(name, jailPath string) (string, error) {
-	if name == "" || strings.ContainsAny(name, `/\`) {
+	if !safePathSegment(name) {
 		return "", fmt.Errorf("%w: jail 名无效: %s", errJailPath, name)
 	}
 	jailDir := filepath.Join(bastilleRoot, "jails", name)
@@ -570,6 +580,10 @@ func bastilleJailHostPath(name, jailPath string) (string, error) {
 // fstab 部分由 bastilleMountListFstab（无构建标签，纯逻辑）构造，本函数在其
 // 基础上再合并系统 mount 命令输出的当前实际挂载。
 func bastilleMountList(name string) ([]map[string]any, error) {
+	// name 进入 fstab / jail root 路径拼接，必须过白名单（红队审计 高-2）。
+	if !safePathSegment(name) {
+		return nil, fmt.Errorf("jail 名无效: %s", name)
+	}
 	items, err := bastilleMountListFstab(name)
 	if err != nil {
 		return nil, err
@@ -617,6 +631,10 @@ func bastilleMountList(name string) ([]map[string]any, error) {
 //   - procfs/devfs：追加 fstab 条目并立即挂载到宿主 <jailroot>/<dst>；
 //     挂载失败时回滚 fstab 条目。
 func bastilleMountAdd(name, src, dst, fstype, options string) error {
+	// name 进入 jail root / fstab 路径拼接，必须过白名单（红队审计 高-2）。
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
 	if fstype == "" {
 		fstype = "nullfs"
 	}
@@ -625,6 +643,13 @@ func bastilleMountAdd(name, src, dst, fstype, options string) error {
 	}
 	if !strings.HasPrefix(dst, "/") {
 		return fmt.Errorf("dst 必须为 jail 内绝对路径（以 / 开头）: %s", dst)
+	}
+	// dst 为 jail 内绝对路径：拒绝 .. 段，防逃出 jail root 后在宿主任意路径
+	// 建目录/挂载（红队审计 高-2：dst=.. 逃出 jail root）。
+	for _, seg := range strings.Split(dst, "/") {
+		if seg == ".." {
+			return fmt.Errorf("dst 不能包含 .. : %s", dst)
+		}
 	}
 	switch fstype {
 	case "nullfs":
@@ -701,6 +726,10 @@ func bastilleMountAdd(name, src, dst, fstype, options string) error {
 // fstab 中找不到条目时仅卸载；卸载失败时如实返回错误（不静默吞掉，
 // 以免 fstab 已删但实际仍挂载/状态脏，导致下次挂载因残留而失败）。
 func bastilleMountRemove(name, dst string) error {
+	// name 进入 fstab / jail root 路径拼接，必须过白名单（红队审计 高-2）。
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
 	// 先尝试卸载（无论 fstab 是否有条目都尝试，失败的 mountpoint 也需清理）
 	umountErr := bastilleUmount(name, dst)
 	// 再移除 fstab 条目
@@ -1449,6 +1478,14 @@ func (d *Daemon) bastilleRunStart(name, command, cwd string, watch bool) (string
 // 返回 {running, exitCode?, offset, log}；会话不在内存（节点重启）时回退读取
 // 磁盘日志（running=false，exitCode 省略）。
 func bastilleRunStatus(name, session string, tail int, since int64) (map[string]any, error) {
+	// name/session 进入日志文件路径（run/<name>/<session>.log）：
+	// 必须过白名单，防 %2F 编码的 ../ 读任意 *.log（红队审计 高-2）。
+	if !safePathSegment(name) {
+		return nil, fmt.Errorf("jail 名无效: %s", name)
+	}
+	if !safePathSegment(session) {
+		return nil, fmt.Errorf("会话 id 无效: %s", session)
+	}
 	sess := bastilleSessions.get(session)
 	if sess == nil {
 		// 重启恢复：磁盘日志兜底
@@ -1530,6 +1567,13 @@ func bastilleRunStop(name, session string) error {
 
 // bastilleRunDelete 清理会话：终止进程（运行中则 SIGKILL）+ 删除磁盘日志。
 func bastilleRunDelete(name, session string) error {
+	// name/session 进入日志文件路径，必须过白名单（同 bastilleRunStatus）。
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
+	if !safePathSegment(session) {
+		return fmt.Errorf("会话 id 无效: %s", session)
+	}
 	sess := bastilleSessions.get(session)
 	if sess != nil {
 		if sess.jail != name {

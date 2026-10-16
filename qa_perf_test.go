@@ -285,9 +285,10 @@ func TestLoadTenThousandInstances(t *testing.T) {
 	}
 	dir := t.TempDir()
 	d := NewDaemon(dir)
+	world := t.TempDir() // 实例 cwd 不得位于数据目录内（严重-3 修复后 Load 会校验）
 	const n = 10000
 	for i := 0; i < n; i++ {
-		d.Instances = append(d.Instances, sampleInst(i, dir))
+		d.Instances = append(d.Instances, sampleInst(i, world))
 	}
 	saveStart := time.Now()
 	if err := d.Save(); err != nil {

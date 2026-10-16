@@ -310,14 +310,23 @@ func TestCreateInstanceRejectsSystemCwd(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Errorf("系统目录 cwd 创建实例应被拒绝（业务 400），实际 %v %s", status, data)
 	}
-	// 正常 cwd 创建成功
+	// 正常 cwd 创建成功（cwd 不得位于数据目录内，见严重-3 修复）
 	status, _ = e.apiCall(t, http.MethodPost, "/api/instance", map[string]any{
 		"nickname":     "正常实例",
 		"startCommand": "ping 127.0.0.1 -t",
-		"cwd":          e.cwd,
+		"cwd":          worldDir(t),
 	})
 	if status != 200 {
 		t.Errorf("正常 cwd 创建实例失败: %v", status)
+	}
+	// 数据目录内 cwd 同样拒绝（红队审计 严重-3：否则文件 API 可读写账户库）
+	status, _ = e.apiCall(t, http.MethodPost, "/api/instance", map[string]any{
+		"nickname":     "越权实例",
+		"startCommand": "ping 127.0.0.1 -t",
+		"cwd":          e.d.DataDir,
+	})
+	if status != http.StatusBadRequest {
+		t.Errorf("数据目录内 cwd 创建实例应被拒绝，实际 %v", status)
 	}
 }
 
@@ -950,7 +959,7 @@ func TestOrphanProcessAfterRestart(t *testing.T) {
 	inst := NewInstance("orphan-uuid", InstanceConfig{
 		Nickname:     "孤儿",
 		StartCommand: longRunCommand(),
-		Cwd:          dir,
+		Cwd:          t.TempDir(), // cwd 不得位于数据目录内（严重-3 修复后 Load 会校验）
 	})
 	d.Instances = append(d.Instances, inst)
 	if err := d.startInstance(inst); err != nil {

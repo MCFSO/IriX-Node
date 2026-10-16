@@ -20,7 +20,7 @@ func TestNodeRuntimeShutdownFlushesAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	d := NewDaemon(dir)
 	d.SaveDebounce = 0
-	inst := NewInstance("", InstanceConfig{Nickname: "shutdown", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "shutdown", Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("添加实例失败: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestNodeRuntimeDrainsRequestsBeforeClosingStores(t *testing.T) {
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	defer unblock()
 	handlerErr := make(chan error, 1)
-	inst := NewInstance("", InstanceConfig{Nickname: "最后一个请求", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "最后一个请求", Cwd: t.TempDir()})
 	server := &http.Server{Handler: d.trackRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(entered)
 		<-release
@@ -204,7 +204,7 @@ func TestNodeRuntimeReportsPersistenceFailureAndContinuesCleanup(t *testing.T) {
 	if err := d.initAccounts(accountsConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Add(NewInstance("", InstanceConfig{Cwd: dir})); err != nil {
+	if err := d.Add(NewInstance("", InstanceConfig{Cwd: t.TempDir()})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(d.instanceFile()+".tmp", 0o755); err != nil {

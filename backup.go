@@ -17,6 +17,7 @@ package main
 import (
 	"archive/zip"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -30,8 +31,42 @@ import (
 const snapshotTimeFormat = "2006-01-02-15-04-05"
 
 // backupsDirOf 实例备份目录（{data}/backups/<uuid>）。
+// uuid 必须先过 checkBackupUUID；不校验时 filepath.Join 会规范化 ".."
+// 让备份区逃逸到任意目录（红队审计 严重-2）。
 func (d *Daemon) backupsDirOf(uuid string) string {
 	return filepath.Join(d.DataDir, "backups", uuid)
+}
+
+// checkBackupUUID 校验备份区 uuid 参数并确认实例存在：
+// 白名单字符（safePathSegment）阻断 ../ 与分隔符越界；实例存在性校验保证
+// 备份区目录名来自实例记录而非任意输入（红队审计 严重-2 修复项 1/2）。
+func (d *Daemon) checkBackupUUID(uuid string) error {
+	if !safePathSegment(uuid) {
+		return fmt.Errorf("非法 uuid 参数: %s", uuid)
+	}
+	if d.Find(uuid) == nil {
+		return fmt.Errorf("实例不存在: %s", uuid)
+	}
+	return nil
+}
+
+// backupPathWithin 校验备份文件 abs 位于 uuid 的备份区内（解析符号链接后
+// 再校验，防止备份区内的软链把文件指到区外；红队审计 严重-2 修复项 3）。
+// 文件不存在时按父目录解析（删除端点容许目标已缺失）。
+func backupPathWithin(dir, abs string) bool {
+	if !pathWithin(dir, abs) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		resolved, err = filepath.EvalSymlinks(filepath.Dir(abs))
+		if err != nil {
+			// 目标与父目录都不存在：词法校验已通过，交给后续 Stat/Remove 报错
+			return true
+		}
+		resolved = filepath.Join(resolved, filepath.Base(abs))
+	}
+	return pathWithin(dir, resolved)
 }
 
 // snapshotEntry 待备份文件。
@@ -203,7 +238,7 @@ func (d *Daemon) handleInstanceRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	backupDir := d.backupsDirOf(body.UUID)
-	if !pathWithin(backupDir, archive) {
+	if !backupPathWithin(backupDir, archive) {
 		writeError(w, http.StatusBadRequest, "备份文件不在本实例备份区")
 		return
 	}
@@ -282,6 +317,10 @@ func (d *Daemon) handleBackupsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 uuid 参数")
 		return
 	}
+	if err := d.checkBackupUUID(uuid); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	dir := d.backupsDirOf(uuid)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -341,6 +380,10 @@ func (d *Daemon) handleBackupsDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 uuid 参数")
 		return
 	}
+	if err := d.checkBackupUUID(uuid); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var body struct {
 		Paths []string `json:"paths"`
 	}
@@ -351,7 +394,7 @@ func (d *Daemon) handleBackupsDelete(w http.ResponseWriter, r *http.Request) {
 	dir := d.backupsDirOf(uuid)
 	for _, p := range body.Paths {
 		abs, err := filepath.Abs(p)
-		if err != nil || !pathWithin(dir, abs) {
+		if err != nil || !backupPathWithin(dir, abs) {
 			writeError(w, http.StatusBadRequest, "备份路径越界: "+p)
 			return
 		}
@@ -383,13 +426,17 @@ func (d *Daemon) handleBackupDownloadTicket(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "缺少 uuid 参数")
 		return
 	}
+	if err := d.checkBackupUUID(uuid); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	abs, err := filepath.Abs(body.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "备份路径无效")
 		return
 	}
 	dir := d.backupsDirOf(uuid)
-	if !pathWithin(dir, abs) {
+	if !backupPathWithin(dir, abs) {
 		writeError(w, http.StatusBadRequest, "备份文件不在本实例备份区")
 		return
 	}

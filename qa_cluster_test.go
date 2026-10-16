@@ -119,8 +119,8 @@ func TestClusterFileStore(t *testing.T) {
 		t.Fatalf("直连上传返回 %d", resp.StatusCode)
 	}
 
-	// list：校验条目字段（含 sha256/mtime）
-	code, body = doReq(t, base+"/list?"+qaKV()+"&path=/mirrors/i-abcd/world")
+	// list：校验条目字段（含 sha256/mtime；摘要须显式 hash=1 按需计算）
+	code, body = doReq(t, base+"/list?"+qaKV()+"&path=/mirrors/i-abcd/world&hash=1")
 	if code != http.StatusOK {
 		t.Fatalf("list 失败: %d %s", code, body)
 	}
@@ -743,7 +743,8 @@ func TestFileListHasSyncFields(t *testing.T) {
 	srv := newTestServer(t, d)
 	defer srv.Close()
 
-	code, body := doReq(t, srv.URL+"/api/files/list?"+qaKV()+"&uuid="+inst.InstanceUuid)
+	// 摘要须显式 hash=1（默认不算，防大目录全量读 IO 放大，高-6）
+	code, body := doReq(t, srv.URL+"/api/files/list?"+qaKV()+"&uuid="+inst.InstanceUuid+"&hash=1")
 	if code != http.StatusOK {
 		t.Fatalf("files/list 失败: %d %s", code, body)
 	}

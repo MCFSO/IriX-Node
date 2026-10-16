@@ -35,7 +35,7 @@ func TestAsyncSaveStopWaitsForInFlightWrite(t *testing.T) {
 	var unlockOnce sync.Once
 	unlock := func() { unlockOnce.Do(func() { d.saveMu.Unlock() }) }
 	defer unlock()
-	inst := NewInstance("", InstanceConfig{Nickname: "停止时写盘", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "停止时写盘", Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestAsyncSaveDirtyAndFlush(t *testing.T) {
 	d := NewDaemon(dir)
 	d.SaveDebounce = 0 // 本用例不开后台循环，手动控制 flush
 
-	inst := NewInstance("", InstanceConfig{Nickname: "async", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "async", Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatalf("Add 失败: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestAsyncSaveUpdateAndRemove(t *testing.T) {
 	d := NewDaemon(dir)
 	d.SaveDebounce = 0
 
-	inst := NewInstance("", InstanceConfig{Nickname: "u", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "u", Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestAsyncSaveLoopDebounce(t *testing.T) {
 	d.StartAutoSave()
 	defer d.StopAutoSave()
 
-	inst := NewInstance("", InstanceConfig{Nickname: "loop", Cwd: dir})
+	inst := NewInstance("", InstanceConfig{Nickname: "loop", Cwd: t.TempDir()})
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestAsyncSaveLoopDebounce(t *testing.T) {
 
 	// StopAutoSave 后 saveLoop 退出，但 FlushDirty 仍可手动兜底
 	d.StopAutoSave()
-	if err := d.Add(NewInstance("", InstanceConfig{Nickname: "after-stop", Cwd: dir})); err != nil {
+	if err := d.Add(NewInstance("", InstanceConfig{Nickname: "after-stop", Cwd: t.TempDir()})); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.FlushDirty(); err != nil {

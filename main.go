@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -576,6 +577,53 @@ func forbiddenCwdDirs() []string {
 		"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
 		"/boot", "/dev", "/proc", "/sys", "/var/log", "/var/run", "/root",
 	}
+}
+
+// safeIDPattern 进入文件路径拼接的单段标识白名单：字母数字开头，
+// 仅含字母数字与 ._-，长度 ≤ 64。覆盖实例 uuid、jail 名、Docker id、
+// 会话 id 等（红队审计 严重-2 / 高-2：%2F、.. 等形态一律不在此集合内）。
+var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// safePathSegment 校验单个路径段是否可安全进入文件路径拼接：
+// 白名单字符 + 拒绝 ".."（含 a..b 等含点形态，双保险）。
+func safePathSegment(s string) bool {
+	return safeIDPattern.MatchString(s) && !strings.Contains(s, "..")
+}
+
+// validateInstanceCwd 在 validateCwd 基础上追加数据目录校验：
+// 实例工作目录不得位于节点数据目录内（含相等），否则文件 API 可经 cwd
+// 读写账户库/保险库/实例表（红队审计 严重-3）。
+func (d *Daemon) validateInstanceCwd(cwd string) error {
+	if err := validateCwd(cwd); err != nil {
+		return err
+	}
+	if d.DataDir != "" {
+		abs, err := filepath.Abs(strings.TrimSpace(cwd))
+		if err != nil {
+			return fmt.Errorf("工作目录解析失败: %v", err)
+		}
+		dataDir, err := filepath.Abs(d.DataDir)
+		if err != nil {
+			return fmt.Errorf("数据目录解析失败: %v", err)
+		}
+		if pathWithin(filepath.Clean(dataDir), filepath.Clean(abs)) {
+			return fmt.Errorf("工作目录不能位于节点数据目录内: %s", cwd)
+		}
+	}
+	return nil
+}
+
+// normalizeInstanceCwd 规范化 + 校验实例工作目录（含数据目录禁区），
+// 供实例创建/更新/导入入口统一调用。
+func (d *Daemon) normalizeInstanceCwd(cwd string) (string, error) {
+	abs, err := normalizeCwd(cwd)
+	if err != nil {
+		return "", err
+	}
+	if err := d.validateInstanceCwd(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 // validateCwd 校验实例工作目录：拒绝空目录、文件系统/磁盘根目录与系统目录。

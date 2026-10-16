@@ -447,7 +447,12 @@ func (d *Daemon) handleFRPLogs(w http.ResponseWriter, r *http.Request) {
 
 // handleFRPUploadBinary 上传 frpc 二进制。
 // POST /api/frp/binary multipart: file
+// 仅管理员可上传（上传内容将以节点身份被执行，红队审计 严重-4）；
+// 上传后不再在本请求内执行任何探测（版本号由 GET /api/frp/status 按需获取）。
 func (d *Daemon) handleFRPUploadBinary(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "解析上传失败: "+err.Error())
 		return
@@ -463,7 +468,7 @@ func (d *Daemon) handleFRPUploadBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	if err := os.MkdirAll(d.frpDir(), 0o755); err != nil {
+	if err := os.MkdirAll(d.frpDir(), 0o700); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建目录失败: "+err.Error())
 		return
 	}
@@ -497,9 +502,11 @@ func (d *Daemon) handleFRPUploadBinary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "就位失败: "+err.Error())
 		return
 	}
+	// 不在上传请求内执行刚上传的文件（严重-4）：版本探测改为读状态接口，
+	// 由管理员按需触发；version 字段保留为空串以兼容客户端解析。
 	writeOK(w, map[string]any{
 		"path":    dest,
-		"version": frpcVersion(dest),
+		"version": "",
 	})
 }
 

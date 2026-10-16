@@ -87,7 +87,7 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	items, total, abs, err := listDir(cwd, target, page, pageSize)
+	items, total, abs, err := listDir(cwd, target, page, pageSize, queryParam(r, "hash") == "1")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -103,8 +103,11 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 // listDir 列出目录内容：条目含 name/size/time/mode/type/mtime/sha256，
 // 目录在前按名称排序，按 page/pageSize 分页。
+// wantHash=false（默认）时 sha256 恒为空串：对每个文件全量读一遍算摘要
+// 等价于"读目录内所有文件全文"，大目录单请求即可打满 IO（红队审计 高-6）；
+// 需要摘要的调用方显式传 ?hash=1（增量同步走 /api/*/sync/list，另行计算）。
 // 返回 (当前页条目, 总条目数, 相对 cwd 的绝对路径, 错误)。
-func listDir(cwd, target string, page, pageSize int) ([]map[string]any, int, string, error) {
+func listDir(cwd, target string, page, pageSize int, wantHash bool) ([]map[string]any, int, string, error) {
 	dir, err := NormalizePath(cwd, target)
 	if err != nil {
 		return nil, 0, "", err
@@ -129,7 +132,7 @@ func listDir(cwd, target string, page, pageSize int) ([]map[string]any, int, str
 			"mode":  int(info.Mode().Perm()),
 			"type":  entryType(info),
 		}
-		if info.IsDir() {
+		if info.IsDir() || !wantHash {
 			item["sha256"] = ""
 		} else {
 			item["sha256"] = fileSHA256(full)

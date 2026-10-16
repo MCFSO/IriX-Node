@@ -39,14 +39,15 @@ const (
 	accountRedisPrefix = "irix:acct:"        // Redis 键前缀
 )
 
-// 登录防暴力破解限速（蓝方加固）：用户名与来源 IP 双维度失败计数，
+// 登录防暴力破解限速（蓝方加固）：「账户+IP」组合维度与来源 IP 维度失败计数，
 // 达到阈值后锁定一段时间（与保险库 unlock 限速策略一致）。
 // 成功登录立即清零；条目随过期会话清理一并回收，防 map 无界增长。
 const (
-	accountLoginMaxFails = 5                // 窗口内最大失败次数
-	accountLoginLockout  = 15 * time.Minute // 触发限速后的锁定时长
-	accountLoginWindow   = 15 * time.Minute // 失败计数窗口
-	accountLoginMaxKeys  = 10000            // 限速表键上限（防内存放大）
+	accountLoginMaxFails   = 5                // 「账户+IP」组合维度窗口内最大失败次数
+	accountLoginMaxFailsIP = 30               // IP 维度窗口内最大失败次数（放宽：NAT/反代后多用户共享出口 IP，避免少数失败连坐封禁整个出口）
+	accountLoginLockout    = 15 * time.Minute // 触发限速后的锁定时长
+	accountLoginWindow     = 15 * time.Minute // 失败计数窗口
+	accountLoginMaxKeys    = 10000            // 限速表键上限（防内存放大）
 )
 
 // 进程内热缓存 TTL（鉴权高频路径：每个 API 请求都要查会话与权限）。
@@ -402,12 +403,35 @@ func (s *accountSystem) putPassword(username, password string) error {
 	return nil
 }
 
+// dummyPasswordHash 账户不存在时的等代价 bcrypt 比对目标（红队审计 高-5(c)：
+// 用户名枚举时序侧信道）。不存在的账户同样执行一次完整 bcrypt 比较，
+// 使「存在但密码错」与「不存在」的响应耗时同量级。
+// 首次调用时按当前 accountBcryptCost 生成（测试注入 MinCost 后同样廉价）。
+var (
+	dummyHashOnce sync.Once
+	dummyHashVal  []byte
+)
+
+func dummyPasswordHash() []byte {
+	dummyHashOnce.Do(func() {
+		h, err := bcrypt.GenerateFromPassword([]byte("irix-dummy-password"), accountBcryptCost)
+		if err != nil {
+			// 生成失败仅影响时序均衡，不影响安全判定（比较必然失败）
+			h = []byte("$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalid")
+		}
+		dummyHashVal = h
+	})
+	return dummyHashVal
+}
+
 // checkPassword 校验账户密码并返回账户（bcrypt 比较）。
 func (s *accountSystem) checkPassword(username, password string) (*account, bool) {
 	var hash string
 	err := s.db.QueryRow(rebindSQL(s.driver,
 		`SELECT password_hash FROM accounts WHERE username = ?`), username).Scan(&hash)
 	if err != nil {
+		// 账户不存在（或查询失败）：等代价 bcrypt 比较抹平时序差异，防用户名枚举
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), []byte(password))
 		return nil, false
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
@@ -702,9 +726,12 @@ func (s *accountSystem) purgeExpiredSessions() {
 
 // ---------- 登录防暴力破解限速（蓝方加固） ----------
 
-// loginFailKeys 登录限速表的双维度键。
+// loginFailKeys 登录限速表的键：「账户+IP」组合维度 + IP 维度。
+// 不再使用全局用户名键——任意人对已知用户名连发 5 次错密码即可把目标锁定
+// 15 分钟并无限续期（未认证锁定 DoS，红队审计 高-5(b)）；组合键只锁定
+// 「该账户 + 攻击者 IP」，不影响目标从其他 IP 登录。
 func loginFailKeys(username, ip string) (string, string) {
-	return "u:" + username, "i:" + ip
+	return "a:" + username + "@" + ip, "i:" + ip
 }
 
 // loginBlocked 判断用户名或来源 IP 是否处于登录锁定期。
@@ -723,7 +750,7 @@ func (s *accountSystem) loginBlocked(username, ip string) bool {
 	return false
 }
 
-// recordLoginFailure 记录一次登录失败（用户名与 IP 双维度各计一次）；
+// recordLoginFailure 记录一次登录失败（「账户+IP」与 IP 双维度各计一次）；
 // 窗口内达到阈值即锁定。bcrypt 校验本身有固定耗时，此计数不构成额外放大。
 func (s *accountSystem) recordLoginFailure(username, ip string) {
 	uk, ik := loginFailKeys(username, ip)
@@ -733,23 +760,36 @@ func (s *accountSystem) recordLoginFailure(username, ip string) {
 	if s.loginFails == nil {
 		s.loginFails = map[string]loginFailEntry{}
 	}
-	// 表过大时先回收过期条目，防攻击者用随机用户名撑爆内存
+	// 表过大时先回收过期条目，防攻击者用随机用户名撑爆内存；
+	// 仍满则按最旧窗口淘汰（LRU）——绝不能丢弃本次计数，否则表满即
+	// fail-open，爆破防护被整体关闭（红队审计 高-5(a)：注释写"拒绝服务
+	// 而非放行"，实现却是既不计数也不锁定）。
 	if len(s.loginFails) >= accountLoginMaxKeys {
 		s.purgeLoginFailsLocked(now)
-		if len(s.loginFails) >= accountLoginMaxKeys {
-			return // 仍满则丢弃本次计数（安全侧：拒绝服务而非放行）
+		for len(s.loginFails) >= accountLoginMaxKeys {
+			oldestKey := ""
+			var oldest time.Time
+			for k, e := range s.loginFails {
+				if oldestKey == "" || e.windowSt.Before(oldest) {
+					oldestKey, oldest = k, e.windowSt
+				}
+			}
+			delete(s.loginFails, oldestKey)
 		}
 	}
-	for _, k := range []string{uk, ik} {
-		e := s.loginFails[k]
+	for _, dim := range []struct {
+		key   string
+		limit int
+	}{{uk, accountLoginMaxFails}, {ik, accountLoginMaxFailsIP}} {
+		e := s.loginFails[dim.key]
 		if now.Sub(e.windowSt) > accountLoginWindow {
 			e = loginFailEntry{windowSt: now}
 		}
 		e.count++
-		if e.count >= accountLoginMaxFails {
+		if e.count >= dim.limit {
 			e.until = now.Add(accountLoginLockout)
 		}
-		s.loginFails[k] = e
+		s.loginFails[dim.key] = e
 	}
 }
 
@@ -763,7 +803,11 @@ func (s *accountSystem) clearLoginFailures(username, ip string) {
 }
 
 // purgeLoginFails 清理已解除锁定的陈旧限速条目（登录时顺手执行）。
+// 必须持 loginMu：登录入口未认证即可并发触达（红队审计 严重-1：
+// 无锁迭代 + 并发写同一 map 会触发不可恢复的运行时致命错误）。
 func (s *accountSystem) purgeLoginFails() {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	s.purgeLoginFailsLocked(time.Now())
 }
 

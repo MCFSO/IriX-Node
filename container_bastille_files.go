@@ -73,7 +73,12 @@ func checkSymlinkEscape(root, path string) error {
 
 // bastilleFilePath 解析 jail 内路径的统一出口：
 // 参数类错误（越界 / jail 不存在）→ 400，平台不支持 → 501，其余 → 500。
+// jail 名先过 safePathSegment，防 %2F 编码的 ../ 进入路径拼接（红队审计 高-2）。
 func (d *Daemon) bastilleFilePath(w http.ResponseWriter, name, jailPath string) (string, bool) {
+	if !safePathSegment(name) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: jail 名无效: %s", errJailPath, name))
+		return "", false
+	}
 	host, err := bastilleResolve(name, jailPath)
 	if err == nil {
 		return host, true

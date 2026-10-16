@@ -31,7 +31,7 @@ func (d *Daemon) handleInstanceImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少 path 参数")
 		return
 	}
-	abs, err := normalizeCwd(body.Path)
+	abs, err := d.normalizeInstanceCwd(body.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

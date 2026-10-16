@@ -195,7 +195,8 @@ func (d *Daemon) handleClusterFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, total, abs, err := listDir(d.clusterRoot(), dir,
-		atoiDefault(queryParam(r, "page"), 1), atoiDefault(queryParam(r, "page_size"), 100))
+		atoiDefault(queryParam(r, "page"), 1), atoiDefault(queryParam(r, "page_size"), 100),
+		queryParam(r, "hash") == "1")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

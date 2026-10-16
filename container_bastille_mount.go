@@ -37,6 +37,9 @@ func bastilleJailRoot(name string) string {
 
 // readFstab 解析 jail 的 fstab 文件为条目列表（跳过注释与空行）。
 func readFstab(name string) ([]fstabEntry, error) {
+	if !safePathSegment(name) {
+		return nil, fmt.Errorf("jail 名无效: %s", name)
+	}
 	data, err := os.ReadFile(bastilleFstabPath(name))
 	if err != nil {
 		return nil, err
@@ -62,6 +65,9 @@ func readFstab(name string) ([]fstabEntry, error) {
 
 // writeFstab 整文件写回 fstab（保留原有注释与空行结构）。
 func writeFstab(name string, lines []string) error {
+	if !safePathSegment(name) {
+		return fmt.Errorf("jail 名无效: %s", name)
+	}
 	return os.WriteFile(bastilleFstabPath(name), []byte(strings.Join(lines, "\n")), 0o644)
 }
 

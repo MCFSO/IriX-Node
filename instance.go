@@ -354,7 +354,7 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.FillDefaults()
 	d.applyVaultDefault(&cfg)
-	abs, err := normalizeCwd(cfg.Cwd)
+	abs, err := d.normalizeInstanceCwd(cfg.Cwd)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -388,7 +388,7 @@ func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.FillDefaults()
-	abs, err := normalizeCwd(cfg.Cwd)
+	abs, err := d.normalizeInstanceCwd(cfg.Cwd)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

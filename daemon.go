@@ -341,11 +341,30 @@ func (d *Daemon) Load() error {
 	d.mu.Lock()
 	changed := false
 	for _, p := range list {
+		// 持久化信任边界校验（红队审计 严重-3）：instances.json 可能来自旧版本
+		// 或被直接篡改，uuid 与 cwd 必须重新过白名单/系统目录/数据目录校验，
+		// 非法条目跳过加载并告警（避免文件 API 经恶意 cwd 读写数据目录）。
+		if !safePathSegment(p.InstanceUuid) {
+			alog.Printf("警告: 跳过非法实例 uuid %q（不满足路径段白名单）", p.InstanceUuid)
+			changed = true
+			continue
+		}
 		// 旧数据迁移：此前相对路径 cwd 被原样入库，同一实例的 cwd 会随
 		// 节点启动目录漂移（systemd 下为 /）；加载时统一转绝对路径。
 		// 空 cwd 保持不动——启动时会被明确拒绝并提示，而不是静默漂移。
 		if cwd := strings.TrimSpace(p.Config.Cwd); cwd != "" {
-			if abs, err := filepath.Abs(cwd); err == nil && abs != cwd {
+			abs, err := filepath.Abs(cwd)
+			if err != nil {
+				alog.Printf("警告: 跳过实例 %s（cwd 无法解析: %v）", p.InstanceUuid, err)
+				changed = true
+				continue
+			}
+			if err := d.validateInstanceCwd(abs); err != nil {
+				alog.Printf("警告: 跳过实例 %s（cwd 校验失败: %v）", p.InstanceUuid, err)
+				changed = true
+				continue
+			}
+			if abs != cwd {
 				p.Config.Cwd = abs
 				changed = true
 			}
@@ -557,7 +576,14 @@ func (d *Daemon) Remove(uuid string, deleteFiles bool) error {
 	d.mu.Unlock()
 
 	if deleteFiles && cwd != "" {
-		_ = os.RemoveAll(cwd)
+		// 删除前强制校验（红队审计 严重-5）：cwd 来自实例配置，创建/更新时
+		// 只过黑名单、旧版本/被篡改的 instances.json 可指向任意目录。
+		// 校验不过时只摘除实例记录、不碰文件，防止主机级数据破坏。
+		if err := d.validateInstanceCwd(cwd); err != nil {
+			alog.Printf("拒绝删除实例 %s 的工作目录 %s：%v（实例记录已移除，文件保留）", uuid, cwd, err)
+		} else {
+			_ = os.RemoveAll(cwd)
+		}
 	}
 	// vaultFiles：删除该实例在加密层的全部对象（D8/D9 清理）
 	if d.vault != nil && d.vault.enabled && d.vaultActive() && inst.Config.VaultFiles {
