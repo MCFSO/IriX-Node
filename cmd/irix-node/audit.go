@@ -82,6 +82,13 @@ func (w *auditResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
+// Unwrap 暴露底层 ResponseWriter。
+//
+// http.ResponseController 依赖 Unwrap 链抵达 server 的具体实现，
+// 审计包装若不提供 Unwrap，内层的读写截止时间（SetReadDeadline /
+// SetWriteDeadline，见 httpidle.go 的请求体读空闲超时）会静默失效。
+func (w *auditResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // Flush 透传底层 Flusher（若有）。
 func (w *auditResponseWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {

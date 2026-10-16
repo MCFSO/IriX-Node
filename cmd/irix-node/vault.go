@@ -597,6 +597,26 @@ func (d *Daemon) vaultActive() bool {
 	return v.initialized && v.masterKey != nil && v.migration != nil && v.migration.InstancesDone
 }
 
+// errVaultLockedPlaintext 保险库锁定态下拒绝明文落盘 instances.json 的哨兵错误。
+var errVaultLockedPlaintext = errors.New("保险库已锁定：拒绝以明文写入 instances.json")
+
+// vaultLocked 保险库已启用、已初始化且实例列表已完成加密迁移，但当前处于
+// 锁定态（masterKey 已清零）。
+//
+// 此状态下绝不能再走明文落盘分支（红队审计 高-7）：一旦写入
+// {data}/instances.json，其中 startCommand 里的 RCON/数据库口令、cwd、
+// EventTask 等都会以明文 0644 长期留在磁盘上，直到下次成功解锁才被删除，
+// 直接违背「实例列表始终加密」的设计承诺。
+func (d *Daemon) vaultLocked() bool {
+	if d.vault == nil || !d.vault.enabled {
+		return false
+	}
+	v := d.vault
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.initialized && v.migration != nil && v.migration.InstancesDone && v.masterKey == nil
+}
+
 // loadInstancesVault 从加密对象加载实例列表（解锁后调用；幂等）。
 func (d *Daemon) loadInstancesVault() error {
 	v := d.vault
@@ -633,6 +653,11 @@ func (d *Daemon) loadInstancesVault() error {
 	for _, p := range list {
 		inst := NewInstance(p.InstanceUuid, p.Config)
 		inst.Started = p.Started
+		// 属主（红队审计 高-3）：加密对象同样可能被篡改，沿用与明文加载
+		// 一致的白名单判定（非法值按公共实例处理）。
+		if p.Owner != "" && validUsername(p.Owner) {
+			inst.Owner = p.Owner
+		}
 		d.Instances = append(d.Instances, inst)
 	}
 	d.mu.Unlock()

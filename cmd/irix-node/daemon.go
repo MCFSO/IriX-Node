@@ -107,6 +107,9 @@ type PersistedInstance struct {
 	InstanceUuid string         `json:"instanceUuid"`
 	Config       InstanceConfig `json:"config"`
 	Started      int            `json:"started"`
+	// Owner 实例属主账户名（红队审计 高-3）：空串 = 公共实例（无属主约束，
+	// 向后兼容既有 instances.json——老记录没有该字段）。
+	Owner string `json:"owner,omitempty"`
 }
 
 // Instance 运行时的实例对象（含进程管理状态）。
@@ -116,6 +119,10 @@ type Instance struct {
 	Config       InstanceConfig
 	InstanceUuid string
 	Started      int
+	// Owner 实例属主账户名（红队审计 高-3）。受 mu 保护；空串 = 公共实例。
+	// 非管理员账户只能访问「自己拥有」或「无属主」的实例，管理员旁路。
+	// 非管理员创建实例时自动归属自己；属主变更仅管理员可做。
+	Owner string
 
 	Status int        // 当前状态
 	Proc   *Process   // 进程包装（可能为 nil）
@@ -128,6 +135,20 @@ type Instance struct {
 
 	metricsMu sync.Mutex     // 指标采样环形缓冲互斥
 	metrics   []metricSample // 最近 60 条采样（15 秒 × 60 = 15 分钟）
+}
+
+// OwnerOf 读取实例属主（加锁快照）。
+func (i *Instance) OwnerOf() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.Owner
+}
+
+// SetOwner 设置实例属主（加锁）。
+func (i *Instance) SetOwner(owner string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.Owner = owner
 }
 
 // NewInstance 由配置创建实例对象。
@@ -170,6 +191,8 @@ func (i *Instance) Detail() map[string]any {
 		"started":      i.Started,
 		"status":       i.Status,
 		"space":        space,
+		// owner 为实例属主（空串 = 公共实例）；面板据此展示与分配属主。
+		"owner": i.Owner,
 		"info": map[string]any{
 			"currentPlayers": -1,
 			"maxPlayers":     -1,
@@ -254,6 +277,11 @@ type Daemon struct {
 	// 解析结果存 transferAllowNets（启动时解析一次，之后只读）。
 	transferAllowCIDR string
 	transferAllowNets []*net.IPNet
+
+	// corsOrigins 额外放行的跨源来源白名单（小写 "scheme://host[:port]"）。
+	// 由 -cors-origins / 配置文件 corsOrigins 解析（见 setCorsOrigins）；
+	// 默认空表示仅放行环回来源与同主机名来源（见 corsOriginAllowed）。
+	corsOrigins map[string]bool
 
 	// vault 加密保险库状态（vault.go/vault_handlers.go；enabled=false 时
 	// 全部 vault 路由返回未启用、数据面门禁放行）。
@@ -371,6 +399,17 @@ func (d *Daemon) Load() error {
 		}
 		inst := NewInstance(p.InstanceUuid, p.Config)
 		inst.Started = p.Started
+		// 属主（红队审计 高-3）：仅接受合法用户名形态，非法值按「公共实例」
+		// 处理并告警，避免被篡改的 instances.json 把实例挂到不存在的属主上
+		//（不存在的属主会让实例对所有非管理员都不可见，等于自锁）。
+		if p.Owner != "" {
+			if validUsername(p.Owner) {
+				inst.Owner = p.Owner
+			} else {
+				alog.Printf("警告: 实例 %s 的属主 %q 非法，按公共实例处理", p.InstanceUuid, p.Owner)
+				changed = true
+			}
+		}
 		d.Instances = append(d.Instances, inst)
 	}
 	d.mu.Unlock()
@@ -398,6 +437,7 @@ func (d *Daemon) Save() error {
 			InstanceUuid: inst.InstanceUuid,
 			Config:       inst.Config,
 			Started:      inst.Started,
+			Owner:        inst.Owner,
 		})
 		inst.mu.Unlock()
 	}
@@ -416,6 +456,11 @@ func (d *Daemon) Save() error {
 			return fmt.Errorf("加密实例索引落盘失败: %w", err)
 		}
 		return nil
+	}
+	// 已启用保险库且实例列表已迁移、但当前锁定：绝不明文落盘（审计 高-7）。
+	// 返回哨兵错误由调用方按「预期跳过」处理（stopAll / FlushDirty）。
+	if d.vaultLocked() {
+		return errVaultLockedPlaintext
 	}
 	tmp := d.instanceFile() + ".tmp"
 	// 不用 os.WriteFile：必须 fsync 后再 rename，
@@ -447,6 +492,11 @@ func (d *Daemon) markDirty() { d.dirty.Store(true) }
 // FlushDirty 若有未落盘的实例配置变更则立即同步写盘，无变更时为空操作。
 // 优雅关停兜底与测试模拟重启前调用；写失败时保留脏标记，等下轮重试。
 func (d *Daemon) FlushDirty() error {
+	if d.vaultLocked() {
+		// 锁定态无法加密落盘：保留脏标记，等解锁后的加密写入，
+		// 绝不明文写 instances.json（审计 高-7）。不报错以免后台循环刷日志。
+		return nil
+	}
 	if !d.dirty.CompareAndSwap(true, false) {
 		return nil
 	}

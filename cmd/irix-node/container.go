@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -203,6 +204,17 @@ func (s *jobStore) get(id string) *longJob {
 // runLongJob 后台执行命令，输出按行写入任务日志；结束置 done/failed。
 // stdout 与 stderr 同时写入同一收集器（内部加锁），顺序不保证但互不丢失。
 func runLongJob(jobID, name string, args ...string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			alog.Printf("容器长任务 %s 发生 panic（已恢复）: %v\n%s", jobID, rec, debug.Stack())
+			if job := jobs.get(jobID); job != nil {
+				job.mu.Lock()
+				job.status = "failed"
+				job.log = append(job.log, fmt.Sprintf("任务内部错误: %v", rec))
+				job.mu.Unlock()
+			}
+		}
+	}()
 	job := jobs.get(jobID)
 	if job == nil {
 		return
@@ -249,7 +261,7 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	// Docker（Linux）
 	perm("容器", "GET /api/container/ps", "列出容器")
 	mux.HandleFunc("GET /api/container/ps", d.auth(d.handleContainerPS))
-	perm("容器", "POST /api/container/create", "创建容器")
+	perm("容器", "POST /api/container/create", "创建容器（等价宿主机 root：绑定挂载/env 可触达宿主）")
 	mux.HandleFunc("POST /api/container/create", d.auth(d.handleContainerCreate))
 	perm("容器", "POST /api/container/{id}/start", "启动容器")
 	mux.HandleFunc("POST /api/container/{id}/start", d.auth(d.handleContainerStart))
@@ -263,7 +275,7 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/container/{id}", d.auth(d.handleContainerRemove))
 	perm("容器", "GET /api/container/{id}/logs", "查看容器日志")
 	mux.HandleFunc("GET /api/container/{id}/logs", d.auth(d.handleContainerLogs))
-	perm("容器", "POST /api/container/{id}/exec", "容器内执行命令")
+	perm("容器", "POST /api/container/{id}/exec", "容器内执行命令（等价宿主机 root）")
 	mux.HandleFunc("POST /api/container/{id}/exec", d.auth(d.handleContainerExec))
 	perm("容器", "GET /api/container/{id}/stats", "查看容器统计")
 	mux.HandleFunc("GET /api/container/{id}/stats", d.auth(d.handleContainerStats))
@@ -271,7 +283,7 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/image/list", d.auth(d.handleImageList))
 	perm("容器", "POST /api/image/pull", "拉取镜像")
 	mux.HandleFunc("POST /api/image/pull", d.auth(d.handleImagePull))
-	perm("容器", "POST /api/image/build", "构建镜像")
+	perm("容器", "POST /api/image/build", "构建镜像（仅管理员；等价宿主机 root）")
 	mux.HandleFunc("POST /api/image/build", d.auth(d.handleImageBuild))
 	perm("容器", "GET /api/image/build-progress", "查看构建进度")
 	mux.HandleFunc("GET /api/image/build-progress", d.auth(d.handleImageBuildProgress))
@@ -290,19 +302,19 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/container/{id}/export", d.auth(d.handleContainerExport))
 	perm("容器", "POST /api/container/{id}/limits", "修改容器资源限制")
 	mux.HandleFunc("POST /api/container/{id}/limits", d.auth(d.handleContainerLimits))
-	perm("容器", "POST /api/image/import", "导入镜像")
+	perm("容器", "POST /api/image/import", "导入镜像（等价宿主机 root：镜像内进程可逃逸）")
 	mux.HandleFunc("POST /api/image/import", d.auth(d.handleImageImport))
 
 	// Bastille（FreeBSD）
 	perm("Bastille 基础", "GET /api/bastille/releases", "查看 Bastille 版本")
 	mux.HandleFunc("GET /api/bastille/releases", d.auth(d.handleBastilleReleases))
-	perm("Bastille 基础", "POST /api/bastille/bootstrap", "引导 Bastille")
+	perm("Bastille 基础", "POST /api/bastille/bootstrap", "引导 Bastille（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/bootstrap", d.auth(d.handleBastilleBootstrap))
-	perm("Bastille 基础", "POST /api/bastille/setup", "初始化 Bastille 配置")
+	perm("Bastille 基础", "POST /api/bastille/setup", "初始化 Bastille 配置（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/setup", d.auth(d.handleBastilleSetup))
 	perm("Bastille 基础", "GET /api/bastille/jails", "列出 jail")
 	mux.HandleFunc("GET /api/bastille/jails", d.auth(d.handleBastilleJails))
-	perm("Bastille 基础", "POST /api/bastille/jails/create", "创建 jail")
+	perm("Bastille 基础", "POST /api/bastille/jails/create", "创建 jail（仅管理员；等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/create", d.auth(d.handleBastilleCreate))
 	perm("Bastille 基础", "POST /api/bastille/jails/{name}/start", "启动 jail")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/start", d.auth(d.handleBastilleStart))
@@ -320,31 +332,31 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/bastille/jails/import", d.auth(d.handleBastilleImport))
 	perm("Bastille 基础", "GET /api/bastille/jails/{name}/console", "jail 控制台")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/console", d.auth(d.handleBastilleConsole))
-	perm("Bastille 基础", "POST /api/bastille/jails/{name}/cmd", "jail 内执行命令")
+	perm("Bastille 基础", "POST /api/bastille/jails/{name}/cmd", "jail 内执行命令（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/cmd", d.auth(d.handleBastilleCmd))
-	perm("Bastille 基础", "POST /api/bastille/jails/{name}/pkg", "jail 内安装软件包")
+	perm("Bastille 基础", "POST /api/bastille/jails/{name}/pkg", "jail 内安装软件包（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/pkg", d.auth(d.handleBastillePkg))
 	perm("Bastille 基础", "GET /api/bastille/jails/{name}/config", "查看 jail 配置")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfig))
-	perm("Bastille 基础", "POST /api/bastille/jails/{name}/config", "设置 jail 配置")
+	perm("Bastille 基础", "POST /api/bastille/jails/{name}/config", "设置 jail 配置（等价宿主机 root：可改 jail.conf）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfigSet))
-	perm("Bastille 基础", "DELETE /api/bastille/jails/{name}/config", "删除 jail 配置")
+	perm("Bastille 基础", "DELETE /api/bastille/jails/{name}/config", "删除 jail 配置（等价宿主机 root：可改 jail.conf）")
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/config", d.auth(d.handleBastilleConfigUnset))
 	perm("Bastille 基础", "GET /api/bastille/jails/{name}/mounts", "查看 jail 挂载")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMounts))
-	perm("Bastille 基础", "POST /api/bastille/jails/{name}/mounts", "添加 jail 挂载")
+	perm("Bastille 基础", "POST /api/bastille/jails/{name}/mounts", "添加 jail 挂载（等价宿主机 root：可暴露任意宿主目录）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountAdd))
-	perm("Bastille 基础", "DELETE /api/bastille/jails/{name}/mounts", "移除 jail 挂载")
+	perm("Bastille 基础", "DELETE /api/bastille/jails/{name}/mounts", "移除 jail 挂载（等价宿主机 root）")
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/mounts", d.auth(d.handleBastilleMountRemove))
 	perm("Bastille 基础", "POST /api/bastille/jails/{name}/limits", "修改 jail 资源限制")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/limits", d.auth(d.handleBastilleLimits))
 	perm("Bastille 基础", "GET /api/bastille/templates", "查看 jail 模板")
 	mux.HandleFunc("GET /api/bastille/templates", d.auth(d.handleBastilleTemplates))
-	perm("Bastille 基础", "POST /api/bastille/templates/apply", "应用 jail 模板")
+	perm("Bastille 基础", "POST /api/bastille/templates/apply", "应用 jail 模板（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/templates/apply", d.auth(d.handleBastilleApply))
-	perm("Bastille 基础", "POST /api/bastille/rdr", "添加端口转发")
+	perm("Bastille 基础", "POST /api/bastille/rdr", "添加端口转发（等价宿主机 root：可转发宿主端口）")
 	mux.HandleFunc("POST /api/bastille/rdr", d.auth(d.handleBastilleRdrAdd))
-	perm("Bastille 基础", "DELETE /api/bastille/rdr", "删除端口转发")
+	perm("Bastille 基础", "DELETE /api/bastille/rdr", "删除端口转发（等价宿主机 root）")
 	mux.HandleFunc("DELETE /api/bastille/rdr", d.auth(d.handleBastilleRdrDelete))
 	perm("Bastille 基础", "GET /api/bastille/rdr", "查看端口转发")
 	mux.HandleFunc("GET /api/bastille/rdr", d.auth(d.handleBastilleRdrList))
@@ -365,31 +377,33 @@ func (d *Daemon) registerContainerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/run/{session}", d.auth(d.handleBastilleRunDelete))
 
 	// jail 文件管理（docs/NODE_API.md §6.1）：jail 内路径的列表/读写/删除/上传/下载
+	// 注意：thin jail 的 root 是指向 releases 的符号链接，故这些端点等价宿主机 root
+	//（可读写 /usr/local/bastille 下任意文件），默认仅管理员可开。
 	perm("Bastille 文件", "GET /api/bastille/jails/{name}/files", "列出 jail 文件")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/files", d.auth(d.handleBastilleFilesList))
-	perm("Bastille 文件", "GET /api/bastille/jails/{name}/files/content", "读取 jail 文件内容")
+	perm("Bastille 文件", "GET /api/bastille/jails/{name}/files/content", "读取 jail 文件内容（等价宿主机 root）")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/files/content", d.auth(d.handleBastilleFilesContentRead))
-	perm("Bastille 文件", "PUT /api/bastille/jails/{name}/files/content", "写入 jail 文件内容")
+	perm("Bastille 文件", "PUT /api/bastille/jails/{name}/files/content", "写入 jail 文件内容（等价宿主机 root）")
 	mux.HandleFunc("PUT /api/bastille/jails/{name}/files/content", d.auth(d.handleBastilleFilesContentWrite))
-	perm("Bastille 文件", "DELETE /api/bastille/jails/{name}/files", "删除 jail 文件")
+	perm("Bastille 文件", "DELETE /api/bastille/jails/{name}/files", "删除 jail 文件（等价宿主机 root）")
 	mux.HandleFunc("DELETE /api/bastille/jails/{name}/files", d.auth(d.handleBastilleFilesDelete))
-	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/mkdir", "新建 jail 目录")
+	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/mkdir", "新建 jail 目录（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/files/mkdir", d.auth(d.handleBastilleFilesMkdir))
-	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/touch", "新建 jail 文件")
+	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/touch", "新建 jail 文件（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/files/touch", d.auth(d.handleBastilleFilesTouch))
-	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/upload", "上传 jail 文件")
+	perm("Bastille 文件", "POST /api/bastille/jails/{name}/files/upload", "上传 jail 文件（等价宿主机 root）")
 	mux.HandleFunc("POST /api/bastille/jails/{name}/files/upload", d.auth(d.handleBastilleFilesUpload))
-	perm("Bastille 文件", "GET /api/bastille/jails/{name}/files/download", "下载 jail 文件")
+	perm("Bastille 文件", "GET /api/bastille/jails/{name}/files/download", "下载 jail 文件（等价宿主机 root）")
 	mux.HandleFunc("GET /api/bastille/jails/{name}/files/download", d.auth(d.handleBastilleFilesDownload))
 
 	// 节点级归档（docs/irix-node-container-api.md §4.8）：编排迁移用，任意宿主机路径
-	perm("容器", "POST /api/container/archive", "创建节点归档")
+	perm("容器", "POST /api/container/archive", "创建节点归档（等价宿主机 root：可打包任意宿主路径）")
 	mux.HandleFunc("POST /api/container/archive", d.auth(d.handleArchiveCreate))
-	perm("容器", "GET /api/container/archive", "下载节点归档")
+	perm("容器", "GET /api/container/archive", "下载节点归档（等价宿主机 root：可打包任意宿主路径）")
 	mux.HandleFunc("GET /api/container/archive", d.auth(d.handleArchiveDownload))
-	perm("容器", "POST /api/container/archive/upload", "上传节点归档")
+	perm("容器", "POST /api/container/archive/upload", "上传节点归档（等价宿主机 root：可解压覆盖宿主路径）")
 	mux.HandleFunc("POST /api/container/archive/upload", d.auth(d.handleArchiveUpload))
-	perm("容器", "POST /api/container/archive/restore", "恢复节点归档")
+	perm("容器", "POST /api/container/archive/restore", "恢复节点归档（等价宿主机 root：可解压覆盖宿主路径）")
 	mux.HandleFunc("POST /api/container/archive/restore", d.auth(d.handleArchiveRestore))
 }
 
@@ -456,6 +470,28 @@ func (d *Daemon) handleContainerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Image == "" {
 		writeError(w, http.StatusBadRequest, "缺少 image 参数")
+		return
+	}
+	// 参数白名单校验（红队审计 高-4）：绑定挂载 / env / workdir 均等价宿主机
+	// root 能力，必须在进入 docker CLI 前拦下越界值。
+	if body.Name != "" && !safePathSegment(body.Name) {
+		writeError(w, http.StatusBadRequest, "name 含非法字符（仅允许字母数字与 ._-，且不能含 ..）: "+body.Name)
+		return
+	}
+	if err := validateCLIPositional("image", body.Image); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateContainerEnv(body.Env); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateContainerWorkdir(body.Workdir); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := d.validateContainerVolumes(body.Volumes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	info, err := dockerCreate(body.Name, body.Image, body.Command, body.Workdir, body.Ports, body.Volumes,
@@ -596,7 +632,14 @@ func (d *Daemon) handleImagePull(w http.ResponseWriter, r *http.Request) {
 
 // handleImageBuild 构建镜像 → {jobId}。
 // POST /api/image/build body: {dockerfile, name, tag}
+//
+// 安全性（红队审计 高-4）：该端点接受任意 Dockerfile 并在宿主机上以 root
+// 执行，等价于宿主机 root，故强制管理员身份并拒绝 BuildKit 越权指令
+// （RUN --mount=type=bind/cache/secret/ssh、--security=insecure、--network=host）。
 func (d *Daemon) handleImageBuild(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	var body struct {
 		Dockerfile string `json:"dockerfile"`
 		Name       string `json:"name"`
@@ -608,6 +651,18 @@ func (d *Daemon) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == "" || body.Tag == "" {
 		writeError(w, http.StatusBadRequest, "缺少 name/tag 参数")
+		return
+	}
+	if err := validateCLIPositional("name", body.Name); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateCLIPositional("tag", body.Tag); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateDockerfileSafety(body.Dockerfile); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	jobID, err := dockerBuildStart(d, body.Dockerfile, body.Name, body.Tag)
@@ -733,6 +788,11 @@ func (d *Daemon) handleBastilleJails(w http.ResponseWriter, r *http.Request) {
 // mac（bool 或 MAC 地址字符串）→ bastille create -M（静态 MAC，仅 VNET）；
 // linux 与任何 VNET 模式互斥。响应: {name, warnings}。
 func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
+	// 创建 jail 等价于宿主机 root（可挂载任意宿主目录、写入 jail.conf、
+	// 以 root 运行 jail 内进程），收归管理员（红队审计 高-4）。
+	if !requireAdmin(w, r) {
+		return
+	}
 	var body struct {
 		Name          string   `json:"name"`
 		Release       string   `json:"release"`
@@ -759,6 +819,32 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 	// bastille 拒绝纯数字 jail 名（客户端校验允许纯数字），提前以 400 拦截并给中文提示
 	if isAllDigits(body.Name) {
 		writeError(w, http.StatusBadRequest, "jail 名不能只包含数字（bastille 限制），请至少包含一个字母（如 mc"+body.Name+"）")
+		return
+	}
+	// 参数白名单（红队审计 高-4）：name/release 会拼进 bastille 数据目录路径，
+	// ip/iface 作为 CLI 位置参数，mac 写入 jail.conf，workdir 写入 exec.start。
+	if !safePathSegment(body.Name) {
+		writeError(w, http.StatusBadRequest, "jail 名含非法字符（仅允许字母数字与 ._-，且不能含 ..）: "+body.Name)
+		return
+	}
+	if body.Release != "" && !safePathSegment(body.Release) {
+		writeError(w, http.StatusBadRequest, "release 含非法字符（仅允许字母数字与 ._-）: "+body.Release)
+		return
+	}
+	if err := validateCLIPositional("ip", body.IP); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateCLIPositional("interface", body.Interface); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateCLIPositional("bridge", body.Bridge); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateContainerWorkdir(body.Workdir); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if body.Type == "" {
@@ -791,6 +877,14 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 			macFlag, macAddr = true, m
 		}
 	}
+	// mac 会以 `mac "..."` 形式写进 jail.conf：必须是合法 MAC 地址，
+	// 否则可借引号/分号闭合该行注入任意 jail 配置（红队审计 高-4）。
+	if macAddr != "" {
+		if err := validateMACAddress(macAddr); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	// volumes：字符串 "宿主机路径:jail内路径" → 结构化挂载对
 	volumes := make([]bastilleVolume, 0, len(body.Volumes))
 	for _, v := range body.Volumes {
@@ -803,7 +897,12 @@ func (d *Daemon) handleBastilleCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "volumes 条目格式错误（应为 \"宿主机路径:jail内路径\"）: "+v)
 			return
 		}
-		volumes = append(volumes, bastilleVolume{Source: parts[0], Dest: parts[1]})
+		src, dst := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		if err := d.validateBastilleVolume(src, dst); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		volumes = append(volumes, bastilleVolume{Source: src, Dest: dst})
 	}
 	info, err := bastilleCreate(body.Name, body.Release, body.IP, body.Type, vnetMode,
 		iface, macFlag, macAddr, volumes, body.Workdir, body.MemoryLimitMb, body.Cpus, body.DiskLimitMb)
@@ -1263,6 +1362,18 @@ func (d *Daemon) handleBastilleMountAdd(w http.ResponseWriter, r *http.Request) 
 	}
 	if dst == "" {
 		writeError(w, http.StatusBadRequest, "缺少 dst 参数（jail 内目标路径）")
+		return
+	}
+	// 宿主源路径与 jail 内目标路径白名单校验（红队审计 高-4）：
+	// nullfs 挂载可把宿主机任意目录暴露进 jail，等价宿主机 root。
+	if body.Src != "" {
+		if err := d.validateHostMountSource(body.Src); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if err := validateContainerPath("jail 内目标路径", dst); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := bastilleMountAdd(r.PathValue("name"), body.Src, dst, body.Fstype, body.Options); err != nil {

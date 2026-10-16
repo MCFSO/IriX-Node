@@ -222,6 +222,7 @@ func (d *Daemon) frpStart(t *frpTunnel) error {
 	// 退出监听：更新状态
 	d.processWatchers.Add(1)
 	go func(t *frpTunnel, proc *Process) {
+		defer recoverLog("FRP 隧道看门狗")
 		defer d.processWatchers.Done()
 		select {
 		case <-proc.done:

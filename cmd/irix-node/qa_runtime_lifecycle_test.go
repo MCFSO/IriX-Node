@@ -252,7 +252,11 @@ func TestNodeRuntimeClosesIdleConsoleAndRejectsNewWork(t *testing.T) {
 		t.Fatalf("节点关停后仍能启动实例: %v", err)
 	}
 	w := httptest.NewRecorder()
-	server.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/overview?token=test-key", nil))
+	// 带 Origin 的关停响应必须保留 CORS 头（CORS 头只在跨源请求下有值）
+	shutdownReq := httptest.NewRequest(http.MethodGet, "/api/overview?token=test-key", nil)
+	shutdownReq.Header.Set("X-Auth-Token", qaTestToken())
+	shutdownReq.Header.Set("Origin", "http://127.0.0.1:3080")
+	server.Handler.ServeHTTP(w, shutdownReq)
 	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Access-Control-Allow-Origin") == "" {
 		t.Fatalf("关停响应没有保留状态和 CORS: %d %v", w.Code, w.Header())
 	}

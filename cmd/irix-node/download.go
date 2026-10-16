@@ -139,7 +139,7 @@ func (d *Daemon) handleFileDownloadTicket(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "缺少 file_name 参数")
 		return
 	}
-	path, err := NormalizePath(cwd, fileName)
+	path, err := safeResolve(cwd, fileName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -186,7 +186,7 @@ func (d *Daemon) handleFileUploadTicket(w http.ResponseWriter, r *http.Request) 
 	if uploadDir == "" {
 		uploadDir = "/"
 	}
-	dir, err := NormalizePath(cwd, uploadDir)
+	dir, err := safeResolve(cwd, uploadDir)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -237,7 +237,7 @@ func (d *Daemon) handleDirectDownload(w http.ResponseWriter, r *http.Request) {
 	if t.uuid == "cluster" && strings.HasPrefix(seg[1], "mirrors/") {
 		seg[1] = strings.TrimPrefix(seg[1], "mirrors/")
 	}
-	filePath, err := NormalizePath(t.cwd, seg[1])
+	filePath, err := safeResolve(t.cwd, seg[1])
 	if err != nil {
 		http.Error(w, "路径越界", http.StatusForbidden)
 		return
@@ -258,7 +258,7 @@ func (d *Daemon) handleDirectUpload(w http.ResponseWriter, r *http.Request) {
 	password := strings.TrimPrefix(r.URL.Path, "/upload/")
 	t := tickets.Get(password)
 	// 必须为上传类型且带目标目录：下载票据（dir 为空）被投到 /upload/ 时，
-	// NormalizePath("", name) 会把空 cwd 当相对路径，文件将直接写进守护进程
+	// safeResolve("", name) 会把空 cwd 当相对路径，文件将直接写进守护进程
 	// 自身工作目录 —— 此处一并拒绝（审计报告 #1）。
 	if t == nil || t.kind != ticketUpload || t.dir == "" {
 		http.Error(w, "上传票据无效或已过期", http.StatusForbidden)
@@ -289,7 +289,7 @@ func (d *Daemon) handleDirectUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件名无效", http.StatusBadRequest)
 		return
 	}
-	dest, err := NormalizePath(t.dir, name)
+	dest, err := safeResolve(t.dir, name)
 	if err != nil {
 		http.Error(w, "路径越界", http.StatusForbidden)
 		return

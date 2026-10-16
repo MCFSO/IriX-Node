@@ -48,6 +48,7 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, merr.Error())
 			return
 		} else if mode == 1 {
+			// 加密层：只做词法越界检查（路径仅用于换算逻辑路径，不落文件系统）
 			abs, err := NormalizePath(cwd, target)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
@@ -108,7 +109,7 @@ func (d *Daemon) handleFileList(w http.ResponseWriter, r *http.Request) {
 // 需要摘要的调用方显式传 ?hash=1（增量同步走 /api/*/sync/list，另行计算）。
 // 返回 (当前页条目, 总条目数, 相对 cwd 的绝对路径, 错误)。
 func listDir(cwd, target string, page, pageSize int, wantHash bool) ([]map[string]any, int, string, error) {
-	dir, err := NormalizePath(cwd, target)
+	dir, err := safeResolve(cwd, target)
 	if err != nil {
 		return nil, 0, "", err
 	}
@@ -204,7 +205,7 @@ func (d *Daemon) handleFileReadWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw = nil // 尽早允许回收请求体副本
-	path, err := NormalizePath(cwd, body.Target)
+	path, err := safeResolve(cwd, body.Target)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -305,7 +306,7 @@ func (d *Daemon) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range body.Targets {
-		path, err := NormalizePath(cwd, t)
+		path, err := safeResolve(cwd, t)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -354,12 +355,12 @@ func (d *Daemon) handleFileMove(w http.ResponseWriter, r *http.Request) {
 		if len(pair) != 2 {
 			continue
 		}
-		src, err := NormalizePath(cwd, pair[0])
+		src, err := safeResolve(cwd, pair[0])
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		dst, err := NormalizePath(cwd, pair[1])
+		dst, err := safeResolve(cwd, pair[1])
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -408,12 +409,12 @@ func (d *Daemon) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 		if len(pair) != 2 {
 			continue
 		}
-		src, err := NormalizePath(cwd, pair[0])
+		src, err := safeResolve(cwd, pair[0])
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		dst, err := NormalizePath(cwd, pair[1])
+		dst, err := safeResolve(cwd, pair[1])
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -436,7 +437,12 @@ func (d *Daemon) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		if err := copyPath(src, dst); err != nil {
+		root, rerr := resolveExistingPrefix(cwd)
+		if rerr != nil {
+			writeError(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		if err := copyPath(root, src, dst, 0); err != nil {
 			writeError(w, http.StatusInternalServerError, "复制失败: "+err.Error())
 			return
 		}
@@ -475,7 +481,7 @@ func (d *Daemon) handleFileCompress(w http.ResponseWriter, r *http.Request) {
 	}
 	switch body.Type {
 	case 1: // 压缩
-		zipPath, err := NormalizePath(cwd, body.Source)
+		zipPath, err := safeResolve(cwd, body.Source)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -485,14 +491,14 @@ func (d *Daemon) handleFileCompress(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case 2: // 解压
-		zipPath, err := NormalizePath(cwd, body.Source)
+		zipPath, err := safeResolve(cwd, body.Source)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		var dest string
 		if len(body.Targets) > 0 {
-			dest, err = NormalizePath(cwd, body.Targets[0])
+			dest, err = safeResolve(cwd, body.Targets[0])
 		} else {
 			dest = filepath.Dir(zipPath)
 		}
@@ -525,7 +531,7 @@ func (d *Daemon) handleFileMkdir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	path, err := NormalizePath(cwd, body.Target)
+	path, err := safeResolve(cwd, body.Target)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -569,7 +575,7 @@ func (d *Daemon) handleFileTouch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	path, err := NormalizePath(cwd, body.Target)
+	path, err := safeResolve(cwd, body.Target)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -675,7 +681,24 @@ func (d *Daemon) vaultAbsToLogical(w http.ResponseWriter, uuid, cwd, abs string)
 }
 
 // copyPath 递归复制文件或目录。
-func copyPath(src, dst string) error {
+//
+// root 为 cwd 的真实路径：遍历中遇到符号链接时，只有解析后仍落在 root 内
+// 才跟随复制，否则跳过——避免把 cwd 之外的文件内容复制进实例目录后取走
+// （红队审计 高-10）。depth 为递归深度上限兜底（防软链成环）。
+func copyPath(root, src, dst string, depth int) error {
+	if depth > maxZipDepth {
+		return nil
+	}
+	li, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if li.Mode()&os.ModeSymlink != 0 {
+		resolved, rerr := resolveExistingPrefix(src)
+		if rerr != nil || !pathWithin(root, resolved) {
+			return nil // 越界软链：跳过
+		}
+	}
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -684,6 +707,12 @@ func copyPath(src, dst string) error {
 		return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return err
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				resolved, rerr := resolveExistingPrefix(path)
+				if rerr != nil || !pathWithin(root, resolved) {
+					return nil // 越界软链：跳过
+				}
 			}
 			rel, _ := filepath.Rel(src, path)
 			target := filepath.Join(dst, rel)
@@ -729,8 +758,13 @@ func createZip(zipPath, cwd string, targets []string) error {
 	zw := zip.NewWriter(f)
 	defer zw.Close()
 
+	// root：cwd 解析符号链接后的真实路径，供打包过程中的软链越界判定使用
+	root, err := resolveExistingPrefix(cwd)
+	if err != nil {
+		return err
+	}
 	for _, t := range targets {
-		path, err := NormalizePath(cwd, t)
+		path, err := safeResolve(cwd, t)
 		if err != nil {
 			return err
 		}
@@ -739,18 +773,37 @@ func createZip(zipPath, cwd string, targets []string) error {
 		if rel == "" {
 			rel = filepath.Base(path)
 		}
-		if err := addToZip(zw, path, rel); err != nil {
+		if err := addToZip(zw, root, path, rel, 0); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// maxZipDepth 打包递归深度上限（软链成环时的兜底）。
+const maxZipDepth = 64
+
 // addToZip 递归将文件/目录加入 zip。
-func addToZip(zw *zip.Writer, path, rel string) error {
-	info, err := os.Stat(path)
+//
+// root 为 cwd 的真实路径：条目若是符号链接，只有解析后仍落在 root 内才跟随，
+// 否则跳过——防止「cwd 内一个指向外部的软链」把外部目录整树打进归档
+// （红队审计 高-10）。depth 为递归深度，超限即停止以避免软链成环。
+func addToZip(zw *zip.Writer, root, path, rel string, depth int) error {
+	if depth > maxZipDepth {
+		return nil
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, rerr := resolveExistingPrefix(path)
+		if rerr != nil || !pathWithin(root, resolved) {
+			return nil // 越界软链：跳过，不跟随
+		}
+		if info, err = os.Stat(path); err != nil {
+			return err
+		}
 	}
 	if info.IsDir() {
 		entries, err := os.ReadDir(path)
@@ -758,7 +811,7 @@ func addToZip(zw *zip.Writer, path, rel string) error {
 			return err
 		}
 		for _, e := range entries {
-			if err := addToZip(zw, filepath.Join(path, e.Name()), filepath.Join(rel, e.Name())); err != nil {
+			if err := addToZip(zw, root, filepath.Join(path, e.Name()), filepath.Join(rel, e.Name()), depth+1); err != nil {
 				return err
 			}
 		}

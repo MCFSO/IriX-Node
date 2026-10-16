@@ -789,14 +789,20 @@ func TestFileListPathEscape(t *testing.T) {
 	}
 }
 
-// TestSymlinkEscape 符号链接逃逸：NormalizePath 只做字面规范化，不解析软链。
+// TestSymlinkEscape 回归 [高-10]：cwd 内指向外部的符号链接不得让文件 API
+// 读写删 cwd 之外的内容，也不得把外部目录整树打进压缩包带走。
+//
+// 修复前 NormalizePath 只做 filepath.Clean（纯字面），内核打开文件时会跟随
+// 软链，于是「植入软链 → 读写删外部文件 / 打包下载」是一条稳定可重复的
+// 任意文件通道；safeResolve 会在词法检查之上解析软链并复核是否仍在 cwd 内。
 func TestSymlinkEscape(t *testing.T) {
 	e := newFileEnv(t)
 	outsideDir := filepath.Join(filepath.Dir(e.cwd), "outsidedir")
 	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("link-secret"), 0o644); err != nil {
+	secret := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("link-secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(e.cwd, "link")
@@ -804,16 +810,59 @@ func TestSymlinkEscape(t *testing.T) {
 		t.Skipf("无法创建符号链接（需要权限）: %v", err)
 	}
 
+	// 1) 读：不得拿到外部文件内容
 	status, data := e.apiCall(t, http.MethodPut, "/api/files/", map[string]any{"target": "link/secret.txt"})
 	var got string
 	if status == 200 {
 		json.Unmarshal(data, &got)
 	}
 	if strings.Contains(got, "link-secret") {
-		t.Logf("[发现] 符号链接可绕过 cwd 限制读取外部文件（NormalizePath 为字面规范化，未 EvalSymlinks）")
-	} else {
-		t.Logf("[观察] 符号链接读取被拒绝: status=%v", status)
+		t.Errorf("符号链接可读取 cwd 外文件（高-10 未修复）")
 	}
+	if status != http.StatusBadRequest {
+		t.Errorf("越界读取应 400，实际 %v", status)
+	}
+
+	// 2) 写：不得覆盖外部文件
+	status, _ = e.apiCall(t, http.MethodPut, "/api/files/",
+		map[string]any{"target": "link/secret.txt", "text": "pwned"})
+	if b, _ := os.ReadFile(secret); string(b) != "link-secret" {
+		t.Errorf("符号链接可覆盖 cwd 外文件（高-10 未修复）: %q", b)
+	}
+	if status == 200 {
+		t.Errorf("越界写入应被拒绝，实际 200")
+	}
+
+	// 3) 删：不得删除外部文件
+	e.apiCall(t, http.MethodDelete, "/api/files", map[string]any{"targets": []string{"link/secret.txt"}})
+	if _, err := os.Stat(secret); err != nil {
+		t.Errorf("符号链接可删除 cwd 外文件（高-10 未修复）: %v", err)
+	}
+
+	// 4) 压缩该软链本身：直接拒绝
+	status, _ = e.apiCall(t, http.MethodPost, "/api/files/compress",
+		map[string]any{"type": 1, "source": "link.zip", "targets": []string{"link"}})
+	if status == 200 {
+		t.Errorf("压缩越界软链应被拒绝，实际 200")
+	}
+
+	// 5) 压缩整个 cwd：递归时遇到越界软链必须跳过，归档内不得出现外部文件
+	status, _ = e.apiCall(t, http.MethodPost, "/api/files/compress",
+		map[string]any{"type": 1, "source": "all.zip", "targets": []string{"/"}})
+	if status != 200 {
+		t.Fatalf("压缩 cwd 失败: %v", status)
+	}
+	zr, err := zip.OpenReader(filepath.Join(e.cwd, "all.zip"))
+	if err != nil {
+		t.Fatalf("打开归档失败: %v", err)
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		if strings.Contains(f.Name, "secret.txt") {
+			t.Errorf("归档内含 cwd 之外的文件（高-10 未修复）: %s", f.Name)
+		}
+	}
+	t.Logf("[验证] 符号链接逃逸被拒：读/写/删越界均 400，整树打包自动跳过越界软链")
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,13 +1173,13 @@ func TestStopAllTerminatesChildren(t *testing.T) {
 	}
 }
 
-// TestServerHasTimeouts 校验服务端已配置 slowloris 防护相关超时。
+// TestServerHasTimeouts 校验服务端 slowloris / 慢速 body 防护：
+// 请求头有超时、空闲连接会回收、请求体有「读空闲」超时；
+// 且**不**设置 ReadTimeout/WriteTimeout（会按整请求计时切断大文件传输）。
 func TestServerHasTimeouts(t *testing.T) {
-	// 与 main 中一致的配置
-	srv := &http.Server{
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	d, _ := newTestDaemon(t)
+	srv := d.newHTTPServer("127.0.0.1:0")
+
 	if srv.ReadHeaderTimeout == 0 {
 		t.Error("应设置 ReadHeaderTimeout 以防 slowloris")
 	}
@@ -1140,6 +1189,11 @@ func TestServerHasTimeouts(t *testing.T) {
 	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
 		t.Error("不应设置 ReadTimeout/WriteTimeout：会切断大文件上传下载")
 	}
+	if requestBodyIdleTimeout <= 0 {
+		t.Error("应设置请求体读空闲超时（高-9）：否则声明大 body 后慢速发包可长期占用连接")
+	}
+	t.Logf("[验证] 超时配置：ReadHeaderTimeout=%v IdleTimeout=%v 请求体读空闲=%v（未设 Read/WriteTimeout）",
+		srv.ReadHeaderTimeout, srv.IdleTimeout, requestBodyIdleTimeout)
 }
 
 // TestSlowlorisBlockedByHeaderTimeout 带 ReadHeaderTimeout 时半开连接会被关闭。
@@ -1243,4 +1297,119 @@ func TestCappedWriterBudgetEnforced(t *testing.T) {
 	if _, err := cw2.Write([]byte("abcdefgh")); !errors.Is(err, errZipBudget) {
 		t.Fatalf("单次超预算写入应返回 errZipBudget，实际 %v", err)
 	}
+}
+
+// TestQueryTokenRestrictedToConsole 回归 [中-2]：
+// ?token= 仅在浏览器无法自定义请求头的 WS 控制台端点生效；
+// 其余端点只认 X-Auth-Token / Authorization 头。
+func TestQueryTokenRestrictedToConsole(t *testing.T) {
+	// 非白名单端点：查询串 token 不再被识别为凭据
+	req := httptest.NewRequest(http.MethodGet, "/api/overview?token=leaked-token", nil)
+	if got := bearerToken(req); got != "" {
+		t.Errorf("非白名单端点不应接受 ?token=，实际取到 %q", got)
+	}
+	// WS 控制台：仍允许（浏览器 WebSocket 握手无法设置请求头）
+	req = httptest.NewRequest(http.MethodGet, "/api/instance/console/ws?uuid=x&token=ws-token", nil)
+	if got := bearerToken(req); got != "ws-token" {
+		t.Errorf("WS 控制台应接受 ?token=，实际 %q", got)
+	}
+	// 请求头全端点可用，且优先于查询串
+	req = httptest.NewRequest(http.MethodGet, "/api/overview?token=leaked-token", nil)
+	req.Header.Set("X-Auth-Token", "header-token")
+	if got := bearerToken(req); got != "header-token" {
+		t.Errorf("X-Auth-Token 应优先，实际 %q", got)
+	}
+	// Authorization: Bearer 同样是全端点可用通道
+	req = httptest.NewRequest(http.MethodGet, "/api/overview?token=leaked-token", nil)
+	req.Header.Set("Authorization", "Bearer bearer-token")
+	if got := bearerToken(req); got != "bearer-token" {
+		t.Errorf("Authorization: Bearer 应生效，实际 %q", got)
+	}
+	t.Logf("[验证] ?token= 仅 WS 控制台可用，请求头全端点优先")
+}
+
+// TestQueryTokenRejectedEndToEnd 端到端：非白名单端点带 ?token= 一律 403，
+// 改用请求头即 200；认证响应带 Cache-Control: no-store。
+func TestQueryTokenRejectedEndToEnd(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	srv := newCORSServer(t, d)
+	defer srv.Close()
+
+	// 不经 tokenHeaderTransport 的裸客户端：模拟真实「把 token 写进 URL」的调用方
+	plain := &http.Client{Timeout: 10 * time.Second}
+
+	resp, err := plain.Get(srv.URL + "/api/overview?token=" + qaTestToken())
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("非白名单端点带 ?token= 应 403，实际 %d", resp.StatusCode)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/overview", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Auth-Token", qaTestToken())
+	resp, err = plain.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("带 X-Auth-Token 应 200，实际 %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Errorf("认证响应应带 Cache-Control: no-store，实际 %q", got)
+	}
+	t.Logf("[验证] ?token= 在非白名单端点被拒（403），请求头可用且响应不可缓存")
+}
+
+// TestSlowBodyTrickleAborted 回归 [高-9]：
+// 「声明很大的 Content-Length、之后长期不发数据」的请求必须被读空闲超时中断，
+// 而不是无限占住连接与 goroutine（修复前无任何 body 时限，
+// 免认证入口 /api/auth/login 同样可被这样占住）。
+func TestSlowBodyTrickleAborted(t *testing.T) {
+	orig := requestBodyIdleTimeout
+	requestBodyIdleTimeout = 300 * time.Millisecond // 测试下压低窗口（本包测试不并行）
+	defer func() { requestBodyIdleTimeout = orig }()
+
+	d, _ := newTestDaemon(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := d.newHTTPServer(ln.Addr().String())
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// 声明 1 MiB 请求体，实际只发 1 个字节后保持连接不发数据
+	if _, err := fmt.Fprintf(conn, "POST /api/auth/login HTTP/1.1\r\n"+
+		"Host: irix\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\n\r\n{"); err != nil {
+		t.Fatalf("写入请求失败: %v", err)
+	}
+
+	// 服务端应在空闲窗口后放弃该请求：要么返回响应，要么关闭连接；
+	// 若两者都没有（仍挂着），说明读空闲超时未生效。
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1024)
+	n, rerr := conn.Read(buf)
+	if rerr != nil && n == 0 {
+		if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
+			t.Fatalf("声明大 body 后不发数据，服务端 5 秒内既未响应也未断开（读空闲超时未生效）")
+		}
+		t.Logf("[验证] 空闲超时后连接被服务端关闭: %v", rerr)
+		return
+	}
+	line := strings.SplitN(string(buf[:n]), "\r\n", 2)[0]
+	if !strings.Contains(line, "400") && !strings.Contains(line, "403") {
+		t.Errorf("超时后应返回错误响应，实际首行: %q", line)
+	}
+	t.Logf("[验证] 声明大 body 后挂住不发数据被读空闲超时中断: %s", line)
 }

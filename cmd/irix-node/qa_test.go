@@ -71,14 +71,43 @@ func ensureTestAuth(t testing.TB, d *Daemon) {
 // testClient 压测与冒烟共用的 HTTP 客户端：大连接池复用，避免 Windows 下
 // 高并发短连接把 TIME_WAIT 端口池打满（报 "Only one usage of each socket
 // address"）；http.DefaultClient 默认 MaxIdleConnsPerHost=2 不满足压测场景。
+//
+// 另：传输层会把 URL 查询串里的 token 提升为 X-Auth-Token 请求头
+// （见 tokenHeaderTransport）。生产端点除 WebSocket 握手外只认请求头
+// （红队审计 中-2 修复），测试沿用「URL 带 ?token=」的书写方式，
+// 由本客户端统一转成请求头，从而同时覆盖推荐用法。
 var testClient = &http.Client{
 	Timeout: 30 * time.Second,
-	Transport: func() *http.Transport {
+	Transport: &tokenHeaderTransport{base: func() *http.Transport {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.MaxIdleConns = 256
 		tr.MaxIdleConnsPerHost = 64
 		return tr
-	}(),
+	}()},
+}
+
+// tokenHeaderTransport 测试专用传输层：把 ?token= 查询参数复制为
+// X-Auth-Token 请求头（原查询参数保留，便于断言审计脱敏等场景）。
+type tokenHeaderTransport struct{ base http.RoundTripper }
+
+func (t *tokenHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL != nil && req.Header.Get("X-Auth-Token") == "" && req.Header.Get("Authorization") == "" {
+		if tok := req.URL.Query().Get("token"); tok != "" {
+			req = req.Clone(req.Context())
+			req.Header.Set("X-Auth-Token", tok)
+		}
+	}
+	return t.base.RoundTrip(req)
+}
+
+// TestMain 让测试进程内的默认 HTTP 客户端也套用同一传输层：
+// 大量既有用例直接用 http.DefaultClient / http.Get 拼 ?token= URL，
+// 统一在传输层提升为请求头，等价于「客户端按推荐方式携带凭据」。
+// 真正验证「查询串 token 被拒绝」的用例使用自建裸客户端
+// （见 TestQueryTokenRejectedEndToEnd）。
+func TestMain(m *testing.M) {
+	http.DefaultClient.Transport = &tokenHeaderTransport{base: http.DefaultTransport}
+	os.Exit(m.Run())
 }
 
 // newTestDaemon 创建临时数据目录的守护进程；账户系统已初始化并注入

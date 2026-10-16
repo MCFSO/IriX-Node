@@ -48,9 +48,9 @@ type pluginItem struct {
 // handleInstancePlugins 获取实例的插件/Mod 元数据。
 // GET /api/instance/plugins?uuid&daemonId
 func (d *Daemon) handleInstancePlugins(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	inst.mu.Lock()

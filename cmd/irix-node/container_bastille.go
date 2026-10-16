@@ -1102,6 +1102,7 @@ func bastilleApply(jail, template string, args map[string]string) (string, error
 		return "", errors.New("任务创建失败")
 	}
 	go func() {
+		defer recoverLog("Bastille 模板任务")
 		cmd := commandWithEnv(args, bastilleBin, "template", jail, template)
 		col := &logCollector{job: job}
 		cmd.Stdout = col
@@ -1441,6 +1442,7 @@ func (d *Daemon) bastilleRunStart(name, command, cwd string, watch bool) (string
 	go copyStream(stderr)
 	// 结束收尾：记录退出码；watch 看门狗停止 jail
 	go func() {
+		defer recoverLog("Bastille 会话收尾")
 		waitErr := cmd.Wait()
 		// bastille CLI 退出后，同组的 jail 内命令仍可能存活。
 		groupErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -1611,6 +1613,7 @@ func bastilleStopAll() error {
 	for _, sess := range sessions {
 		wg.Add(1)
 		go func(sess *bastilleSession) {
+			defer recoverLog("Bastille 会话停止")
 			defer wg.Done()
 			if err := bastilleRunStop(sess.jail, sess.id); err != nil {
 				errs <- fmt.Errorf("停止 Bastille 会话 %s 失败: %w", sess.id, err)

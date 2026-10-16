@@ -226,6 +226,10 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "权限不足: 当前账户无权访问 "+r.Pattern)
 			return
 		}
+		// 认证过的响应一律禁止缓存（红队审计 中-2）：避免会话数据落到
+		// 中间代理/浏览器缓存中；万一客户端误把 token 放进 URL，也能
+		// 避免响应被共享缓存复用。
+		w.Header().Set("Cache-Control", "no-store")
 		next(w, withIdentity(r, id))
 	}
 }
@@ -257,6 +261,57 @@ func (d *Daemon) requireInstance(r *http.Request) (*Instance, error) {
 		return nil, errors.New("实例不存在")
 	}
 	return inst, nil
+}
+
+// errInstanceForbidden 表示实例存在但当前账户无权访问（跨租户 IDOR，
+// 红队审计 高-3）；调用方据此返回 403 而非 400。
+var errInstanceForbidden = errors.New("无权访问该实例")
+
+// requireInstanceAccess 解析实例并校验**实例级授权**（红队审计 高-3）。
+//
+// 此前所有实例端点只按 uuid 查实例、从不校验属主，导致只要拿到「文件/控制台/
+// 启停」任一端点开关，就能对**任意**实例生效（IDOR）。授权规则：
+//   - 管理员旁路；
+//   - 实例属主为该账户 → 放行；
+//   - 属主为空（公共实例，含历史数据）→ 放行，保持既有部署可用；
+//   - 其余 → errInstanceForbidden。
+//
+// 账户系统未启用（identity == nil）时不引入属主约束（此时端点已由认证层拦截）。
+func (d *Daemon) requireInstanceAccess(r *http.Request) (*Instance, error) {
+	inst, err := d.requireInstance(r)
+	if err != nil {
+		return nil, err
+	}
+	id := identityOf(r)
+	if id == nil || id.isAdmin {
+		return inst, nil
+	}
+	owner := inst.OwnerOf()
+	if owner == "" || owner == id.username {
+		return inst, nil
+	}
+	return nil, fmt.Errorf("%w（属主: %s）", errInstanceForbidden, owner)
+}
+
+// writeInstanceAccessError 输出实例解析错误：无权访问 → 403，其余（缺 uuid /
+// 实例不存在）→ 400，保持既有客户端契约不变。
+func writeInstanceAccessError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errInstanceForbidden) {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
+}
+
+// canAccessInstance 判定当前账户是否可访问某实例（不写响应）。
+// 供批量端点（删除多实例、列表过滤）复用。
+func (d *Daemon) canAccessInstance(r *http.Request, inst *Instance) bool {
+	id := identityOf(r)
+	if id == nil || id.isAdmin {
+		return true
+	}
+	owner := inst.OwnerOf()
+	return owner == "" || owner == id.username
 }
 
 // handleInstanceList 获取实例列表。
@@ -305,6 +360,11 @@ func (d *Daemon) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 		if statusFilter != "" && strconv.Itoa(status) != statusFilter {
 			continue
 		}
+		// 实例级授权（红队审计 高-3）：非管理员只看到「自己拥有」与「无属主
+		// 的公共实例」，避免跨租户泄露实例清单/名称/状态（管理员旁路）。
+		if !d.canAccessInstance(r, inst) {
+			continue
+		}
 		matched = append(matched, inst)
 	}
 
@@ -336,22 +396,29 @@ func (d *Daemon) handleInstanceList(w http.ResponseWriter, r *http.Request) {
 // handleInstanceDetail 获取实例详情。
 // GET /api/instance?uuid&daemonId
 func (d *Daemon) handleInstanceDetail(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	writeOK(w, inst.Detail())
 }
 
 // handleInstanceCreate 创建实例。
-// POST /api/instance?daemonId  body: InstanceConfig
+// POST /api/instance?daemonId  body: InstanceConfig（可附加 owner 字段，仅管理员）
+//
+// 属主（红队审计 高-3）：非管理员创建的实例自动归属自己，无法为他人建实例；
+// 管理员可在 body 中显式指定 owner（空串 = 公共实例）。
 func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
-	var cfg InstanceConfig
-	if err := parseJSONBody(r, &cfg); err != nil {
+	var body struct {
+		InstanceConfig
+		Owner *string `json:"owner"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
+	cfg := body.InstanceConfig
 	cfg.FillDefaults()
 	d.applyVaultDefault(&cfg)
 	abs, err := d.normalizeInstanceCwd(cfg.Cwd)
@@ -364,6 +431,12 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 	cfg.LastDatetime = cfg.CreateDatetime
 
 	inst := NewInstance("", cfg)
+	owner, err := d.resolveInstanceOwner(r, body.Owner)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	inst.Owner = owner
 	if err := d.Add(inst); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存实例失败: "+err.Error())
 		return
@@ -371,22 +444,58 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{
 		"instanceUuid": inst.InstanceUuid,
 		"config":       inst.Config,
+		"owner":        inst.OwnerOf(),
 	})
 }
 
+// resolveInstanceOwner 计算新实例的属主（红队审计 高-3）：
+//   - 请求未指定 owner：归属发起账户（非管理员即可获得自己创建的实例）；
+//   - 请求指定 owner：仅管理员可指定（可指定为空串 = 公共实例）；
+//     非管理员指定他人属主一律拒绝，防止把实例「塞给别人」。
+func (d *Daemon) resolveInstanceOwner(r *http.Request, requested *string) (string, error) {
+	id := identityOf(r)
+	if id == nil {
+		return "", nil
+	}
+	if requested == nil {
+		if id.isAdmin {
+			return "", nil // 管理员未指定 → 公共实例（与历史行为一致）
+		}
+		return id.username, nil
+	}
+	if !id.isAdmin {
+		return "", errors.New("仅管理员可以指定实例属主")
+	}
+	owner := strings.TrimSpace(*requested)
+	if owner == "" {
+		return "", nil
+	}
+	if !validUsername(owner) {
+		return "", fmt.Errorf("属主用户名不合法: %s", owner)
+	}
+	return owner, nil
+}
+
 // handleInstanceUpdate 更新实例配置。
-// PUT /api/instance?uuid&daemonId  body: InstanceConfig
+// PUT /api/instance?uuid&daemonId  body: InstanceConfig（可附加 owner 字段，仅管理员）
+//
+// 属主变更（红队审计 高-3）仅管理员可做；非管理员提交 owner 字段将被拒绝，
+// 避免把实例「过户」给自己或他人来绕过实例级授权。
 func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
-	var cfg InstanceConfig
-	if err := parseJSONBody(r, &cfg); err != nil {
+	var body struct {
+		InstanceConfig
+		Owner *string `json:"owner"`
+	}
+	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
+	cfg := body.InstanceConfig
 	cfg.FillDefaults()
 	abs, err := d.normalizeInstanceCwd(cfg.Cwd)
 	if err != nil {
@@ -394,15 +503,39 @@ func (d *Daemon) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Cwd = abs
+
+	ownerChanged := false
+	newOwner := ""
+	if body.Owner != nil {
+		id := identityOf(r)
+		if id != nil && !id.isAdmin {
+			writeError(w, http.StatusForbidden, "仅管理员可以变更实例属主")
+			return
+		}
+		newOwner = strings.TrimSpace(*body.Owner)
+		if newOwner != "" && !validUsername(newOwner) {
+			writeError(w, http.StatusBadRequest, "属主用户名不合法: "+newOwner)
+			return
+		}
+		ownerChanged = newOwner != inst.OwnerOf()
+	}
+
 	if err := d.UpdateInstance(inst, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid})
+	if ownerChanged {
+		inst.SetOwner(newOwner)
+		d.markDirty()
+	}
+	writeOK(w, map[string]any{"instanceUuid": inst.InstanceUuid, "owner": inst.OwnerOf()})
 }
 
 // handleInstanceDelete 删除实例。
 // DELETE /api/instance?daemonId  body: {uuids: [...], deleteFile: bool}
+//
+// 实例级授权（红队审计 高-3）：任一 uuid 不属于当前账户（且非公共实例、
+// 调用者非管理员）即整体拒绝，不做部分删除。
 func (d *Daemon) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Uuids      []string `json:"uuids"`
@@ -411,6 +544,17 @@ func (d *Daemon) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
+	}
+	// 先整体鉴权：避免「删除 succeed 一部分、拒绝一部分」导致客户端状态不明。
+	for _, uuid := range body.Uuids {
+		inst := d.Find(uuid)
+		if inst == nil {
+			continue // 不存在视为已删除（幂等），由下方 Remove 返回错误后跳过
+		}
+		if !d.canAccessInstance(r, inst) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("无权删除实例 %s（属主: %s）", uuid, inst.OwnerOf()))
+			return
+		}
 	}
 	var deleted []string
 	for _, uuid := range body.Uuids {
@@ -425,9 +569,9 @@ func (d *Daemon) handleInstanceDelete(w http.ResponseWriter, r *http.Request) {
 // handleInstanceStart 启动实例。
 // GET /api/protected_instance/open?uuid&daemonId
 func (d *Daemon) handleInstanceStart(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	if err := d.startInstance(inst); err != nil {
@@ -440,9 +584,9 @@ func (d *Daemon) handleInstanceStart(w http.ResponseWriter, r *http.Request) {
 // handleInstanceStop 停止实例。
 // GET /api/protected_instance/stop?uuid&daemonId
 func (d *Daemon) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	if err := d.stopInstance(inst); err != nil {
@@ -457,9 +601,9 @@ func (d *Daemon) handleInstanceStop(w http.ResponseWriter, r *http.Request) {
 // 重启语义：实例已停止时直接启动（与 MCSM 面板行为一致），
 // 不因「实例未在运行」返回 500。
 func (d *Daemon) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	if err := d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
@@ -476,9 +620,9 @@ func (d *Daemon) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 // handleInstanceKill 强制终止实例。
 // GET /api/protected_instance/kill?uuid&daemonId
 func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	inst.SetStatus(StatusStopping)
@@ -511,9 +655,9 @@ func (d *Daemon) handleInstanceKill(w http.ResponseWriter, r *http.Request) {
 // handleInstanceCommand 发送命令。
 // GET /api/protected_instance/command?uuid&daemonId&command
 func (d *Daemon) handleInstanceCommand(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	command := r.URL.Query().Get("command")
@@ -538,9 +682,9 @@ func (d *Daemon) handleInstanceCommand(w http.ResponseWriter, r *http.Request) {
 // handleInstanceOutputLog 获取实例输出日志。
 // GET /api/protected_instance/outputlog?uuid&daemonId&size(1KB~2048KB)
 func (d *Daemon) handleInstanceOutputLog(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	size, _ := strconv.Atoi(queryParam(r, "size"))
@@ -633,6 +777,7 @@ func (d *Daemon) startInstance(inst *Instance) error {
 	// 监听进程退出：意外退出且启用 AutoRestart 时自动重启（带防抖）
 	d.processWatchers.Add(1)
 	go func() {
+		defer recoverLog("实例进程看门狗")
 		defer d.processWatchers.Done()
 		select {
 		case <-proc.done:
@@ -720,6 +865,7 @@ func (d *Daemon) stopAll(timeout time.Duration) error {
 		}
 		wg.Add(1)
 		go func(inst *Instance, proc *Process, stopCmd, nickname string) {
+			defer recoverLog("实例停止")
 			defer wg.Done()
 			alog.Printf("正在停止实例 %s（%s）", inst.InstanceUuid, nickname)
 			if err := proc.Stop(stopCmd, timeout); err != nil {
@@ -746,7 +892,14 @@ func (d *Daemon) stopAll(timeout time.Duration) error {
 		}
 	}
 	if err := d.Save(); err != nil {
-		errs = append(errs, fmt.Errorf("关停时保存实例状态失败: %w", err))
+		// 保险库锁定态：已拒绝明文落盘（符合「实例列表始终加密」承诺，
+		// 审计 高-7）。加密存储的索引在 lock 时已 flush，此处没有待落盘内容，
+		// 因此不作为关停错误上报。
+		if errors.Is(err, errVaultLockedPlaintext) {
+			alog.Printf("保险库锁定：关停时跳过 instances.json 明文落盘（配置保持在上次加密快照）")
+		} else {
+			errs = append(errs, fmt.Errorf("关停时保存实例状态失败: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }

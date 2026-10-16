@@ -51,10 +51,10 @@ func (b *backgroundWorkers) start(run func(context.Context)) bool {
 	if !b.gate.enter() {
 		return false
 	}
-	go func() {
+	safeGo("周期后台任务", func() {
 		defer b.gate.leave()
 		run(b.ctx)
-	}()
+	})
 	return true
 }
 
@@ -90,6 +90,7 @@ func (d *Daemon) autoStartInstances() {
 		inst.mu.Unlock()
 		if autoStart {
 			go func(inst *Instance) {
+				defer recoverLog("实例自动启动")
 				if err := d.startInstance(inst); err != nil {
 					alog.Printf("自动启动实例 %s 失败: %v", inst.InstanceUuid, err)
 				}

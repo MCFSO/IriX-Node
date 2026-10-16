@@ -83,6 +83,52 @@ func TestTaskStoreCleanup(t *testing.T) {
 	t.Logf("[验证] 过期清理只移除已结束任务")
 }
 
+// TestTaskStoreOrderTasksConsistency 任务表 order 与 tasks 必须始终一致。
+// 回归 [高-8]：过期淘汰只删 tasks、不从 order 摘除 id，会在 order 留下悬挂 id，
+// 后续遍历取到 nil 会在 t.mu 上 panic；该 panic 发生在后台 goroutine 中，
+// 会直接终止整个节点进程（全部实例中断）。
+func TestTaskStoreOrderTasksConsistency(t *testing.T) {
+	s := newTaskStore()
+	// 塞满任务表，全部为「已结束且已过期」，逼迫 create 命中过期淘汰分支
+	for i := 0; i < maxTasks; i++ {
+		_, task := s.create()
+		task.set(taskStatusDone, 1, "完成", "")
+		task.createdAt = time.Now().Add(-3 * time.Hour)
+	}
+	s.create() // 修复前：淘汰过期任务后 order 残留悬挂 id
+
+	if len(s.tasks) != len(s.order) {
+		t.Fatalf("tasks 与 order 长度不一致: tasks=%d order=%d", len(s.tasks), len(s.order))
+	}
+	for _, id := range s.order {
+		if s.tasks[id] == nil {
+			t.Fatalf("order 中存在悬挂 id: %s", id)
+		}
+	}
+	s.cleanupOnce(time.Now())
+	if len(s.tasks) != len(s.order) {
+		t.Fatalf("清理后 tasks 与 order 长度不一致: tasks=%d order=%d", len(s.tasks), len(s.order))
+	}
+	t.Logf("[验证] order/tasks 始终一致（tasks=%d）", len(s.tasks))
+}
+
+// TestTaskStoreDanglingOrderID cleanupOnce 遇到悬挂 id 应跳过，
+// 而不是在对 nil 取 t.mu 时 panic（回归 [高-8]）。
+func TestTaskStoreDanglingOrderID(t *testing.T) {
+	s := newTaskStore()
+	id, task := s.create()
+	task.set(taskStatusDone, 1, "完成", "")
+	// 人为制造不一致（模拟历史遗留数据或并发淘汰留下的状态）
+	delete(s.tasks, id)
+
+	s.cleanupOnce(time.Now()) // 修复前：此处 nil 解引用 panic
+
+	if len(s.order) != 0 {
+		t.Fatalf("悬挂 id 应被丢弃，order 仍剩 %d 项", len(s.order))
+	}
+	t.Logf("[验证] 悬挂 id 被安全丢弃，未 panic")
+}
+
 // taskIDOf 反查任务 id（测试用）。
 func taskIDOf(s *taskStore, target *task) string {
 	s.mu.Lock()

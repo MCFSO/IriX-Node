@@ -10,9 +10,13 @@ func (d *Daemon) newHTTPServer(addr string) *http.Server {
 	mux := http.NewServeMux()
 	d.RegisterRoutes(mux)
 	return &http.Server{
-		Addr:    addr,
-		Handler: d.trackRequests(d.auditMiddleware(corsMiddleware(d.vaultGate(limitAPIBody(mux))))),
+		Addr: addr,
+		// 中间件链顺序：在途登记 → 审计 → CORS → 保险库门禁 → API body 限额
+		// → 请求体读空闲超时 → 路由。
+		Handler: d.trackRequests(d.auditMiddleware(d.corsMiddleware(d.vaultGate(limitAPIBody(idleBodyTimeout(mux)))))),
 		// 只限制请求头与空闲连接，保留大文件流式上传/下载的能力。
+		// 请求体另由 idleBodyTimeout 做「读空闲」超时（见 httpidle.go）：
+		// 不使用 ReadTimeout/WriteTimeout，否则会按整请求计时切断大文件传输。
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    64 << 10,
@@ -23,7 +27,7 @@ func (d *Daemon) newHTTPServer(addr string) *http.Server {
 // 请求计数涵盖业务处理与审计写入；关停返回前日志落盘器仍然可用。
 func (d *Daemon) trackRequests(next http.Handler) http.Handler {
 	// 被关停门禁拒绝的请求保留统一响应与 CORS，避免客户端误报网络错误。
-	unavailable := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	unavailable := d.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "节点正在关停，请稍后重试")
 	}))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

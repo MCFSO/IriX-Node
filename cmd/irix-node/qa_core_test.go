@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,6 +126,72 @@ func TestDownloadCoreEndToEnd(t *testing.T) {
 		t.Fatalf("instances.json 未落盘: %v", err)
 	}
 	t.Logf("[验证] 核心下载 + sha512 校验成功并就位")
+}
+
+// TestDownloadCoreChunkedOverflow 回归 [高-11]：
+// 源端以 chunked 响应（不带 Content-Length）持续输出时，必须被「按实际写入字节数」
+// 的硬上限中止；修复前只校验声明的 Content-Length，chunked 下（-1）判断整体失效，
+// 攻击者可持续输出写满磁盘。
+func TestDownloadCoreChunkedOverflow(t *testing.T) {
+	origLimit := coreDownloadMaxBytes
+	coreDownloadMaxBytes = 1 << 20 // 测试下压到 1 MiB（本包测试不并行）
+	defer func() { coreDownloadMaxBytes = origLimit }()
+
+	d, dir := newTestDaemon(t)
+	d.transferAllowLoopback = true
+	instDir := filepath.Join(dir, "srv")
+	if err := os.MkdirAll(instDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, instDir)
+	if err := d.Add(inst); err != nil {
+		t.Fatalf("添加实例失败: %v", err)
+	}
+	srv := newTestServer(t, d)
+	defer srv.Close()
+
+	// 源端：不设 Content-Length，写满 4 MiB（> 1 MiB 上限）后停止
+	const chunkCount, chunkSize = 64, 64 << 10
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		chunk := make([]byte, chunkSize)
+		for i := 0; i < chunkCount; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return // 客户端已中止
+			}
+			if flusher != nil {
+				flusher.Flush() // 触发 chunked 编码（不产生 Content-Length）
+			}
+		}
+	}))
+	defer src.Close()
+
+	// 先验证前提：该源在客户端视角确实没有 Content-Length（-1）
+	probe, err := http.Get(src.URL)
+	if err != nil {
+		t.Fatalf("探测源失败: %v", err)
+	}
+	probeLen := probe.ContentLength
+	_, _ = io.Copy(io.Discard, probe.Body)
+	probe.Body.Close()
+	if probeLen != -1 {
+		t.Fatalf("测试源未使用 chunked 编码（ContentLength=%d），无法覆盖该分支", probeLen)
+	}
+
+	jobID := startCoreDownload(t, srv.URL, inst.InstanceUuid, src.URL, "server.jar", "")
+	last := waitCoreDone(t, srv.URL, jobID)
+	if last["status"] != "failed" {
+		t.Fatalf("chunked 超限下载应失败: %v", last)
+	}
+	if msg, _ := last["message"].(string); !strings.Contains(msg, "上限") {
+		t.Fatalf("失败原因应指向大小上限，实际: %s", msg)
+	}
+	// 超限中止后不留任何残留（.part 临时文件与最终文件都不应存在）
+	entries, _ := os.ReadDir(instDir)
+	if len(entries) != 0 {
+		t.Fatalf("超限中止后实例目录应无残留，实际: %v", entries)
+	}
+	t.Logf("[验证] chunked 无 Content-Length 的无限响应被硬上限中止，无残留文件")
 }
 
 // TestDownloadCoreHashMismatch sha512 不匹配 → failed 且不留文件。

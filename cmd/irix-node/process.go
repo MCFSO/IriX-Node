@@ -411,6 +411,7 @@ func startProcess(startCommand, cwd string, logConf *logConfig) (*Process, error
 
 	// 等待进程退出并关闭通道
 	go func() {
+		defer recoverLog("进程退出回收")
 		err := cmd.Wait()
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {

@@ -34,6 +34,9 @@ const clusterMtimeFormat = "2006-01-02 15:04:05"
 // maxClusterEvents 集群事件保留条数。
 const maxClusterEvents = 100
 
+// maxClusterArchiveBytes 集群对等传输归档大小上限（64 GiB，防对端无限输出撑爆磁盘）。
+const maxClusterArchiveBytes = 64 << 30
+
 // clusterRoot 同步区根目录（绝对路径）。
 // DataDir 为相对路径（如 -data dev-node-data）时必须 Abs 化：
 // 否则 clusterPath 返回相对路径，再经 listDir → NormalizePath 相对拼接，
@@ -59,7 +62,7 @@ func (d *Daemon) clusterPath(p string) (string, error) {
 	case strings.HasPrefix(p, "mirrors/"):
 		p = strings.TrimPrefix(p, "mirrors/")
 	}
-	return NormalizePath(d.clusterRoot(), p)
+	return safeResolve(d.clusterRoot(), p)
 }
 
 // fileSHA256 计算文件 SHA-256 十六进制摘要；目录或读取失败返回空串。
@@ -140,8 +143,14 @@ func zipDir(src, zipPath string) error {
 	if err != nil {
 		return err
 	}
+	// root：src 解析软链后的真实路径，供打包过程中的软链越界判定使用
+	// （同步区文件可由对等节点推送，不能假设不含指向外部的软链）。
+	root, err := resolveExistingPrefix(src)
+	if err != nil {
+		return err
+	}
 	for _, e := range entries {
-		if err := addToZip(zw, filepath.Join(src, e.Name()), e.Name()); err != nil {
+		if err := addToZip(zw, root, filepath.Join(src, e.Name()), e.Name(), 0); err != nil {
 			return err
 		}
 	}
@@ -688,12 +697,10 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 		fail(fmt.Errorf("来源地址被拒绝: %w", err))
 		return
 	}
-	auth := ""
-	if token != "" {
-		auth = "?token=" + url.QueryEscape(token)
-	}
+	// 节点间凭据一律走 X-Auth-Token 头，不放进查询串（红队审计 中-2）：
+	// URL 会进入对端访问日志/代理日志，30 天有效的会话 token 落到 URL 即等同泄漏。
 	// 1. 申请远端实例快照任务（任务化，docs/irix-node-local-parity.md §4.5）
-	snap, err := postJSON(client, base+"/api/instance/snapshot"+auth, map[string]any{
+	snap, err := postJSON(client, base+"/api/instance/snapshot", token, map[string]any{
 		"uuid": uuid, "daemonId": daemonID,
 	})
 	if err != nil {
@@ -709,11 +716,8 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 	var archivePath string
 	pollDeadline := time.Now().Add(15 * time.Minute)
 	progressURL := base + "/api/instance/snapshot-progress?jobId=" + url.QueryEscape(snapJobID)
-	if token != "" {
-		progressURL += "&token=" + url.QueryEscape(token) // 已有查询参数，用 & 拼接
-	}
 	for {
-		prog, pErr := getJSON(client, progressURL)
+		prog, pErr := getJSON(client, progressURL, token)
 		if pErr != nil {
 			fail(fmt.Errorf("查询快照进度失败: %w", pErr))
 			return
@@ -742,7 +746,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 		}
 		break
 	} // 2. 申请备份下载票据（绑定该归档文件）
-	tick, err := postJSON(client, base+"/api/instance/backups/download"+auth, map[string]any{
+	tick, err := postJSON(client, base+"/api/instance/backups/download", token, map[string]any{
 		"path": archivePath,
 		"uuid": uuid,
 	})
@@ -788,10 +792,18 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 		fail(err)
 		return
 	}
-	bytesN, err := io.Copy(out, resp.Body)
+	// 硬上限：对端可能以 chunked 响应（无 Content-Length）无限输出，
+	// 因此按实际写入字节数兜底，避免磁盘被单个归档撑满。
+	bytesN, err := io.CopyN(out, resp.Body, maxClusterArchiveBytes+1)
 	out.Close()
-	if err != nil {
+	// CopyN 在源不足 n 字节时返回 io.EOF（此处为正常结束），其余错误才是真失败。
+	if err != nil && err != io.EOF {
 		fail(fmt.Errorf("写入归档失败: %w", err))
+		return
+	}
+	if bytesN > maxClusterArchiveBytes {
+		_ = os.Remove(tmpZip)
+		fail(fmt.Errorf("归档超过上限 %s，已中止", FormatSize(maxClusterArchiveBytes)))
 		return
 	}
 	// 4. 解压到目标同步区目录
@@ -813,21 +825,48 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 
 // postJSON 发送 JSON 请求并解析 MCSM 风格响应 {status, data}。
 // client 由调用方提供（集群拉取使用带 SSRF 校验的传输客户端）。
-func postJSON(client *http.Client, url string, body any) (map[string]any, error) {
+// nodeRequest 构造节点间调用请求：附来源节点会话 token（X-Auth-Token 头）。
+//
+// 凭据一律走请求头、绝不放进查询串（红队审计 中-2）：URL 会进入对端访问
+// 日志、反向代理日志与错误上报，30 天有效的会话 token 落到 URL 即等同泄漏。
+func nodeRequest(method, target, token string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	}
+	if token != "" {
+		req.Header.Set("X-Auth-Token", token)
+	}
+	return req, nil
+}
+
+// postJSON 发送 JSON POST 请求并解析 MCSM 风格响应 {status, data}（token 走请求头）。
+func postJSON(client *http.Client, url, token string, body any) (map[string]any, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Post(url, "application/json; charset=utf-8", bytes.NewReader(b))
+	req, err := nodeRequest(http.MethodPost, url, token, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	return decodeJSONResponse(resp)
 }
 
-// getJSON 发送 GET 请求并解析 MCSM 风格响应 {status, data}。
-func getJSON(client *http.Client, url string) (map[string]any, error) {
-	resp, err := client.Get(url)
+// getJSON 发送 GET 请求并解析 MCSM 风格响应 {status, data}（token 走请求头）。
+func getJSON(client *http.Client, url, token string) (map[string]any, error) {
+	req, err := nodeRequest(http.MethodGet, url, token, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

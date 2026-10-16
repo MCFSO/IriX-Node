@@ -117,7 +117,7 @@ func (d *Daemon) handleDownloadCore(w http.ResponseWriter, r *http.Request) {
 	inst.mu.Lock()
 	cwd := inst.Config.Cwd
 	inst.mu.Unlock()
-	dest, err := NormalizePath(cwd, name)
+	dest, err := safeResolve(cwd, name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -132,7 +132,9 @@ func (d *Daemon) handleDownloadCore(w http.ResponseWriter, r *http.Request) {
 const coreDownloadTimeout = 60 * time.Minute
 
 // coreDownloadMaxBytes 核心文件大小上限（8 GiB，防异常响应撑爆磁盘）。
-const coreDownloadMaxBytes = 8 << 30
+//
+// 声明为 var 而非 const：测试需临时压低上限以覆盖超限分支（本包测试不并行）。
+var coreDownloadMaxBytes int64 = 8 << 30
 
 // runDownloadCore 执行核心下载任务：下载到同目录 .part 临时文件
 // （流式 sha512）→ 校验 → rename 就位。
@@ -179,6 +181,10 @@ func (d *Daemon) runDownloadCore(taskID string, task *task, url, dest, sha512Hex
 		fail(fmt.Errorf("下载失败: HTTP %d", resp.StatusCode))
 		return
 	}
+	// ContentLength 仅用于提前拒绝「诚实声明超大」的响应与进度显示，
+	// **不能作为安全上限**：镜像源以 chunked 响应时不带 Content-Length
+	// （ContentLength == -1），此处判断会整体失效。真正的硬上限在下方
+	// 写入循环里按已写字节数强制，见 coreDownloadMaxBytes。
 	total := resp.ContentLength
 	if total > coreDownloadMaxBytes {
 		fail(fmt.Errorf("下载内容过大: %s", FormatSize(total)))
@@ -207,6 +213,13 @@ func (d *Daemon) runDownloadCore(taskID string, task *task, url, dest, sha512Hex
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			// 硬上限：按实际写出的字节数强制（不信任 Content-Length）。
+			// 超限的那一块直接不落盘，避免临时文件被撑爆。
+			if written+int64(n) > coreDownloadMaxBytes {
+				fail(fmt.Errorf("下载内容超过上限 %s（已接收 %s），已中止",
+					FormatSize(coreDownloadMaxBytes), FormatSize(written+int64(n))))
+				return
+			}
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				fail(fmt.Errorf("写入失败: %w", werr))
 				return
@@ -216,6 +229,8 @@ func (d *Daemon) runDownloadCore(taskID string, task *task, url, dest, sha512Hex
 			if total > 0 {
 				task.set(taskStatusRunning, 0.9*float64(written)/float64(total),
 					fmt.Sprintf("下载中 %s / %s", FormatSize(written), FormatSize(total)), "")
+			} else {
+				task.set(taskStatusRunning, -1, fmt.Sprintf("下载中 %s", FormatSize(written)), "")
 			}
 		}
 		if rerr == io.EOF {

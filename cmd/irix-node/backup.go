@@ -256,6 +256,7 @@ func (d *Daemon) handleInstanceRestore(w http.ResponseWriter, r *http.Request) {
 
 	taskID, task := d.newTask()
 	go func() {
+		defer recoverLog("实例备份恢复任务")
 		fail := func(err error) {
 			task.setError(err)
 			alog.Printf("实例 %s 恢复失败: %v", body.UUID, err)

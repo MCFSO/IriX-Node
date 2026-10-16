@@ -10,6 +10,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -517,4 +518,54 @@ func TestVaultBackup(t *testing.T) {
 	if head[0] != 'P' || head[1] != 'K' {
 		t.Fatal("zip 魔数缺失")
 	}
+}
+
+// TestVaultLockedSaveRefusesPlaintext 回归 [高-7]：
+// 保险库已启用、实例列表已加密迁移，但处于锁定态（masterKey 已清零）时，
+// Save() 必须拒绝以明文写 instances.json。
+// 修复前该状态会落到明文分支，把含 startCommand（RCON/数据库口令）的
+// instances.json 以 0644 写盘，直到下次成功解锁才被删除——直接违背
+// 「实例列表始终加密」的设计承诺。
+func TestVaultLockedSaveRefusesPlaintext(t *testing.T) {
+	e := vaultM4Env(t)
+	m4AddInstance(t, e, map[string]string{"a.txt": "x"})
+	creds := e.onboard(t, "admin", "Passw0rd1234")
+	token := m4UnlockAndMigrate(t, e, creds)
+
+	plain := e.d.instanceFile()
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatalf("迁移完成后不应存在明文 instances.json: %v", err)
+	}
+
+	// 解锁态：Save 走加密对象，绝不产生明文文件
+	if err := e.d.Save(); err != nil {
+		t.Fatalf("解锁态 Save 失败: %v", err)
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatalf("解锁态 Save 不得产生明文文件: %v", err)
+	}
+
+	// 锁定（关键窗口：masterKey 清零，但 d.Instances 仍在内存）
+	code, resp := e.vreq(t, "POST", "/api/vault/lock", nil, map[string]string{"X-Vault-Token": token})
+	if code != http.StatusOK {
+		t.Fatalf("lock 失败: %d %v", code, resp)
+	}
+
+	// 锁定态 Save：返回哨兵错误而不是明文落盘
+	if err := e.d.Save(); !errors.Is(err, errVaultLockedPlaintext) {
+		t.Fatalf("锁定态 Save 应返回 errVaultLockedPlaintext，实际 %v", err)
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatalf("锁定态 Save 写入了明文 instances.json（审计 高-7 未修复）: %v", err)
+	}
+
+	// FlushDirty（异步落盘循环走的路径）同样不得明文落盘，且不报错刷日志
+	e.d.markDirty()
+	if err := e.d.FlushDirty(); err != nil {
+		t.Fatalf("锁定态 FlushDirty 不应报错，实际 %v", err)
+	}
+	if _, err := os.Stat(plain); !os.IsNotExist(err) {
+		t.Fatalf("锁定态 FlushDirty 写入了明文 instances.json: %v", err)
+	}
+	t.Logf("[验证] 锁定态拒绝明文落盘：Save 返回哨兵错误、FlushDirty 静默保留脏标记")
 }

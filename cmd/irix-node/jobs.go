@@ -96,16 +96,24 @@ func (s *taskStore) create() (string, *task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.tasks) >= maxTasks {
-		// 超上限：优先淘汰已结束且过期的任务，否则淘汰最旧的任意任务
+		// 超上限：优先淘汰已结束且过期的任务，否则淘汰最旧的任意任务。
+		// 淘汰时必须同时从 order 摘除 id——只删 tasks 会在 order 中留下悬挂
+		// id，后续遍历（此处与 cleanupOnce）取到 nil 会在 t.mu 上 panic，
+		// 而 panic 发生在后台 goroutine 中会终止整个进程。
 		now := time.Now()
-		for _, id := range s.order {
+		for i, id := range s.order {
 			t := s.tasks[id]
+			if t == nil { // 悬挂 id（历史遗留或并发淘汰）：直接摘除
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
 			t.mu.Lock()
 			finished := t.status == taskStatusDone || t.status == taskStatusFailed
 			expired := finished && now.Sub(t.createdAt) > taskTTL
 			t.mu.Unlock()
 			if expired {
 				delete(s.tasks, id)
+				s.order = append(s.order[:i], s.order[i+1:]...)
 				break
 			}
 		}
@@ -143,6 +151,10 @@ func (s *taskStore) cleanupOnce(now time.Time) {
 	keep := s.order[:0]
 	for _, id := range s.order {
 		t := s.tasks[id]
+		if t == nil {
+			// 悬挂 id（tasks 与 order 不一致）：丢弃该 id，避免 t.mu nil 解引用。
+			continue
+		}
 		t.mu.Lock()
 		finished := t.status == taskStatusDone || t.status == taskStatusFailed
 		expired := finished && now.Sub(t.createdAt) > taskTTL

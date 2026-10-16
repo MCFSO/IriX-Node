@@ -105,7 +105,7 @@ func (d *Daemon) handleFileTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range body.Targets {
-		src, err := NormalizePath(cwd, t)
+		src, err := safeResolve(cwd, t)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -224,12 +224,12 @@ func (d *Daemon) handleTrashRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		it := items[idx]
-		src, err := NormalizePath(cwd, it.TrashPath)
+		src, err := safeResolve(cwd, it.TrashPath)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		dest, err := NormalizePath(cwd, it.OriginalPath)
+		dest, err := safeResolve(cwd, it.OriginalPath)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -281,7 +281,7 @@ func (d *Daemon) handleTrashEmpty(w http.ResponseWriter, r *http.Request) {
 			keep = append(keep, it)
 			continue
 		}
-		src, err := NormalizePath(cwd, it.TrashPath)
+		src, err := safeResolve(cwd, it.TrashPath)
 		if err == nil {
 			_ = os.RemoveAll(src) // 内容缺失也继续清理元数据
 		}

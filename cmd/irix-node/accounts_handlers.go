@@ -41,11 +41,24 @@ func identityOf(r *http.Request) *identity {
 	return id
 }
 
+// queryTokenAllowed 判断端点是否允许用 ?token= 承载会话 token。
+//
+// 只有浏览器**无法自定义请求头**的场景才需要查询参数，目前仅
+// WebSocket 控制台握手（/api/instance/console/ws）。
+//
+// 其余端点一律只认 X-Auth-Token / Authorization 头：URL 会进入反向代理
+// 访问日志、浏览器历史、Referer 与错误上报，30 天有效的会话 token 一旦
+// 落到查询串即等同泄漏（红队审计 中-2）。直连下载/上传通道
+// （/download/ /upload/）用一次性票据，不需要会话 token。
+func queryTokenAllowed(path string) bool {
+	return path == "/api/instance/console/ws"
+}
+
 // bearerToken 提取会话 token：
 //  1. X-Auth-Token 头；
 //  2. Authorization: Bearer <token>；
-//  3. ?token= 查询参数（浏览器 WebSocket 无法自定义请求头等场景；
-//     审计日志已对 token 参数打码，优先使用前两种方式）。
+//  3. ?token= 查询参数（仅 WebSocket 控制台等无法设置请求头的端点，
+//     见 queryTokenAllowed）。
 func bearerToken(r *http.Request) string {
 	if t := r.Header.Get("X-Auth-Token"); t != "" {
 		return t
@@ -53,6 +66,9 @@ func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+	if !queryTokenAllowed(r.URL.Path) {
+		return ""
 	}
 	return strings.TrimSpace(r.URL.Query().Get("token"))
 }

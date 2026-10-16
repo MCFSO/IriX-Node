@@ -84,9 +84,9 @@ func (d *Daemon) metricsLoop(ctx context.Context) {
 // handleInstanceMetrics 获取实例指标历史。
 // GET /api/instance/metrics?uuid&daemonId&minutes=<15>
 func (d *Daemon) handleInstanceMetrics(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	d.metricsOnce.Do(func() { d.workers.start(d.metricsLoop) })
@@ -120,9 +120,9 @@ const logQueryScanLines = 10000
 // GET /api/instance/logs/query?uuid&daemonId&keyword&level&windowMin&maxLines
 // 响应 data: {items: [行...], total}
 func (d *Daemon) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	keyword := strings.ToLower(strings.TrimSpace(queryParam(r, "keyword")))

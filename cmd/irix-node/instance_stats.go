@@ -93,9 +93,9 @@ func (p *Process) statsSnapshot() (players, maxPlayers int, tps float64) {
 // handleInstanceStats 获取实例运行指标。
 // GET /api/instance/stats?uuid&daemonId
 func (d *Daemon) handleInstanceStats(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	inst.mu.Lock()

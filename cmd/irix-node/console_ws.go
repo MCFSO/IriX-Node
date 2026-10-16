@@ -41,11 +41,25 @@ func (c *wsConn) wsSendLines(s string) error {
 	return nil
 }
 
+// consoleCommandAllowed 判定当前账户是否可向实例下发 stdin 命令。
+//
+// 实时控制台（GET /api/instance/console/ws）此前只要开关打开即可 WriteCommand，
+// 等于把「只读控制台」升级为「向任意实例下发任意命令」——独立开关
+// GET /api/protected_instance/command 形同虚设（红队审计 高-3）。
+// 故每条文本帧都要按该权限键二次判定；管理员旁路。
+func (d *Daemon) consoleCommandAllowed(r *http.Request) bool {
+	id := identityOf(r)
+	if id == nil || id.isAdmin {
+		return true
+	}
+	return d.permAllowed(id.username, "GET /api/protected_instance/command")
+}
+
 // handleConsoleWS 实时控制台 WebSocket 入口。
 func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	conn, err := upgradeWS(w, r)
@@ -53,6 +67,8 @@ func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 		// 升级失败（如旧代理不支持）：响应已写出，客户端据此回退轮询
 		return
 	}
+	// 命令下发权限在握手时快照一次（帧循环里只读；权限收紧要重新握手生效）。
+	canCommand := d.consoleCommandAllowed(r)
 	// 审计中间件如实记录 101 状态（hijack 绕过了普通响应路径）
 	if arw, ok := w.(*auditResponseWriter); ok {
 		arw.code = http.StatusSwitchingProtocols
@@ -94,6 +110,7 @@ func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 	// 写循环：订阅输出 → 文本帧；进程退出 → 通知并关闭；连接结束 → 退出
 	writeErr := make(chan struct{})
 	go func() {
+		defer recoverLog("控制台写循环")
 		defer close(writeErr)
 		exitNotified := false
 		for {
@@ -117,6 +134,7 @@ func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 
 	// 心跳看门狗：90s 无任何帧则断开
 	go func() {
+		defer recoverLog("控制台心跳看门狗")
 		ticker := time.NewTicker(wsHeartbeatTick)
 		defer ticker.Stop()
 		for {
@@ -149,6 +167,11 @@ func (d *Daemon) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 			inst.mu.Lock()
 			p := inst.Proc
 			inst.mu.Unlock()
+			// 命令二次鉴权（红队审计 高-3）：控制台只读权限不得升级为 stdin 下发。
+			if !canCommand {
+				_ = conn.writeText("[节点] 权限不足：向实例发送命令需要「向实例发送命令」端点权限")
+				continue
+			}
 			if p == nil || !p.IsRunning() {
 				_ = conn.writeText("[节点] 实例未在运行，命令未发送")
 				continue

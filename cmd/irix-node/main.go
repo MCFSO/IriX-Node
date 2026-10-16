@@ -57,6 +57,7 @@ func runNode() error {
 		loadTune       = flag.Bool("load-tune", true, "根据节点自身负载动态调整 GOMAXPROCS 与 GOGC（负载自适应调谐，状态见 GET /api/load）")
 		lowResource    = flag.Bool("low-resource", false, "强制启用嵌入式预设（更小的每实例日志缓冲/内存软上限 GOMEMLIMIT/更低的 PBKDF2 默认迭代）；留空则按 CPU 核数与物理内存自动判定（≤2 核或 ≤512MB 即套用）")
 		transferCIDR   = flag.String("transfer-allow-cidr", "", "集群拉取（POST /api/cluster/transfer）额外放行的内网 CIDR 列表（逗号分隔，如 192.168.0.0/16,10.0.0.0/8）；默认拒绝全部 RFC1918 内网地址，集群 LAN 节点间直传需显式配置（环回/链路本地/本机地址任何配置都不可放行）")
+		corsOrigins    = flag.String("cors-origins", "", "Web 面板跨源来源白名单（逗号分隔，如 https://panel.example.com,http://192.168.1.9:23333）。默认仅放行环回来源（localhost/127.0.0.1/[::1]，端口不限）与同主机名来源；面板部署在其他域名/主机时必须在此显式列出，否则浏览器会拦截跨源响应")
 		tlsMode        = flag.String("tls-mode", "off", "TLS 模式：off（默认，明文 HTTP，与既有部署兼容）/ auto（自动生成自签证书，启动日志打印指纹，客户端按指纹固定校验）/ manual（使用 -tls-cert / -tls-key 指定的正式证书）；开启加密保险库（-vault）时强制要求 TLS")
 		tlsCertFile    = flag.String("tls-cert", "", "manual 模式：TLS 证书文件路径（PEM）")
 		tlsKeyFile     = flag.String("tls-key", "", "manual 模式：TLS 私钥文件路径（PEM）")
@@ -127,6 +128,7 @@ func runNode() error {
 		LogBufferKB:           *logBufferKB,
 		LogLines:              *logLines,
 		TransferAllowCIDR:     *transferCIDR,
+		CorsOrigins:           *corsOrigins,
 		TLSMode:               *tlsMode,
 		TLSCert:               *tlsCertFile,
 		TLSKey:                *tlsKeyFile,
@@ -254,6 +256,7 @@ func runNode() error {
 	if err := d.parseTransferAllowCIDR(); err != nil {
 		return fmt.Errorf("transfer-allow-cidr 配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
 	}
+	d.setCorsOrigins(opts.CorsOrigins)
 	logDir := filepath.Join(opts.DataDir, "logs")
 	if opts.InstanceLog {
 		d.LogDir = logDir
@@ -440,6 +443,7 @@ func runNode() error {
 	stopSignals := platform.SetupSignalHandler(signals)
 	defer stopSignals()
 	go func() {
+		defer recoverLog("信号监听")
 		select {
 		case sig := <-signals:
 			alog.Printf("收到信号 %v，开始优雅关停…", sig)
@@ -553,6 +557,64 @@ func NormalizePath(cwd, target string) (string, error) {
 func isDriveAbs(p string) bool {
 	return runtime.GOOS == "windows" && len(p) >= 3 && p[1] == ':' &&
 		(p[2] == '/' || p[2] == '\\')
+}
+
+// safeResolve 在 NormalizePath 的词法越界检查之上，再消除**符号链接**逃逸。
+//
+// NormalizePath 只做 filepath.Clean（纯字面），而内核在真正打开文件时会跟随
+// 符号链接：实例 cwd 内一个指向外部的软链（受管进程自身就能创建，或由导入的
+// 既有目录携带）即可让文件 API 读写删 cwd 之外的任意文件，甚至把整棵外部目录
+// 树打进 zip 后经下载票据取走（红队审计 高-10）。
+//
+// 步骤：
+//  1. NormalizePath 词法规范化并拒绝 .. 越界；
+//  2. 对 cwd 与目标分别解析「已存在的最深前缀」的符号链接（目标尚不存在时
+//     原样保留不存在的尾部，兼容新建文件/目录）；
+//  3. 解析后的目标必须仍位于解析后的 cwd 之内，否则拒绝。
+//
+// 兼容性说明：cwd 内部的软链（解析后仍落在 cwd 内）照常放行，避免破坏
+// 「world 目录软链到同盘另一路径」这类既有部署；检查与真正打开之间仍存在
+// 理论上的 TOCTOU 窗口（见审计 中-25），彻底消除需 Linux
+// openat2(RESOLVE_BENEATH) 等平台能力。
+func safeResolve(cwd, target string) (string, error) {
+	full, err := NormalizePath(cwd, target)
+	if err != nil {
+		return "", err
+	}
+	rootResolved, err := resolveExistingPrefix(cwd)
+	if err != nil {
+		return "", err
+	}
+	fullResolved, err := resolveExistingPrefix(full)
+	if err != nil {
+		return "", err
+	}
+	if !pathWithin(rootResolved, fullResolved) {
+		return "", fmt.Errorf("路径越界（符号链接指向工作目录之外）: %s", target)
+	}
+	return full, nil
+}
+
+// resolveExistingPrefix 解析 path 中「已存在的最深前缀」的符号链接，
+// 再把尚不存在的尾部原样接回（用于创建目标尚不存在的场景，如新建文件/目录）。
+func resolveExistingPrefix(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !os.IsNotExist(err) {
+		// 权限等原因无法判定：fail-closed（拒绝而非放行）
+		return "", fmt.Errorf("路径解析失败: %w", err)
+	}
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	if dir == path {
+		return path, nil // 已到卷根仍不存在
+	}
+	parent, perr := resolveExistingPrefix(dir)
+	if perr != nil {
+		return "", perr
+	}
+	return filepath.Join(parent, base), nil
 }
 
 // pathWithin 判断 p 是否位于 base 之内（允许相等）。

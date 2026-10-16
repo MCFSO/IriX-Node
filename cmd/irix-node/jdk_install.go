@@ -272,8 +272,11 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string, ta
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	// 1 GiB 上限：ContentLength 仅用于提前拒绝诚实声明超大的响应，
+	// chunked 响应（ContentLength == -1）时必须由写入循环按实际字节数兜底。
+	const maxDownloadBytes = 1 << 30
 	total := resp.ContentLength
-	if total > 1<<30 {
+	if total > maxDownloadBytes {
 		return fmt.Errorf("下载内容过大: %s", FormatSize(total))
 	}
 	f, err := os.Create(dest)
@@ -286,6 +289,10 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string, ta
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if written+int64(n) > maxDownloadBytes {
+				return fmt.Errorf("下载内容超过上限 %s（已接收 %s），已中止",
+					FormatSize(maxDownloadBytes), FormatSize(written+int64(n)))
+			}
 			if _, werr := f.Write(buf[:n]); werr != nil {
 				return werr
 			}
@@ -293,6 +300,8 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string, ta
 			if total > 0 {
 				task.set(taskStatusRunning, lo+(hi-lo)*float64(written)/float64(total),
 					fmt.Sprintf("下载中 %s / %s", FormatSize(written), FormatSize(total)), "")
+			} else {
+				task.set(taskStatusRunning, -1, fmt.Sprintf("下载中 %s", FormatSize(written)), "")
 			}
 		}
 		if rerr == io.EOF {

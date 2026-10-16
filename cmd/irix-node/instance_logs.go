@@ -124,9 +124,9 @@ func readLogSince(paths []string, sinceMs int64) (string, error) {
 //
 // 响应 data 为日志字符串（保留 ANSI）。
 func (d *Daemon) handleInstanceLogs(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	since := int64(atoiDefault(queryParam(r, "since"), 0))
@@ -165,9 +165,9 @@ func (d *Daemon) handleInstanceLogs(w http.ResponseWriter, r *http.Request) {
 // handleInstanceLogsClear 清空实例日志（客户端「清空日志」按钮）。
 // DELETE /api/instance/logs?uuid&daemonId
 func (d *Daemon) handleInstanceLogsClear(w http.ResponseWriter, r *http.Request) {
-	inst, err := d.requireInstance(r)
+	inst, err := d.requireInstanceAccess(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeInstanceAccessError(w, err)
 		return
 	}
 	inst.mu.Lock()

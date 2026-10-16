@@ -82,6 +82,7 @@ type Config struct {
 	LogBufferKB       *int            `json:"logBufferKB"`       // 每实例日志环形缓冲上限（KB，nil = 用默认值）
 	LogLines          *int            `json:"logLines"`          // 每实例行缓冲上限（行，nil = 用默认值）
 	TransferAllowCIDR string          `json:"transferAllowCidr"` // 集群拉取放行内网 CIDR（逗号分隔）
+	CorsOrigins       string          `json:"corsOrigins"`       // 额外放行的跨源面板来源（逗号分隔，如 https://panel.example.com）
 	TLS               *TLSConfig      `json:"tls"`               // TLS 传输加密（nil = 未配置）
 	Vault             *VaultConfig    `json:"vault"`             // 加密保险库（nil = 未配置）
 	Accounts          *AccountsConfig `json:"accounts"`          // 账户管理存储（nil = 默认 SQLite）
@@ -142,6 +143,7 @@ type nodeOptions struct {
 	LogBufferKB       int // 每实例日志环形缓冲上限（KB，0 = 用默认值）
 	LogLines          int // 每实例行缓冲上限（行，0 = 用默认值）
 	TransferAllowCIDR string
+	CorsOrigins       string // 额外放行的跨源面板来源（逗号分隔）
 	TLSMode           string // off | auto | manual
 	TLSCert           string // manual：证书文件路径
 	TLSKey            string // manual：私钥文件路径
@@ -209,6 +211,9 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 	}
 	if !setFlags["transfer-allow-cidr"] && cfg.TransferAllowCIDR != "" {
 		o.TransferAllowCIDR = cfg.TransferAllowCIDR
+	}
+	if !setFlags["cors-origins"] && cfg.CorsOrigins != "" {
+		o.CorsOrigins = cfg.CorsOrigins
 	}
 	if cfg.TLS != nil {
 		if !setFlags["tls-mode"] && cfg.TLS.Mode != "" {
