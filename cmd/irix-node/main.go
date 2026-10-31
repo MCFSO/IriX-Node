@@ -48,6 +48,7 @@ func runNode() error {
 		port           = flag.Int("port", 12346, "监听端口（1-65535）")
 		bindHost       = flag.String("bind", "", "监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）；留空时依次读配置文件 bind、IRIX_NODE_BIND_ALL 环境变量（=1 则 0.0.0.0），否则默认 127.0.0.1")
 		dataDir        = flag.String("data", "", "数据目录（实例配置等，默认当前目录）")
+		adminIntranet  = flag.Bool("admin-intranet-only", true, "管理员账户仅允许从环回/RFC1918 内网来源登录与访问（默认 true；设为 false 允许公网来源登录管理员，风险自负）")
 		instanceLog    = flag.Bool("instance-log", true, "将实例输出日志异步落盘到 {data}/logs/（关闭则仅内存环形缓冲）")
 		instanceLogMB  = flag.Int("instance-log-max", 64, "单实例日志文件轮转上限（MB，超过后轮转为 .1 保留最近一个）")
 		logBufferKB    = flag.Int("log-buffer-kb", 0, "每实例内存日志环形缓冲上限（KB，0 = 用默认值；嵌入式档位默认 512KB，否则 2MB）")
@@ -120,6 +121,7 @@ func runNode() error {
 		Port:                  *port,
 		BindHost:              *bindHost,
 		DataDir:               *dataDir,
+		AdminIntranetOnly:     *adminIntranet,
 		InstanceLog:           *instanceLog,
 		InstanceLogMax:        *instanceLogMB,
 		AuditLog:              *auditLog,
@@ -175,6 +177,25 @@ func runNode() error {
 	if opts.InstanceLogMax < 1 || opts.AuditLogMax < 1 {
 		return fmt.Errorf("日志轮转上限无效: 实例 %dMB / 审计 %dMB（须 ≥1；请检查命令行参数或配置文件 %s）",
 			opts.InstanceLogMax, opts.AuditLogMax, *configPath)
+	}
+	// DDoS/CC 防御阈值校验（防御恒开，这里只校验可调阈值；0 = 未设置用默认值）。
+	for _, item := range []struct {
+		name     string
+		value    int
+		maxValue int
+	}{
+		{"defense.maxIPConcurrent", opts.DefenseIPConcurrent, 4096},
+		{"defense.maxUserAgentConcurrent", opts.DefenseUAConcurrent, 1024},
+		{"defense.ipRatePerSecond", opts.DefenseIPRate, 100000},
+		{"defense.userAgentRatePerSecond", opts.DefenseUARate, 100000},
+		{"defense.globalRatePerSecond", opts.DefenseGlobalRate, 1000000},
+		{"defense.globalBurst", opts.DefenseGlobalBurst, 2000000},
+		{"defense.banMinutes", opts.DefenseBanMinutes, 1440},
+	} {
+		if item.value < 0 || item.value > item.maxValue {
+			return fmt.Errorf("%s 无效: %d（须在 1-%d 之间，0/未设置 = 使用默认值；请检查配置文件 %s）",
+				item.name, item.value, item.maxValue, *configPath)
+		}
 	}
 	switch opts.TLSMode {
 	case "off", "auto", "manual":
@@ -252,11 +273,39 @@ func runNode() error {
 		}
 	}()
 	d.Port = opts.Port
+	d.AdminIntranetOnly = opts.AdminIntranetOnly
 	d.transferAllowCIDR = opts.TransferAllowCIDR
 	if err := d.parseTransferAllowCIDR(); err != nil {
 		return fmt.Errorf("transfer-allow-cidr 配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
 	}
 	d.setCorsOrigins(opts.CorsOrigins)
+	// DDoS/CC 防御：恒开、无关闭开关，这里只应用阈值调优与配置级静态 UA 封禁。
+	var blockedUAs []string
+	if strings.TrimSpace(opts.DefenseBlockedUAs) != "" {
+		blockedUAs = strings.Split(opts.DefenseBlockedUAs, "\n")
+	}
+	d.defense.applyOptions(defenseOptions{
+		IPConcurrent:      opts.DefenseIPConcurrent,
+		UAConcurrent:      opts.DefenseUAConcurrent,
+		IPRate:            opts.DefenseIPRate,
+		UARate:            opts.DefenseUARate,
+		GlobalRate:        opts.DefenseGlobalRate,
+		GlobalBurst:       opts.DefenseGlobalBurst,
+		BanMinutes:        opts.DefenseBanMinutes,
+		BlockedUserAgents: blockedUAs,
+	})
+	if opts.DefenseDisableWarn {
+		alog.Printf("注意: 配置文件 defense.enabled=false 已忽略 —— DDoS/CC 防御恒开、无法关闭（只能调整阈值）")
+	}
+	def := d.defense.cfgSnapshot()
+	alog.Printf("DDoS/CC 防御已启用（恒开，不可关闭）：单 IP %.0f 请求/秒、并发 %d；"+
+		"单 User-Agent 并发 %d、%.0f 请求/秒（超过即封禁该 UA）；"+
+		"HTTP 头部规范校验（Via/Forwarded/X-Forwarded-* 等代理链标记与请求走私形态）",
+		def.IPRate, def.IPConcurrent, def.UAConcurrent, def.UARate)
+	alog.Printf("客户端设备绑定已就绪：账户默认 optional（密码登录兼容）；required 需 TLS + 已绑定设备，协议见 docs/device-binding.md")
+	if !d.AdminIntranetOnly {
+		alog.Printf("警告: 管理员内网限制已关闭（admin-intranet-only=false）—— 管理员账户可从公网来源登录，凭据泄露风险显著上升")
+	}
 	logDir := filepath.Join(opts.DataDir, "logs")
 	if opts.InstanceLog {
 		d.LogDir = logDir
@@ -352,6 +401,7 @@ func runNode() error {
 		alog.Printf("")
 		alog.Printf("登录方式: POST /api/auth/login  {\"username\":\"%s\",\"password\":\"<密码>\"}", username)
 		alog.Printf("随后的 API 请求携带会话 token：Authorization: Bearer <token> 或 X-Auth-Token 头")
+		alog.Printf("注意: 管理员账户仅允许从环回或 RFC 1918 内网地址登录/访问（公网来源一律 403）")
 		alog.Printf("提示: 登录后请立即在账户管理中修改密码（凭据丢失只能删除账户库重新生成）")
 		alog.Printf("======================================================")
 	}
@@ -378,6 +428,8 @@ func runNode() error {
 	default:
 		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
 	}
+	// 设备绑定挑战会把证书指纹返回给客户端做固定校验；TLS 关闭时为空。
+	d.TLSFingerprint = tlsFingerprint
 
 	// 平台适配层不反向依赖主包日志器，这里注入异步日志输出（仅 OpenBSD 的
 	// pledge/unveil 自限制会用它输出一行启用日志）。
@@ -501,11 +553,16 @@ func limitAPIBody(next http.Handler) http.Handler {
 }
 
 // Version 守护进程版本号。
+// 1.4.0：新增客户端设备绑定（Ed25519 / ECDSA P-256 挑战登录、会话逐请求
+// HMAC 证明、optional/required 策略），为后续 TPM 2.0 密钥与客户端交接提供
+// 服务端协议；required 强制要求 TLS。
+// 1.3.0：新增恒开 DDoS/CC 防御（单 IP / 单 User-Agent 限速与并发封禁、
+// HTTP 头部规范校验、防御状态与人工封禁接口）与管理员账户内网来源限制。
 // 1.2.0：认证机制调整——移除配对码/固定 apikey 通道，首次启动随机生成
 // 管理员用户名与密码（仅显示一次），全部 API 请求走账户会话 token。
 // 1.1.0：新增实时控制台 WebSocket、实例日志持久化查询、Java 检测/安装、
 // 核心下载、导入目录（docs/irix-node-local-parity.md M1）。
-const Version = "1.2.0"
+const Version = "1.4.0"
 
 // resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
 // 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量

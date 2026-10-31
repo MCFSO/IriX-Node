@@ -20,11 +20,11 @@
 | --- | --- | --- | --- |
 | 组合根 | `main.go` 的 `runNode` | 解析配置、创建 `Daemon`、初始化存储和 TLS、接收信号 | 可以依赖所有模块；业务规则留在用例方法中 |
 | 生命周期 | `app_runtime.go`、`daemon_lifecycle.go` | 服务运行、取消、登记/排空、周期任务、进程启动门禁 | 管理资源的生存期，不解析业务参数 |
-| 传输层 | `http_server.go`、`instance.go`、`cors.go`、`audit.go`、`console_ws.go` | HTTP/WS 组装、路由、认证/权限、CORS、请求体限制、统一响应 | 调用现有 `Daemon` 用例方法 |
+| 传输层 | `http_server.go`、`instance.go`、`cors.go`、`audit.go`、`defense.go`、`defense_headers.go`、`defense_handlers.go`、`admin_access.go`、`device_auth.go`、`device_handlers.go`、`device_store.go`、`console_ws.go` | HTTP/WS 组装、路由、认证/权限、CORS、DDoS/CC 防御、设备绑定、请求体限制、统一响应 | 调用现有 `Daemon` 用例方法 |
 | 应用模块 | `files.go`、`backup.go`、`cluster.go`、`container.go`、`vault_handlers.go`、`accounts_handlers.go` | 编排一个用例，校验输入，映射错误和异步任务 | 通过 `Daemon` 访问领域和适配器 |
 | 核心模型 | `daemon.go`、`instance.go` 的实例用例、`process.go`、`jobs.go` | 实例状态、进程状态、任务状态、并发边界、状态迁移 | 当前仍与 HTTP 方法共用包；逐步减少跨模块字段访问 |
 | 基础设施适配器 | `accounts*.go`、`vault_store.go`、`logger.go`、`process_*.go`，以及 `internal/sysinfo`（系统/进程探测）、`internal/platform`（进程级 OS 适配）、`internal/vaultcrypto`（密码学原语） | SQL/Redis、加密对象、日志、平台能力 | 只实现领域需要的能力 |
-| 持久化边界 | `instances.json`、`accounts.db`、`vault/`、`logs/`、外部 SQL/Redis | 保存配置、账户、密文对象、审计与实例日志 | 不直接参与请求路由 |
+| 持久化边界 | `instances.json`、`accounts.db`、`defense.json`、`vault/`、`logs/`、外部 SQL/Redis | 保存配置、账户、人工封禁、密文对象、审计与实例日志 | 不直接参与请求路由 |
 
 目标依赖方向为“入口 → 传输 → 应用 → 核心模型 → 适配器”。核心仍集中在 `cmd/irix-node/` 的 `package main`（因为 `Daemon` 的 260+ 方法必须与 `Daemon` 同包），可独立复用的叶子能力已拆到 `internal/sysinfo`、`internal/platform`、`internal/vaultcrypto` 三个包。这是一份组件职责约束，并不是已由 Go 包系统全量强制执行的独立分层。`instance.go` 同时含路由和实例用例，部分基础设施文件也含处理器；本次没有把现有模块包装成空接口。异步任务继续通过任务表报告进度。
 
@@ -39,8 +39,8 @@
 ## 一次请求的生命周期
 
 1. `http.Server` 接收连接，连接层只记录 Accept 错误，避免日志拖慢 accept 循环。
-2. 请求门禁登记在途请求，再依次执行审计、CORS、保险库门禁和 API 请求体限制。登记涵盖处理器返回后的审计写入，不包装 `ResponseWriter`，保留 WebSocket 所需能力。
-3. `auth` 先解析账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`），再做端点权限判定；未认证或会话过期统一返回 HTTP 403。
+2. 请求门禁登记在途请求，随后进入**恒开的 DDoS/CC 防御**（`defense.go`）：封禁表 → HTTP 头部规范（`defense_headers.go`：Via/Forwarded/X-Forwarded-*、请求走私形态、重复单例头等）→ 单 IP 频率与并发、单 User-Agent 并发与频率（超限即封禁该 UA）。防御位于最外层，被拦截流量不写审计、不进业务；拒绝响应自带 CORS 头与 `X-Defense` 标识。环回来源豁免频率限制与自动封禁（人工/配置的 UA 封禁与硬性头部违规仍生效）。通过后再执行审计、CORS、保险库门禁和 API 请求体限制。登记涵盖处理器返回后的审计写入，不包装 `ResponseWriter`，保留 WebSocket 所需能力。
+3. `auth` 先解析账户会话 token（`X-Auth-Token` / `Authorization: Bearer` / `?token=`），再做端点权限判定；未认证或会话过期统一返回 HTTP 403。管理员账户（`is_admin`）额外要求来源属于环回或 RFC 1918 内网（IPv6 为 ULA/链路本地），公网来源即使持有有效管理员会话也返回 403（`admin_access.go`，登录入口同样校验）。设备绑定会话还会校验 `X-Device-Id` / `X-Session-Timestamp` / `X-Session-Seq` / `X-Session-Proof`（HMAC-SHA256 + 1024 位序号窗口，热路径无 DB I/O，见 `docs/device-binding.md`）。
 4. 处理器完成参数校验后调用 `Daemon` 的用例方法。实例列表由 `Daemon.mu` 保护，实例字段由 `Instance.mu` 保护。
 5. 长任务立即返回任务 ID，由 `taskStore`/`jobStore` 保存进度；文件下载和上传通过短期票据切换到直连通道。
 6. 响应统一使用 `{status, data, time}`，错误同时返回真实 HTTP 状态码，便于网关和监控识别失败。

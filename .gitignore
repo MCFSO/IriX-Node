@@ -37,6 +37,7 @@ logs/
 .mimosa/
 config.json
 accounts.db*
+defense.json
 
 # 本地构建产物：`go build -o bin/irix-node ./cmd/irix-node` 输出到 bin/
 /bin/

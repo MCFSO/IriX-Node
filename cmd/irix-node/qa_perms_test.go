@@ -20,13 +20,15 @@ import (
 // routeSourceFiles 参与路由注册的源文件（反向扫描清单）。
 var routeSourceFiles = []string{
 	"instance.go", "cluster.go", "container.go", "vault.go", "accounts_handlers.go",
+	"defense_handlers.go", "device_handlers.go",
 }
 
-// permExemptRoutes 免权限目录的路由：直连票据通道与公开登录入口。
+// permExemptRoutes 免权限目录的路由：直连票据通道、公开登录入口与设备挑战。
 var permExemptRoutes = map[string]bool{
-	"GET /download/":       true,
-	"POST /upload/":        true,
-	"POST /api/auth/login": true,
+	"GET /download/":                  true,
+	"POST /upload/":                   true,
+	"POST /api/auth/login":            true,
+	"POST /api/auth/device/challenge": true,
 }
 
 // TestPermCatalogMatchesMux 正向校验：目录中每个键都与注册路由模式一致。

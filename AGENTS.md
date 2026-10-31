@@ -55,6 +55,13 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 | `accounts_handlers.go` | 账户管理 API：登录/登出/改密/账户 CRUD/权限开关、`authenticate` 身份认证 |
 | `perm_catalog.go` | 端点权限目录：`perm()` 织入、分组、`permAllowed` 逐端点判定 |
 | `cors.go` | CORS 中间件：跨源响应头与预检终结（错误响应同样带 CORS 头） |
+| `defense.go` | 恒开 DDoS/CC 防御中间件：封禁表、单 IP 限速/并发、全节点匿名预算、单 User-Agent 并发与频率（超限即封禁该 UA）、状态快照与人工封禁持久化 |
+| `defense_headers.go` | HTTP 头部规范校验：请求走私形态、Via/Forwarded/X-Forwarded-* 等代理链标记、重复单例头、方法覆盖头、非法 Upgrade、超量头 |
+| `defense_handlers.go` | 防御管理 API：`GET /api/defense/status`、`POST/DELETE /api/defense/ban` |
+| `admin_access.go` | 管理员账户来源限制：默认仅环回 + RFC 1918（IPv6 为 ULA/链路本地），登录与会话逐请求校验；`-admin-intranet-only=false` / `adminIntranetOnly=false` 可关闭 |
+| `device_auth.go` | 设备绑定协议：Ed25519/P-256 挑战签名、一次性挑战、会话逐请求 HMAC-SHA256 证明、序号窗口 |
+| `device_store.go` | 设备公钥与账户设备策略的 SQL 持久化（`account_devices` 表、`device_policy` 列） |
+| `device_handlers.go` | 设备管理 API：挑战、设备注册/列表/撤销、管理员设备与策略接口 |
 
 ## 约定
 
@@ -89,7 +96,10 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 - `instances.json`：实例配置列表（`PersistedInstance`）。
 - `accounts.db`：账户库（sqlite 默认，`-accounts-driver` 可换 mysql/postgres）；
   库中不存在管理员账户时首次启动随机生成一个并仅显示一次凭据。凭据丢失可删除
-  账户库后重启重新生成。
+  账户库后重启重新生成。设备绑定使用其中的 `account_devices` 表与
+  `accounts.device_policy` / `sessions.device_id` / `sessions.proof_key` 列
+  （旧库启动时自动补列，见 `accounts.go` 的 `accountsSchemaMigrations`）。
+- `defense.json`：人工封禁的 IP / User-Agent 列表（自动封禁只在运行期，到期自动解除）。
 - `auth.hash`：v1.1.0 及更早版本的配对码哈希，已废弃、不再读写。
 
 ## 配置文件

@@ -26,6 +26,12 @@ type identity struct {
 	username string
 	isAdmin  bool
 	via      string
+
+	// 设备绑定（device_auth.go）：sessionToken 用于逐请求证明的序号窗口，
+	// deviceID/proofKey 非空表示该会话已绑定设备。
+	sessionToken string
+	deviceID     string
+	proofKey     string
 }
 
 type ctxIdentityKey struct{}
@@ -92,7 +98,14 @@ func (d *Daemon) authenticate(r *http.Request) *identity {
 		sess.ExpiresAt = time.Now().Add(accountSessionTTL).UnixMilli()
 		d.accounts.putSession(token, sess, accountSessionTTL)
 	}
-	return &identity{username: sess.Username, isAdmin: sess.IsAdmin, via: "token"}
+	return &identity{
+		username:     sess.Username,
+		isAdmin:      sess.IsAdmin,
+		via:          "token",
+		sessionToken: token,
+		deviceID:     sess.DeviceID,
+		proofKey:     sess.ProofKey,
+	}
 }
 
 // requireAdmin 要求管理员身份（is_admin 账户）；不满足时写 403 并返回 false。
@@ -129,23 +142,29 @@ func (d *Daemon) registerAccountRoutes(mux *http.ServeMux) {
 
 // accountLoginResponse 登录响应。
 type accountLoginResponse struct {
-	Token     string `json:"token"`
-	Username  string `json:"username"`
-	IsAdmin   bool   `json:"isAdmin"`
-	ExpiresAt int64  `json:"expiresAt"`
+	Token       string `json:"token"`
+	Username    string `json:"username"`
+	IsAdmin     bool   `json:"isAdmin"`
+	ExpiresAt   int64  `json:"expiresAt"`
+	DeviceBound bool   `json:"deviceBound"`
+	DeviceID    string `json:"deviceId,omitempty"`
 }
 
-// handleAccountLogin 登录：校验账户密码并签发会话 token。
-// POST /api/auth/login body: {username, password}
+// accountLoginRequest 登录请求。device 为可选的设备证明（见 device_auth.go）。
+type accountLoginRequest struct {
+	Username string            `json:"username"`
+	Password string            `json:"password"`
+	Device   *deviceLoginProof `json:"device,omitempty"`
+}
+
+// handleAccountLogin 登录：校验账户密码与可选设备证明，签发会话 token。
+// POST /api/auth/login body: {username, password, device?: {deviceId, nonce, timestamp, signature, proofKey}}
 func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	if d.accounts == nil {
 		writeError(w, http.StatusServiceUnavailable, "账户系统未启用")
 		return
 	}
-	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
+	var body accountLoginRequest
 	if err := parseJSONBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
@@ -171,7 +190,38 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.accounts.clearLoginFailures(body.Username, ip)
+	// 管理员账户默认仅允许从内网来源登录（admin_access.go）：公网来源即使密码正确
+	// 也不签发会话，避免凭据泄露后被公网直接接管节点。可用
+	// -admin-intranet-only=false / 配置 adminIntranetOnly=false 显式关闭。
+	if a.IsAdmin && d.AdminIntranetOnly && !adminIntranetAllowed(ip) {
+		d.auditLogf("安全 | 管理员登录被拒绝：来源 %s 不是内网地址（RFC 1918）", ip)
+		writeError(w, http.StatusForbidden, "管理员账户仅允许从内网地址（RFC 1918）登录")
+		return
+	}
 	sess := accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
+	// required 的安全前提是 TLS 通道 + 客户端固定指纹；节点 TLS 被关闭后
+	// 即使 DB 里仍是 required，也不能退化为明文设备登录。
+	if a.DevicePolicy == accountDevicePolicyRequired && d.TLSFingerprint == "" {
+		writeError(w, http.StatusForbidden, "该账户已启用设备绑定，但节点未启用 TLS，无法完成安全登录")
+		return
+	}
+	if body.Device != nil {
+		if d.TLSFingerprint == "" {
+			writeError(w, http.StatusForbidden, "设备登录需要节点启用 TLS（tls-mode=auto 或 manual）")
+			return
+		}
+		// 设备证明：挑战 → 设备存在 → 签名 → proofKey。任一失败都拒绝，绝不降级。
+		dev, derr := d.verifyDeviceLogin(a.Username, body.Device)
+		if derr != nil {
+			writeError(w, http.StatusForbidden, "设备绑定校验失败: "+derr.Error())
+			return
+		}
+		sess.DeviceID = dev.DeviceID
+		sess.ProofKey = body.Device.ProofKey
+	} else if a.DevicePolicy == accountDevicePolicyRequired {
+		writeError(w, http.StatusForbidden, errDevicePolicyRequired.Error())
+		return
+	}
 	token, err := newAccountToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "生成会话失败: "+err.Error())
@@ -179,10 +229,12 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	d.accounts.putSession(token, sess, accountSessionTTL)
 	writeOK(w, accountLoginResponse{
-		Token:     token,
-		Username:  sess.Username,
-		IsAdmin:   sess.IsAdmin,
-		ExpiresAt: sess.ExpiresAt,
+		Token:       token,
+		Username:    sess.Username,
+		IsAdmin:     sess.IsAdmin,
+		ExpiresAt:   sess.ExpiresAt,
+		DeviceBound: sess.DeviceID != "",
+		DeviceID:    sess.DeviceID,
 	})
 }
 
@@ -208,11 +260,15 @@ func (d *Daemon) handleAccountMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "账户不存在")
 		return
 	}
+	deviceCount, _ := d.accounts.countDevices(id.username)
 	writeOK(w, map[string]any{
-		"username":    a.Username,
-		"isAdmin":     a.IsAdmin,
-		"permissions": a.Permissions,
-		"createdAt":   a.CreatedAt,
+		"username":     a.Username,
+		"isAdmin":      a.IsAdmin,
+		"permissions":  a.Permissions,
+		"devicePolicy": a.DevicePolicy,
+		"deviceCount":  deviceCount,
+		"deviceBound":  id.deviceID != "",
+		"createdAt":    a.CreatedAt,
 	})
 }
 
@@ -236,10 +292,11 @@ func (d *Daemon) handleAccountsList(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(list))
 	for _, a := range list {
 		out = append(out, map[string]any{
-			"username":  a.Username,
-			"isAdmin":   a.IsAdmin,
-			"createdAt": a.CreatedAt,
-			"updatedAt": a.UpdatedAt,
+			"username":     a.Username,
+			"isAdmin":      a.IsAdmin,
+			"devicePolicy": a.DevicePolicy,
+			"createdAt":    a.CreatedAt,
+			"updatedAt":    a.UpdatedAt,
 		})
 	}
 	writeOK(w, out)

@@ -235,6 +235,11 @@ type Daemon struct {
 	Instances []*Instance
 	StartedAt time.Time
 
+	// AdminIntranetOnly 管理员账户是否只允许环回/RFC1918 来源登录与访问。
+	// 默认 true（安全默认）；可用 -admin-intranet-only=false 或配置文件
+	// adminIntranetOnly=false 关闭，关闭后管理员可从公网登录，需自行评估风险。
+	AdminIntranetOnly bool
+
 	LogDir      string         // 实例日志落盘目录（空 = 不落盘）
 	LogMaxBytes int64          // 单实例日志文件轮转上限（字节）
 	AuditLog    *fileLogger    // 审计日志落盘器（nil = 未启用 -audit-log=false）
@@ -286,6 +291,14 @@ type Daemon struct {
 	// vault 加密保险库状态（vault.go/vault_handlers.go；enabled=false 时
 	// 全部 vault 路由返回未启用、数据面门禁放行）。
 	vault *vaultState
+
+	// defense 恒开的 DDoS/CC 防御状态（defense.go）。没有任何关闭路径：
+	// NewDaemon 创建、newHTTPServer 无条件挂载，配置只能调阈值。
+	defense *defenseState
+
+	// TLSFingerprint 服务端证书 SHA-256（tls-mode auto/manual 时由 main 设置）。
+	// 设备挑战把它返回给客户端用于固定校验，防止中间人终止 TLS（见 device-binding.md）。
+	TLSFingerprint string
 }
 
 // NewDaemon 创建守护进程实例。
@@ -298,6 +311,8 @@ func NewDaemon(dataDir string) *Daemon {
 		StartedAt:       time.Now(),
 		LogMaxBytes:     64 << 20, // 默认 64MB
 		metricsInterval: defaultMetricsInterval,
+		// 管理员内网限制默认开启（安全默认）；main 按命令行/配置文件覆盖。
+		AdminIntranetOnly: true,
 		// 每实例内存缓冲上限默认值：嵌入式档位自动调小，否则按惯例 2MB / 1000 行。
 		// 启动后由 main 用 opts（命令行/配置文件/嵌入式预设合并后的值）覆盖。
 		LogBufferKB:   defaultLogBufferKB,
@@ -317,6 +332,7 @@ func NewDaemon(dataDir string) *Daemon {
 		metricsRingSize = embeddedMetricsRing
 	}
 	d.vault = newVaultState(d)
+	d.defense = newDefenseState(d)
 	return d
 }
 

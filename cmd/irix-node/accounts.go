@@ -65,18 +65,26 @@ var accountBcryptCost = bcrypt.DefaultCost
 
 // account 账户记录。
 type account struct {
-	Username    string          `json:"username"`
-	IsAdmin     bool            `json:"isAdmin"`
-	Permissions map[string]bool `json:"permissions"` // 端点开关：键 = 路由模式（如 "GET /api/instance"）
-	CreatedAt   int64           `json:"createdAt"`   // Unix 毫秒
-	UpdatedAt   int64           `json:"updatedAt"`
+	Username     string          `json:"username"`
+	IsAdmin      bool            `json:"isAdmin"`
+	Permissions  map[string]bool `json:"permissions"`  // 端点开关：键 = 路由模式（如 "GET /api/instance"）
+	DevicePolicy string          `json:"devicePolicy"` // 设备绑定策略：optional（默认）| required
+	CreatedAt    int64           `json:"createdAt"`    // Unix 毫秒
+	UpdatedAt    int64           `json:"updatedAt"`
 }
 
 // accountSession 登录会话（Redis 缓存的 JSON 与 sessions 表共用结构）。
+//
+// DeviceID / ProofKey 非空表示该会话已绑定设备：后续每个 API 请求必须携带
+// X-Device-Id / X-Session-Timestamp / X-Session-Seq / X-Session-Proof，
+// 服务端用 ProofKey 做 HMAC-SHA256 校验（见 device_auth.go）。
+// ProofKey 只存在于会话存储与内存缓存中，绝不出现在任何 API 响应里。
 type accountSession struct {
 	Username  string `json:"username"`
 	IsAdmin   bool   `json:"isAdmin"`
 	ExpiresAt int64  `json:"expiresAt"` // Unix 毫秒
+	DeviceID  string `json:"deviceId,omitempty"`
+	ProofKey  string `json:"proofKey,omitempty"`
 }
 
 // accountsConfig 账户子系统配置（config.json accounts 块合并后的最终值）。
@@ -116,6 +124,15 @@ type accountSystem struct {
 	// 键为 "u:"+username 或 "i:"+ip，条目含窗口计数与锁定截止时刻。
 	loginMu    sync.Mutex
 	loginFails map[string]loginFailEntry
+
+	// 设备绑定登录挑战（deviceMu 保护）：nonce → 挑战，一次性、60 秒过期。
+	deviceMu         sync.Mutex
+	deviceChallenges map[string]deviceChallenge
+
+	// 已绑定会话的请求序号窗口（proofMu 保护）：token → 单调序号窗口，
+	// 每个请求 O(1) 校验，用于防重放；内存占用约 150 字节/活跃设备会话。
+	proofMu      sync.Mutex
+	proofWindows map[string]*proofWindow
 }
 
 // loginFailEntry 登录失败限速条目（用户名与 IP 双维度各存一条）。
@@ -213,11 +230,20 @@ func (d *Daemon) initAccounts(cfg accountsConfig) error {
 			return fmt.Errorf("初始化账户数据表失败: %w", err)
 		}
 	}
+	// 旧库补列：设备绑定相关字段（重复列错误忽略，其余错误阻断启动）。
+	for _, st := range accountsSchemaMigrations {
+		if _, err := db.Exec(rebindSQL(driver, st)); err != nil && !isSchemaColumnExistsErr(err) {
+			db.Close()
+			return fmt.Errorf("升级账户数据表失败: %w", err)
+		}
+	}
 	// 过期清理索引（MySQL 不支持 CREATE INDEX IF NOT EXISTS，跳过；仅为优化项）
 	if driver != "mysql" {
-		if _, err := db.Exec(rebindSQL(driver, accountsSchemaIndex)); err != nil {
-			db.Close()
-			return fmt.Errorf("初始化账户索引失败: %w", err)
+		for _, st := range []string{accountsSchemaIndex, accountsSchemaDevicesIndex} {
+			if _, err := db.Exec(rebindSQL(driver, st)); err != nil {
+				db.Close()
+				return fmt.Errorf("初始化账户索引失败: %w", err)
+			}
 		}
 	}
 	if err := db.Ping(); err != nil {
@@ -275,20 +301,60 @@ var accountsSchemaTables = []string{
 		password_hash VARCHAR(255) NOT NULL,
 		is_admin INTEGER NOT NULL DEFAULT 0,
 		permissions TEXT NOT NULL DEFAULT '{}',
+		device_policy VARCHAR(16) NOT NULL DEFAULT 'optional',
 		created_at BIGINT NOT NULL,
 		updated_at BIGINT NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS sessions (
 		token VARCHAR(64) PRIMARY KEY,
 		username VARCHAR(64) NOT NULL,
+		device_id VARCHAR(64) NOT NULL DEFAULT '',
+		proof_key VARCHAR(64) NOT NULL DEFAULT '',
 		created_at BIGINT NOT NULL,
 		expires_at BIGINT NOT NULL,
 		last_used BIGINT NOT NULL
 	)`,
+	// 设备公钥表：服务端只存公钥与签名描述，不存任何可冒充客户端的秘密。
+	// 主键为 (username, device_id)：同一台物理设备的密钥可绑定多个账户
+	// （推荐仍按账户生成独立密钥，便于吊销与隔离）。
+	`CREATE TABLE IF NOT EXISTS account_devices (
+		device_id VARCHAR(64) NOT NULL,
+		username VARCHAR(64) NOT NULL,
+		public_key TEXT NOT NULL,
+		key_type VARCHAR(16) NOT NULL,
+		key_protection VARCHAR(16) NOT NULL,
+		descriptor TEXT NOT NULL,
+		name VARCHAR(64) NOT NULL,
+		created_at BIGINT NOT NULL,
+		last_seen BIGINT NOT NULL,
+		PRIMARY KEY (username, device_id)
+	)`,
+}
+
+// accountsSchemaMigrations 旧库补列（新库建表时已包含；重复列错误忽略）。
+// 设备绑定是 v1.4.0 新增能力，已有 accounts.db 必须平滑升级。
+var accountsSchemaMigrations = []string{
+	`ALTER TABLE accounts ADD COLUMN device_policy VARCHAR(16) NOT NULL DEFAULT 'optional'`,
+	`ALTER TABLE sessions ADD COLUMN device_id VARCHAR(64) NOT NULL DEFAULT ''`,
+	`ALTER TABLE sessions ADD COLUMN proof_key VARCHAR(64) NOT NULL DEFAULT ''`,
 }
 
 // accountsSchemaIndex 过期会话清理索引（MySQL 不支持 IF NOT EXISTS，单独执行）。
 const accountsSchemaIndex = `CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at)`
+
+// accountsSchemaDevicesIndex 设备按用户名查询索引（MySQL 版本跳过）。
+const accountsSchemaDevicesIndex = `CREATE INDEX IF NOT EXISTS idx_devices_username ON account_devices (username)`
+
+// isSchemaColumnExistsErr 判断 ALTER TABLE 的「列已存在」错误（三数据库错误文案不同）。
+func isSchemaColumnExistsErr(err error) bool {
+	if err == nil {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "duplicate field")
+}
 
 // ---------- 账户 CRUD（SQL 权威层） ----------
 
@@ -322,13 +388,13 @@ func (s *accountSystem) hasAdminAccount() (bool, error) {
 // getAccount 读取账户；不存在返回 (nil, nil)。
 func (s *accountSystem) getAccount(username string) (*account, error) {
 	row := s.db.QueryRow(rebindSQL(s.driver,
-		`SELECT username, is_admin, permissions, created_at, updated_at FROM accounts WHERE username = ?`), username)
+		`SELECT username, is_admin, permissions, device_policy, created_at, updated_at FROM accounts WHERE username = ?`), username)
 	var (
 		a     account
 		isAdm int
 		perms string
 	)
-	if err := row.Scan(&a.Username, &isAdm, &perms, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.Username, &isAdm, &perms, &a.DevicePolicy, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -336,13 +402,14 @@ func (s *accountSystem) getAccount(username string) (*account, error) {
 	}
 	a.IsAdmin = isAdm != 0
 	a.Permissions = decodePerms(perms)
+	a.DevicePolicy = normalizeStoredDevicePolicy(a.DevicePolicy)
 	return &a, nil
 }
 
 // listAccounts 列出全部账户。
 func (s *accountSystem) listAccounts() ([]*account, error) {
 	rows, err := s.db.Query(rebindSQL(s.driver,
-		`SELECT username, is_admin, permissions, created_at, updated_at FROM accounts ORDER BY username`))
+		`SELECT username, is_admin, permissions, device_policy, created_at, updated_at FROM accounts ORDER BY username`))
 	if err != nil {
 		return nil, err
 	}
@@ -354,11 +421,12 @@ func (s *accountSystem) listAccounts() ([]*account, error) {
 			isAdm int
 			perms string
 		)
-		if err := rows.Scan(&a.Username, &isAdm, &perms, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.Username, &isAdm, &perms, &a.DevicePolicy, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.IsAdmin = isAdm != 0
 		a.Permissions = decodePerms(perms)
+		a.DevicePolicy = normalizeStoredDevicePolicy(a.DevicePolicy)
 		out = append(out, &a)
 	}
 	return out, rows.Err()
@@ -456,6 +524,7 @@ func (s *accountSystem) deleteAccount(username string) error {
 	// 三层（SQL / Redis / 进程内）全部撤销：只删 SQL 时 Redis 里的会话
 	// 键仍存活到 TTL，被删账户的旧 token 在缓存期内仍可通过鉴权。
 	s.revokeUserSessions(username, "")
+	s.deleteDevicesByUser(username)
 	s.redisDelPerms(username)
 	s.invalidatePerms(username)
 	return nil
@@ -558,16 +627,18 @@ func (s *accountSystem) putSession(token string, sess accountSession, ttl time.D
 	}
 	if s.driver == "mysql" {
 		_, _ = s.db.Exec(
-			`INSERT INTO sessions (token, username, created_at, expires_at, last_used)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), last_used = VALUES(last_used)`,
-			token, sess.Username, now, sess.ExpiresAt, now)
+			`INSERT INTO sessions (token, username, created_at, expires_at, last_used, device_id, proof_key)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at), last_used = VALUES(last_used),
+			   device_id = VALUES(device_id), proof_key = VALUES(proof_key)`,
+			token, sess.Username, now, sess.ExpiresAt, now, sess.DeviceID, sess.ProofKey)
 	} else {
 		_, _ = s.db.Exec(rebindSQL(s.driver,
-			`INSERT INTO sessions (token, username, created_at, expires_at, last_used)
-			 VALUES (?, ?, ?, ?, ?)
-			 ON CONFLICT(token) DO UPDATE SET expires_at = excluded.expires_at, last_used = excluded.last_used`),
-			token, sess.Username, now, sess.ExpiresAt, now)
+			`INSERT INTO sessions (token, username, created_at, expires_at, last_used, device_id, proof_key)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(token) DO UPDATE SET expires_at = excluded.expires_at, last_used = excluded.last_used,
+			   device_id = excluded.device_id, proof_key = excluded.proof_key`),
+			token, sess.Username, now, sess.ExpiresAt, now, sess.DeviceID, sess.ProofKey)
 	}
 	if s.redisReady() {
 		data, err := json.Marshal(sess)
@@ -612,7 +683,8 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 		expiresAt int64
 	)
 	err := s.db.QueryRow(rebindSQL(s.driver,
-		`SELECT username, expires_at FROM sessions WHERE token = ?`), token).Scan(&sess.Username, &expiresAt)
+		`SELECT username, expires_at, device_id, proof_key FROM sessions WHERE token = ?`), token).
+		Scan(&sess.Username, &expiresAt, &sess.DeviceID, &sess.ProofKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return accountSession{}, false
 	}
@@ -649,6 +721,7 @@ func (s *accountSystem) delSession(token string) {
 		}
 	}
 	s.invalidateSession(token)
+	s.dropProofWindow(token)
 }
 
 // redisSessionOwner 从 Redis 会话条目反查所属用户名（清理索引用；尽力而为）。
@@ -716,6 +789,7 @@ func (s *accountSystem) revokeUserSessions(username, keepToken string) {
 		}
 	}
 	s.cacheMu.Unlock()
+	s.dropProofWindowsForUser(username, keepToken)
 }
 
 // purgeExpiredSessions 清理过期会话（登录时顺手执行，避免独立后台任务）。

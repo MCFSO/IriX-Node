@@ -64,6 +64,21 @@ type AccountsConfig struct {
 	RedisPoolSize      *int   `json:"redisPoolSize"`      // Redis 连接池大小（默认 16）
 }
 
+// DefenseConfig 配置文件 defense 块：DDoS/CC 防御阈值调优。
+// 防御本身恒开、**没有关闭开关**：写 enabled=false 会被忽略并在启动日志提示；
+// 这里只能调整阈值与配置级静态封禁的 User-Agent。字段含义见 config.example.json。
+type DefenseConfig struct {
+	MaxIPConcurrent        *int     `json:"maxIPConcurrent"`        // 单 IP 在途并发上限
+	MaxUserAgentConcurrent *int     `json:"maxUserAgentConcurrent"` // 单 User-Agent 在途并发上限（超过即封禁该 UA）
+	IPRatePerSecond        *int     `json:"ipRatePerSecond"`        // 单 IP 每秒请求上限
+	UserAgentRatePerSecond *int     `json:"userAgentRatePerSecond"` // 单 User-Agent 每秒请求上限（跨 IP 聚合）
+	GlobalRatePerSecond    *int     `json:"globalRatePerSecond"`    // 全节点匿名请求每秒上限（跨 IP 聚合）
+	GlobalBurst            *int     `json:"globalBurst"`            // 全节点匿名请求突发容量
+	BanMinutes             *int     `json:"banMinutes"`             // 自动封禁时长（分钟）
+	BlockedUserAgents      []string `json:"blockedUserAgents"`      // 静态封禁的 User-Agent 列表
+	Enabled                *bool    `json:"enabled"`                // 仅为识别误配；防御不可关闭
+}
+
 // Config config.json 配置文件结构。
 // 布尔/整数字段用指针：nil = 配置未写该字段（回退默认值）；
 // 非 nil = 显式设置（含 false/0，会覆盖内置默认值）。
@@ -73,6 +88,7 @@ type Config struct {
 	Bind              string          `json:"bind"`              // 监听地址（IP 或主机名，如 127.0.0.1 / 0.0.0.0 / 192.168.1.5 / ::）
 	Port              int             `json:"port"`              // 监听端口（1-65535；0 = 未设置）
 	Data              string          `json:"data"`              // 数据目录（空 = 当前目录）
+	AdminIntranetOnly *bool           `json:"adminIntranetOnly"` // 管理员账户仅允许内网来源（默认 true；false = 关闭限制）
 	InstanceLog       *bool           `json:"instanceLog"`       // 实例日志落盘开关
 	InstanceLogMax    *int            `json:"instanceLogMax"`    // 实例日志单文件轮转上限（MB）
 	AuditLog          *bool           `json:"auditLog"`          // 审计日志落盘开关
@@ -86,6 +102,7 @@ type Config struct {
 	TLS               *TLSConfig      `json:"tls"`               // TLS 传输加密（nil = 未配置）
 	Vault             *VaultConfig    `json:"vault"`             // 加密保险库（nil = 未配置）
 	Accounts          *AccountsConfig `json:"accounts"`          // 账户管理存储（nil = 默认 SQLite）
+	Defense           *DefenseConfig  `json:"defense"`           // DDoS/CC 防御调优（nil = 全部默认值）
 }
 
 //go:embed config.example.json
@@ -135,6 +152,7 @@ type nodeOptions struct {
 	Port              int
 	BindHost          string
 	DataDir           string
+	AdminIntranetOnly bool // 管理员账户仅允许内网来源（默认 true）
 	InstanceLog       bool
 	InstanceLogMax    int
 	AuditLog          bool
@@ -170,6 +188,16 @@ type nodeOptions struct {
 	RedisPassword              string
 	RedisDB                    int
 	RedisPoolSize              int
+	// DDoS/CC 防御调优（防御恒开，没有关闭项；0/空 = 用默认阈值）
+	DefenseIPConcurrent int
+	DefenseUAConcurrent int
+	DefenseIPRate       int
+	DefenseUARate       int
+	DefenseGlobalRate   int
+	DefenseGlobalBurst  int
+	DefenseBanMinutes   int
+	DefenseBlockedUAs   string // 静态封禁 UA（换行分隔；保持 nodeOptions 可比较）
+	DefenseDisableWarn  bool   // 配置写了 defense.enabled=false（会被忽略）
 }
 
 // applyConfig 应用配置文件：仅覆盖未被命令行显式设置的项。
@@ -187,6 +215,9 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 	}
 	if !setFlags["data"] && cfg.Data != "" {
 		o.DataDir = cfg.Data
+	}
+	if !setFlags["admin-intranet-only"] && cfg.AdminIntranetOnly != nil {
+		o.AdminIntranetOnly = *cfg.AdminIntranetOnly
 	}
 	if !setFlags["instance-log"] && cfg.InstanceLog != nil {
 		o.InstanceLog = *cfg.InstanceLog
@@ -291,6 +322,36 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 		}
 		if cfg.Accounts.RedisPoolSize != nil {
 			o.RedisPoolSize = *cfg.Accounts.RedisPoolSize
+		}
+	}
+	if cfg.Defense != nil {
+		// 防御不可关闭：enabled=false 不生效，只记录一条启动告警。
+		if cfg.Defense.Enabled != nil && !*cfg.Defense.Enabled {
+			o.DefenseDisableWarn = true
+		}
+		if cfg.Defense.MaxIPConcurrent != nil {
+			o.DefenseIPConcurrent = *cfg.Defense.MaxIPConcurrent
+		}
+		if cfg.Defense.MaxUserAgentConcurrent != nil {
+			o.DefenseUAConcurrent = *cfg.Defense.MaxUserAgentConcurrent
+		}
+		if cfg.Defense.IPRatePerSecond != nil {
+			o.DefenseIPRate = *cfg.Defense.IPRatePerSecond
+		}
+		if cfg.Defense.UserAgentRatePerSecond != nil {
+			o.DefenseUARate = *cfg.Defense.UserAgentRatePerSecond
+		}
+		if cfg.Defense.GlobalRatePerSecond != nil {
+			o.DefenseGlobalRate = *cfg.Defense.GlobalRatePerSecond
+		}
+		if cfg.Defense.GlobalBurst != nil {
+			o.DefenseGlobalBurst = *cfg.Defense.GlobalBurst
+		}
+		if cfg.Defense.BanMinutes != nil {
+			o.DefenseBanMinutes = *cfg.Defense.BanMinutes
+		}
+		if len(cfg.Defense.BlockedUserAgents) > 0 {
+			o.DefenseBlockedUAs = strings.Join(cfg.Defense.BlockedUserAgents, "\n")
 		}
 	}
 }

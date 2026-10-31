@@ -203,6 +203,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// 账户管理（docs/accounts-design.md）
 	d.registerAccountRoutes(mux)
 
+	// 设备绑定（docs/device-binding.md）：挑战、设备注册/撤销、账户设备策略
+	d.registerDeviceRoutes(mux)
+
 	// 容器环境（Docker / Bastille，docs/NODE_API.md §6.1）
 	d.registerContainerRoutes(mux)
 
@@ -211,6 +214,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 
 	// 加密保险库（M3，docs/vault-design.md §10）
 	d.registerVaultRoutes(mux)
+
+	// DDoS/CC 防御状态与人工封禁（防御恒开，见 defense.go）
+	d.registerDefenseRoutes(mux)
 }
 
 // auth 包装器：校验账户会话，并按端点权限开关放行。
@@ -220,6 +226,25 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 		id := d.authenticate(r)
 		if id == nil {
 			writeError(w, http.StatusForbidden, "未认证或会话已过期（请先登录 POST /api/auth/login）")
+			return
+		}
+		// 管理员账户默认仅允许从内网（环回 / RFC 1918 / IPv6 内网段）来源访问：
+		// 即使凭据泄露，公网来源也无法使用管理员会话接管节点（admin_access.go）。
+		// -admin-intranet-only=false（或配置 adminIntranetOnly=false）可显式关闭。
+		if d.AdminIntranetOnly && id.isAdmin && !adminIntranetAllowed(clientIP(r)) {
+			writeError(w, http.StatusForbidden, "管理员账户仅允许从内网地址（RFC 1918）访问，当前来源不在允许范围内")
+			return
+		}
+		// 已绑定设备的会话必须携带逐请求 HMAC 证明（device_auth.go）：
+		// token 泄露但没有 proofKey 的请求一律拒绝。HMAC 校验约 1µs，走内存缓存。
+		// 设备会话同时要求节点 TLS：否则设备证明/会话密钥可能被中间人窃取。
+		if id.deviceID != "" && d.TLSFingerprint == "" {
+			writeError(w, http.StatusForbidden, "设备绑定会话需要节点启用 TLS")
+			return
+		}
+		if id.deviceID != "" && (d.accounts == nil ||
+			!d.accounts.verifySessionProof(id.sessionToken, id.username, id.deviceID, id.proofKey, r)) {
+			writeError(w, http.StatusForbidden, "设备凭据校验失败（缺少或无效的 X-Device-Id / X-Session-* 请求头）")
 			return
 		}
 		if !id.isAdmin && !permIdentityExempt(r.Pattern) && !d.permAllowed(id.username, r.Pattern) {
@@ -240,7 +265,8 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 func permIdentityExempt(pattern string) bool {
 	switch pattern {
 	case "GET /api/accounts/me", "GET /api/accounts/catalog",
-		"PUT /api/accounts/password", "POST /api/auth/logout":
+		"PUT /api/accounts/password", "POST /api/auth/logout",
+		"GET /api/auth/devices", "POST /api/auth/devices", "POST /api/auth/devices/revoke":
 		return true
 	}
 	return false

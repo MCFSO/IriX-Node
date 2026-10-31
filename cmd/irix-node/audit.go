@@ -192,7 +192,7 @@ func (d *Daemon) auditLogf(format string, args ...any) {
 // 键名匹配不区分大小写（"token"/"Token"/"TOKEN" 同等打码）。
 var vaultMaskFields = []string{
 	`password`, `newPassword`, `oldPassword`,
-	`totp`, `signature`, `recoveryToken`, `sessionToken`,
+	`totp`, `signature`, `recoveryToken`, `sessionToken`, `proofKey`,
 	`token`, `secret`, `apikey`, `apiKey`, `key`, `authorization`,
 }
 

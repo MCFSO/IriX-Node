@@ -21,6 +21,17 @@
 `?token=` 查询参数供浏览器 / WebSocket 等无法自定义请求头的场景使用（审计日志已对
 `token=` 打码）。所有 `/api/*` 数据面请求都必须先登录取得会话 token。
 
+**管理员来源限制**：管理员账户的登录与每一次会话请求默认要求来源属于环回或
+RFC 1918 内网（10/8、172.16/12、192.168/16；IPv6 为 `fc00::/7`、`fe80::/10`），
+公网来源即使密码/token 正确也返回 403（`admin_access.go`）；普通账户不受此限制。
+可用 `-admin-intranet-only=false` 或配置文件 `adminIntranetOnly=false` 显式关闭
+（默认 true）；关闭后管理员可从公网登录，需自行评估风险。
+
+**设备绑定（v1.4.0+）**：账户可配置 `devicePolicy=required`，登录必须提供已绑定
+设备私钥对一次性挑战的签名；会话绑定 `deviceId`，后续请求用 HMAC-SHA256 +
+单调序号证明（token 单独泄露无法使用）。默认 `optional`，旧客户端兼容；
+`required` 强制节点启用 TLS，协议与客户端交接见 `docs/device-binding.md`。
+
 会话 token：`crypto/rand` 32 字节（hex 64 字符），有效期 30 天，
 剩余不足一半时滑动续期。
 

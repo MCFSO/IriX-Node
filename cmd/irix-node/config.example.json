@@ -6,6 +6,8 @@
   "port": 12346,
   "_comment_data": "data: 数据目录（instances.json 与 accounts.db 等存放于此），留空 = 当前目录。",
   "data": "",
+  "_comment_adminIntranetOnly": "adminIntranetOnly: 管理员账户是否只允许从环回/RFC 1918 内网来源登录与访问，默认 true（安全默认）。设为 false 后管理员可从公网登录，仅在确有公网运维需求时关闭，并务必配合强密码、TLS、设备绑定与防火墙。命令行 -admin-intranet-only=false 优先。",
+  "adminIntranetOnly": true,
   "_comment_instanceLog": "instanceLog: 实例输出日志落盘到 {data}/logs/，默认 true。关闭则仅内存环形缓冲。",
   "instanceLog": true,
   "_comment_instanceLogMax": "instanceLogMax: 实例日志单文件轮转上限（MB），超过后轮转为 .1 保留最近一个，默认 64。",
@@ -55,6 +57,17 @@
     "scrubOnDelete": false,
     "_comment_defaultFilesMode": "defaultFilesMode: 新实例文件区默认模式：plaintext（明文，默认，兼容现状）/ materialize（启停物化加密，新实例默认 vaultFiles=true）。",
     "defaultFilesMode": "plaintext"
+  },
+  "_comment_defense": "defense: DDoS/CC 防御阈值调优。防御恒开、没有关闭开关（写 enabled=false 会被忽略并在启动日志提示）。默认：单 IP 60 请求/秒、突发 120、并发 64；单 User-Agent 40 请求/秒、并发 32——同一 User-Agent 同时访问过多（并发超限/频率超限）时直接封禁该 UA；全节点匿名预算 1000 请求/秒、突发 2000（跨 IP 聚合，防止换 IP 绕过单 IP 限速）；自动封禁 10 分钟，重复触发时长翻倍（上限 24 小时）；同一来源 10 分钟内累计 3 次头部规范违规即封禁。blockedUserAgents 为静态封禁的 UA 列表（永久，可被管理员解封但重启后按配置恢复）。",
+  "defense": {
+    "maxIPConcurrent": 64,
+    "maxUserAgentConcurrent": 32,
+    "ipRatePerSecond": 60,
+    "userAgentRatePerSecond": 40,
+    "globalRatePerSecond": 1000,
+    "globalBurst": 2000,
+    "banMinutes": 10,
+    "blockedUserAgents": []
   },
   "_comment_accounts": "accounts: 账户管理存储（docs/accounts-design.md）。默认 SQLite（{data}/accounts.db）；可选 MySQL / PostgreSQL（driver=mysql|postgres 且需 dsn 连接串）；Redis 可选缓存登录会话与权限热数据（不可用时自动回退数据库，不影响功能）。连接池参数：maxOpen 最大连接数（默认 20）、maxIdle 最大空闲连接（默认 10）、connMaxLifetimeMin 连接最大存活分钟（默认 30）；redisPoolSize Redis 连接池大小（默认 16）。",
   "accounts": {

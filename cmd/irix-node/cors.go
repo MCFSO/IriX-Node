@@ -26,7 +26,10 @@ import (
 )
 
 // corsAllowedHeaders 固定放行的跨源请求头（节点实际读取的全部请求头）。
-const corsAllowedHeaders = "Authorization, Content-Type, X-Auth-Token, X-Vault-Token"
+// 设备绑定会话的 4 个证明头也在内：浏览器 WebCrypto 客户端可正常预检；
+// 浏览器 WebSocket 仍无法设置请求头，required 模式仅桌面客户端可用。
+const corsAllowedHeaders = "Authorization, Content-Type, X-Auth-Token, X-Vault-Token, " +
+	"X-Device-Id, X-Session-Timestamp, X-Session-Seq, X-Session-Proof"
 
 // setCorsOrigins 解析额外的跨源来源白名单（-cors-origins / 配置文件 corsOrigins，
 // 逗号分隔，形如 https://panel.example.com，可带端口；大小写不敏感）。
@@ -84,22 +87,31 @@ func isLoopbackHostname(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// applyCORS 按来源白名单写入跨源响应头，返回来源是否放行。
+//
+// 防御中间件在 CORS 之前直接拒绝请求（封禁/限流/头部违规），必须复用本函数，
+// 否则浏览器端只能看到网络错误、读不到 403/429 的具体原因。
+func (d *Daemon) applyCORS(w http.ResponseWriter, r *http.Request) (origin string, allowed bool) {
+	origin = r.Header.Get("Origin")
+	allowed = d.corsOriginAllowed(r, origin)
+	if origin != "" {
+		// 无论是否放行都标记 Vary: Origin，避免共享缓存把带 CORS 头的
+		// 响应复用给其他来源。
+		w.Header().Add("Vary", "Origin")
+	}
+	if allowed {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+	// 浏览器读取下载文件名等自定义响应头需要显式暴露
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+	return origin, allowed
+}
+
 // corsMiddleware 按白名单追加 CORS 头，并拦截预检请求。
 func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		allowed := d.corsOriginAllowed(r, origin)
-		if origin != "" {
-			// 无论是否放行都标记 Vary: Origin，避免共享缓存把带 CORS 头的
-			// 响应复用给其他来源。
-			w.Header().Add("Vary", "Origin")
-		}
-		if allowed {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		}
-		// 浏览器读取下载文件名等自定义响应头需要显式暴露
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+		_, allowed := d.applyCORS(w, r)
 
 		// CORS 预检：不进入业务路由（OPTIONS 无对应路由，会 405）
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {

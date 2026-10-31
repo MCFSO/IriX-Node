@@ -19,12 +19,13 @@ MCSM 节点与本节点。
 | [容器环境](docs/container.md) | Docker（Linux）/ Bastille（FreeBSD）支持与 PF 注意事项 |
 | [高并发压测调优](docs/perf-tuning.md) | 百万级连接的 OS 资源上限与代码侧优化 |
 | [加密保险库](docs/vault.md) | TOTP+密码+证书三重保护的数据加密存储 |
-| [安全说明](docs/security.md) | 认证、路径越界防护、SSRF 防护与部署建议 |
+| [安全说明](docs/security.md) | 认证、设备绑定、路径越界防护、SSRF 防护与部署建议 |
 | [架构设计](docs/architecture.md) | 分层边界、请求生命周期、持久化一致性与优雅关停 |
 
 ### 设计文档（`docs/`）
 
 - `docs/accounts-design.md` — 账户与权限模型（端点级权限开关、连接池、Redis 缓存）
+- `docs/device-binding.md` — 客户端设备绑定协议（挑战登录、逐请求证明、客户端交接）
 - `docs/vault-design.md` — 加密保险库设计（密钥包裹、迁移、物化加密）
 - `docs/container-support.md` — 容器能力客户端契约（字段级）
 - `docs/cluster-node-api.md` — 集群节点 API（LAN 直传、协调）
