@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -301,4 +302,103 @@ func (c *wsTestClient) readFrameRaw() (int, []byte, error) {
 		return 0, nil, err
 	}
 	return opcode, payload, nil
+}
+
+// TestCompatMCSMStreamReleaseKeepsMainSocket 复刻面板线上的时序：
+//  1. 主通道（轮询）已认证；
+//  2. 打开控制台流（纯 WebSocket）并 stream/auth 成功，收到 stdout；
+//  3. 浏览器关页面 → 流连接被直接掐断（不发 close 帧）；
+//  4. 立刻在主通道上发 passport/register、跨多个心跳周期继续发请求，必须都秒回。
+//
+// 线上曾出现：流释放后 6s 内 passport/register 超时（RemoteRequestTimeoutError），
+// 随后 RemoteService 判定「Daemon exception detected」重连——即主通道被拖死。
+func TestCompatMCSMStreamReleaseKeepsMainSocket(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	d.setupCompat(&nodeOptions{
+		CompatMCSMEnabled: true,
+		CompatMCSMPort:    0,
+		CompatMCSMKey:     mcsmTestKey,
+	})
+	if d.compatMC == nil {
+		t.Fatal("MCSManager 兼容层未初始化")
+	}
+	// 心跳压到 300ms，几秒内就能跨过多个周期（不改包级变量，避免 -race）
+	d.compatMC.pingIv = 300 * time.Millisecond
+	d.compatMC.pingTo = 300 * time.Millisecond
+	d.startCompatServers()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = d.stopCompatServers(ctx)
+	})
+	addr := d.compatAddrOf("mcsm")
+	base := "http://" + addr
+
+	cwd := filepath.Join(worldDir(t), "srv-stream-release")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+
+	// 主通道
+	main := newEIOClient(t, base+"/socket.io/")
+	main.connect()
+	if status, data := main.requestRaw("auth", "m1", mcsmTestKey); status != 200 {
+		t.Fatalf("主通道认证失败: %d %s", status, data)
+	}
+
+	// 注册通行证 + 打开流会话
+	const pass = "qa-release-pass-0001"
+	if status, data := main.requestRaw("passport/register", "m2", map[string]any{
+		"name":      "stream_channel",
+		"password":  pass,
+		"parameter": map[string]any{"instanceUuid": inst.InstanceUuid},
+	}); status != 200 {
+		t.Fatalf("注册通行证失败: %d %s", status, data)
+	}
+	ws := openStreamClient(t, addr)
+	ws.sendTextAny(`42["stream/auth",{"data":{"password":"` + pass + `"}}]`)
+	pkt := ws.waitSocketPacket("42", 5*time.Second)
+	if !strings.Contains(pkt, `"data":true`) {
+		t.Fatalf("stream/auth 应成功: %q", pkt)
+	}
+	// 读到至少一帧 stdout，确保推送链路真的在跑
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(ws.waitSocketPacket("42", time.Until(deadline)), "instance/stdout") {
+			break
+		}
+	}
+
+	// 模拟浏览器直接关页面：掐断 TCP，不发 close 帧
+	_ = ws.conn.Close()
+
+	// 立刻在主通道上再次注册通行证：必须秒回（面板超时是 6s）
+	start := time.Now()
+	if status, data := main.requestRaw("passport/register", "m3", map[string]any{
+		"name":      "stream_channel",
+		"password":  pass + "-b",
+		"parameter": map[string]any{"instanceUuid": inst.InstanceUuid},
+	}); status != 200 {
+		t.Fatalf("流释放后主通道请求失败: %d %s", status, data)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("流释放后主通道响应过慢: %v（面板 6s 超时会报 RemoteRequestTimeoutError）", elapsed)
+	}
+
+	// 再跨多个心跳周期持续请求，主通道必须一直可用
+	for i := 0; i < 6; i++ {
+		time.Sleep(400 * time.Millisecond)
+		if status, data := main.requestRaw("info/setting", fmt.Sprintf("hb%d", i), map[string]any{}); status != 200 {
+			t.Fatalf("第 %d 个心跳周期后主通道失效: %d %s", i, status, data)
+		}
+	}
 }

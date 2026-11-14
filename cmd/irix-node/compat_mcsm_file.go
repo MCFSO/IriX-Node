@@ -231,12 +231,23 @@ func mcEventFileDelete(mc *mcsmCompat, _ *eioSession, data json.RawMessage) (any
 	return true, nil
 }
 
-// mcEventFileEdit 编辑文本文件。
+// mcFileMaxEditSize 编辑器可读写单文件上限（与 MCSM 的 MAX_EDIT_SIZE 一致：5 MiB）。
+const mcFileMaxEditSize = 5 << 20
+
+// mcEventFileEdit 读取或写入文本文件。
+//
+// 与 MCSM daemon 的 fileManager.edit(target, data) 语义完全一致：
+//   - 请求里**没有** text（或为 null）：读取文件内容，回包 data 为字符串；
+//   - 请求里有 text（包括空串 ""）：写入文件，回包 data 为 true。
+//
+// 这个区分很关键：面板文件管理器「打开编辑器」就是发一包不带 text 的
+// file/edit 来取内容的；早先的实现不区分，把它当成写入空串，结果一打开
+// 配置文件就被截断成 0 字节，编辑器也拿不到内容（用户看到的就是「没法编辑」）。
 func mcEventFileEdit(mc *mcsmCompat, _ *eioSession, data json.RawMessage) (any, error) {
 	var req struct {
-		InstanceUUID string `json:"instanceUuid"`
-		Target       string `json:"target"`
-		Text         string `json:"text"`
+		InstanceUUID string  `json:"instanceUuid"`
+		Target       string  `json:"target"`
+		Text         *string `json:"text"` // 指针：区分「未提供」与「空串」
 	}
 	if err := decode(data, &req); err != nil {
 		return nil, fmt.Errorf("参数格式错误: %w", err)
@@ -249,10 +260,27 @@ func mcEventFileEdit(mc *mcsmCompat, _ *eioSession, data json.RawMessage) (any, 
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(abs, []byte(req.Text), 0o644); err != nil {
-		return nil, fmt.Errorf("写入文件失败: %w", err)
+	if req.Text != nil {
+		if err := os.WriteFile(abs, []byte(*req.Text), 0o644); err != nil {
+			return nil, fmt.Errorf("写入文件失败: %w", err)
+		}
+		return true, nil
 	}
-	return true, nil
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("读取文件失败: %w", err)
+	}
+	if info.IsDir() {
+		return nil, errors.New("目标是目录，无法作为文本打开")
+	}
+	if info.Size() > mcFileMaxEditSize {
+		return nil, fmt.Errorf("文件过大（%d 字节），编辑器上限 %d 字节", info.Size(), mcFileMaxEditSize)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("读取文件失败: %w", err)
+	}
+	return string(content), nil
 }
 
 // mcEventFileCopy 复制文件/目录（targets 为 [源, 目标] 数组）。

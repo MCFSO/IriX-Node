@@ -61,6 +61,8 @@ type eioSession struct {
 	closedCh   chan struct{}       // 关闭时 close（心跳循环退出信号）
 	heartbeat  bool                // WebSocket 心跳循环是否已启动
 	authed     bool                // 是否已通过节点密钥认证
+	jobs       chan mcJob          // 事件队列（串行处理，避免阻塞读循环）
+	jobsOnce   sync.Once           // 事件处理循环只启动一次
 	lastPong   time.Time           // 最近一次收到 pong 的时间
 	sioSid     string              // socket.io 层的 sid
 	cleanups   []func()            // 会话关闭时执行（取消输出订阅等）
@@ -81,6 +83,7 @@ func (mc *mcsmCompat) newEIOSession() (*eioSession, error) {
 		d:        mc.d,
 		created:  timesys.Now(),
 		notify:   make(chan struct{}, 1),
+		jobs:     make(chan mcJob, 256),
 		closedCh: make(chan struct{}),
 		lastPong: timesys.Now(),
 		forwards: map[string]struct{}{},
@@ -274,6 +277,9 @@ func (mc *mcsmCompat) wsReadLoop(s *eioSession, conn *wsConn) {
 		if err != nil {
 			return
 		}
+		// 任何入站帧都证明对端活着：刷新心跳基准，避免「事件源源不断却仍被
+		// 判超时断开」这类误杀（socket.io 的 pong 只是其中一种表现）。
+		s.touch()
 		switch opcode {
 		case wsPing:
 			_ = conn.writePong(payload)
@@ -571,7 +577,49 @@ func (s *eioSession) handleSocketEvent(rest string) {
 		}
 	}
 	_ = ackID // MCSManager 使用事件回包而非 ACK，这里不额外应答
-	s.dispatch(event, uuid, data)
+	s.enqueue(mcJob{event: event, uuid: uuid, data: data})
+}
+
+// mcJob 一个待处理的事件（从读循环交给会话工作协程）。
+type mcJob struct {
+	event string
+	uuid  string
+	data  json.RawMessage
+}
+
+// enqueue 把事件交给会话的串行工作协程处理。
+//
+// 读循环只负责解析与心跳，不执行业务：否则一个慢操作（大目录 file/list、
+// 压缩、下载任务）会把同一会话的 ping/pong 和后续请求一起堵住，面板侧表现
+// 为「请求超时 + Daemon exception detected」。这与 MCSM daemon（Node 事件
+// 循环里异步监听）的行为一致。队列满时退化为同步执行，保证请求不被丢。
+func (s *eioSession) enqueue(job mcJob) {
+	s.jobsOnce.Do(func() {
+		safeGo("MCSM 兼容层事件处理", func() {
+			for {
+				select {
+				case job := <-s.jobs:
+					s.dispatch(job.event, job.uuid, job.data)
+				case <-s.closedCh:
+					// 会话关闭后处理完已入队的少量事件再退出
+					for {
+						select {
+						case job := <-s.jobs:
+							s.dispatch(job.event, job.uuid, job.data)
+						default:
+							return
+						}
+					}
+				}
+			}
+		})
+	})
+	select {
+	case s.jobs <- job:
+	default:
+		// 队列已满（极端情况）：同步执行，宁可让这个会话慢，也不丢请求
+		s.dispatch(job.event, job.uuid, job.data)
+	}
 }
 
 // emitPacket 组装并发送一个事件包 {"uuid","status","event","data"}。

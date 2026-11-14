@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // wsGUID RFC 6455 握手魔数（Sec-WebSocket-Accept 计算用）。
@@ -137,10 +138,22 @@ func (c *wsConn) readFrame() (int, []byte, error) {
 	return opcode, payload, nil
 }
 
+// wsWriteTimeout 单帧写超时。
+//
+// 对端不读（浏览器已关标签、半开连接、网络黑洞）时写操作不能无限阻塞：
+// 兼容层的状态监视与广播都是在共享 goroutine 里向多个会话推送，一个死连接
+// 若把写操作吊住，会把整个推送链路（甚至面板主通道）一起拖死。
+// 网络写 deadline 属「耗时测量/系统时间域」例外，用 time.Now() 即可。
+const wsWriteTimeout = 10 * time.Second
+
 // writeFrame 发送一帧（服务端不掩码）。
 func (c *wsConn) writeFrame(opcode int, payload []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+		defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
+	}
 	n := len(payload)
 	hdr := make([]byte, 10)
 	hdr[0] = 0x80 | byte(opcode) // FIN + opcode

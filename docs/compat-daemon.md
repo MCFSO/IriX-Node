@@ -132,6 +132,9 @@ MCSManager 面板 →「节点」→「新建节点」（面板只有地址、�
   每 25s 下发 `2`（ping），客户端回 `3`（pong）；超过 `pingInterval+pingTimeout`
   没有任何 pong 即断开。纯 WebSocket 建连（`transports:["websocket"]`，面板的
   控制台流就是这种）同样走上这条心跳，不会出现「每 45s 断一次」的反复重连。
+- **事件异步处理**：每个会话一个串行工作协程执行业务事件，读循环只解析帧与
+  心跳（与 MCSM daemon 在 Node 事件循环里异步监听一致）。慢操作（大目录列表、
+  压缩、下载）不会堵住同一会话的 ping/pong 与后续请求。
 - **请求信封**：`{uuid, data}`，daemon 只处理其中的 `data`；但面板的
   **控制台流事件**（`stream/auth`、`stream/input`、`stream/write`、`stream/resize`、
   `stream/detail`）只发 `{data: {...}}`（没有 uuid 字段）。服务端按「有没有 `data` 键」
@@ -159,7 +162,8 @@ MCSManager 面板 →「节点」→「新建节点」（面板只有地址、�
 | `instance/process_config/list` / `instance/process_config/file` | 配置文件存在性检查与读/写（properties/json/txt 文本子集） |
 | `passport/register` | 注册一次性通行证（下载/上传/控制台） |
 | `stream/auth` / `stream/detail` / `stream/input` / `stream/write` / `stream/resize` | 控制台流通道 |
-| `file/list` / `status` / `touch` / `mkdir` / `delete` / `edit` / `copy` / `move` / `compress` | 文件管理 |
+| `file/list` / `status` / `touch` / `mkdir` / `delete` / `copy` / `move` / `compress` | 文件管理 |
+| `file/edit` | **无 `text` = 读取**（回包为文件内容字符串，上限 5 MiB，与 MCSM `MAX_EDIT_SIZE` 一致）；**有 `text`（含空串）= 写入**（回包 `true`）。面板「打开编辑器」发的就是不带 `text` 的 `file/edit` |
 | `file/download_from_url` / `file/download_from_url_stop` | 从链接下载（仅 https，复用节点既有出站校验） |
 | `java_manager/list` | 已安装的 Java 运行时（只读） |
 | `upgrade/info` | 版本信息（明确不支持远程自更新） |
