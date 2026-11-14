@@ -214,3 +214,58 @@ func TestCompatMCSMConsoleCtrlCStopsInstance(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestCompatMCSMCommandBoxCtrlCStops 面板控制台的「发送指令」输入框走的是
+// instance/command（不是 stream/input）。在那里发 ^c 也必须按 Ctrl+C（停止）
+// 处理，不能把 ^c 当命令写进标准输入——否则服务端日志会出现
+// 「Unknown or incomplete command ... ^c<--[HERE]」。
+func TestCompatMCSMCommandBoxCtrlCStops(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMCSM(t, d)
+
+	cwd, err := os.MkdirTemp("", "irix-cmdbox-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+
+	c := newEIOClient(t, base+"/socket.io/")
+	c.connect()
+	if status, data := c.requestRaw("auth", "b1", mcsmTestKey); status != 200 {
+		t.Fatalf("认证失败: %d %s", status, data)
+	}
+
+	// 输入框发 ^c
+	if status, data := c.requestRaw("instance/command", "b2", map[string]any{
+		"instanceUuid": inst.InstanceUuid, "command": "^c",
+	}); status != 200 {
+		t.Fatalf("^c 不应报错: %d %s", status, data)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	stopped := false
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		st := inst.Status
+		inst.mu.Unlock()
+		if st == StatusStopped || st == StatusStopping {
+			stopped = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !stopped {
+		t.Fatal("输入框发 ^c 应触发停止（而不是写入标准输入）")
+	}
+}

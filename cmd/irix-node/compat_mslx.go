@@ -178,7 +178,11 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 		ms.handleNode(w, r, segs[1:])
 	case "java":
 		mslxOK(w, ms.d.mcJavaList(), "获取成功")
-	case "docker", "plugins", "frp", "resource", "tasks", "admin":
+	case "plugins":
+		ms.handlePlugins(w, r, segs[1:])
+	case "tasks":
+		ms.handleTasks(w, r)
+	case "docker", "frp", "resource", "admin":
 		mslxNotImplemented(w, "/api/"+strings.Join(segs, "/"))
 	default:
 		http.NotFound(w, r)
@@ -625,13 +629,27 @@ func (ms *mslxCompat) handleInstance(w http.ResponseWriter, r *http.Request, seg
 	case "icon":
 		// 本节点不提供图标：返回 404，面板会回退默认图标
 		http.NotFound(w, r)
-	case "createServer", "delete", "cancelCreation":
-		mslxFail(w, http.StatusNotImplemented, "irix-node 兼容层不支持通过面板创建/删除实例（请使用节点 API 或配置文件）")
+	case "createServer":
+		ms.handleInstanceCreate(w, r)
+	case "delete":
+		ms.handleInstanceDelete(w, r)
+	case "cancelCreation":
+		ms.handleInstanceCancelCreation(w, r)
 	case "tasks", "players", "export":
 		mslxNotImplemented(w, "/api/instance/"+strings.Join(segs, "/"))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// forgetID 解除实例 uuid ↔ 整数 id 映射（删除实例后调用）。
+func (ms *mslxCompat) forgetID(uuid string) {
+	ms.mu.Lock()
+	if ms.ids != nil {
+		delete(ms.ids.IDs, uuid)
+	}
+	ms.mu.Unlock()
+	ms.saveIDMap()
 }
 
 // handleInstanceList 实例列表。

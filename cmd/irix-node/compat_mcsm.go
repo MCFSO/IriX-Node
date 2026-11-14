@@ -540,7 +540,7 @@ func mcEventInstanceKill(mc *mcsmCompat, s *eioSession, data json.RawMessage) (a
 }
 
 // mcEventInstanceCommand 向实例下发标准输入命令。
-func mcEventInstanceCommand(mc *mcsmCompat, _ *eioSession, data json.RawMessage) (any, error) {
+func mcEventInstanceCommand(mc *mcsmCompat, s *eioSession, data json.RawMessage) (any, error) {
 	var req struct {
 		InstanceUUID string `json:"instanceUuid"`
 		Command      string `json:"command"`
@@ -551,6 +551,13 @@ func mcEventInstanceCommand(mc *mcsmCompat, _ *eioSession, data json.RawMessage)
 	inst := mc.d.Find(req.InstanceUUID)
 	if inst == nil {
 		return nil, fmt.Errorf("实例 %s 不存在", req.InstanceUUID)
+	}
+	// 面板控制台的「发送指令」输入框走的是本事件（不是 stream/input）：
+	// 在那里发 ^c 同样要按 Ctrl+C（停止）处理，否则会把 ^c 当命令写进
+	// 标准输入，服务端日志就会出现 Unknown or incomplete command ... ^c<--[HERE]。
+	if isConsoleInterrupt(req.Command) {
+		handleConsoleInterrupt(mc, s, inst)
+		return map[string]any{"instanceUuid": req.InstanceUUID}, nil
 	}
 	inst.mu.Lock()
 	proc := inst.Proc

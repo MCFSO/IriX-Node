@@ -13,10 +13,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -507,5 +509,155 @@ func TestCompatMSLXStatusCorsOnActualGet(t *testing.T) {
 	}
 	if resp.Header.Get("Access-Control-Allow-Origin") == "" {
 		t.Fatal("实际响应缺少 Access-Control-Allow-Origin，浏览器会丢弃响应")
+	}
+}
+
+// TestCompatMSLXPluginsListEmpty 面板打开「服务端列表」前会拉 /api/plugins/list
+// 注册插件页面；该请求失败会让整页显示「目标节点插件加载失败」并挡住实例操作。
+// 本节点没有 MSLX 插件，必须返回空列表（200）而不是 501。
+func TestCompatMSLXPluginsListEmpty(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+
+	// 认证（面板带 JWT）
+	token := mslxLogin(t, base)
+
+	for _, path := range []string{"/api/plugins/list", "/api/plugins/list?includeSyncInfo=true", "/api/plugins"} {
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("x-user-token", token)
+		resp, err := testClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s 请求失败: %v", path, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s 应 200（否则面板整页报插件加载失败），实际 %d %s", path, resp.StatusCode, raw)
+		}
+		var env struct {
+			Code int      `json:"code"`
+			Data []string `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("%s 响应解析失败: %s", path, raw)
+		}
+		if env.Code != 200 || len(env.Data) != 0 {
+			t.Fatalf("%s 应返回空插件列表: %s", path, raw)
+		}
+	}
+
+	// 写操作必须明确报不支持（而不是静默成功）
+	reqAction, _ := http.NewRequest(http.MethodPost, base+"/api/plugins/action", strings.NewReader(`{"id":"x","action":"enable"}`))
+	reqAction.Header.Set("Content-Type", "application/json")
+	reqAction.Header.Set("x-user-token", token)
+	resp, err := testClient.Do(reqAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("插件写操作应 501 并给出说明，实际 %d", resp.StatusCode)
+	}
+}
+
+// TestCompatMSLXCreateServerAndTasks 面板「创建服务端」走的是内置接口（不是插件）：
+// POST /api/instance/createServer → {serverId}，随后轮询 GET /api/tasks 看状态。
+// 兼容层必须真的把实例建出来，否则用户根本没法创建实例。
+func TestCompatMSLXCreateServerAndTasks(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	root, err := os.MkdirTemp("", "irix-mslx-create-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	cwd := filepath.Join(root, "myserver")
+
+	body := fmt.Sprintf(`{"name":"测试服","core":"server.jar","path":%q,"java":"java","minM":512,"maxM":2048,"ignoreEula":false}`, cwd)
+	req, _ := http.NewRequest(http.MethodPost, base+"/api/instance/createServer", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-token", token)
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("createServer 应 200: %d %s", resp.StatusCode, raw)
+	}
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			ServerID uint32 `json:"serverId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Code != 200 || env.Data.ServerID == 0 {
+		t.Fatalf("createServer 应返回 serverId: %s", raw)
+	}
+
+	listReq, _ := http.NewRequest(http.MethodGet, base+"/api/instance/list", nil)
+	listReq.Header.Set("x-user-token", token)
+	lr, err := testClient.Do(listReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lraw, _ := io.ReadAll(lr.Body)
+	lr.Body.Close()
+	if !strings.Contains(string(lraw), "测试服") {
+		t.Fatalf("实例列表应包含新建实例: %s", lraw)
+	}
+
+	// 目录与 eula 已就绪
+	if _, err := os.Stat(filepath.Join(cwd, "eula.txt")); err != nil {
+		t.Fatalf("应写入 eula.txt: %v", err)
+	}
+
+	// 任务列表：创建任务应显示为已完成（state=2），面板据此停止轮询
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		tr, _ := http.NewRequest(http.MethodGet, base+"/api/tasks", nil)
+		tr.Header.Set("x-user-token", token)
+		trs, err := testClient.Do(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		traw, _ := io.ReadAll(trs.Body)
+		trs.Body.Close()
+		var taskEnv struct {
+			Data []struct {
+				ID    string `json:"id"`
+				State int    `json:"state"`
+				Title string `json:"title"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(traw, &taskEnv)
+		if len(taskEnv.Data) > 0 && taskEnv.Data[0].State == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("创建任务应完成为 state=2: %s", traw)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 删除实例（面板「删除服务端」）
+	delBody := fmt.Sprintf(`{"id":%d,"deleteFiles":true}`, env.Data.ServerID)
+	dr, _ := http.NewRequest(http.MethodPost, base+"/api/instance/delete", strings.NewReader(delBody))
+	dr.Header.Set("Content-Type", "application/json")
+	dr.Header.Set("x-user-token", token)
+	drs, err := testClient.Do(dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dres, _ := io.ReadAll(drs.Body)
+	drs.Body.Close()
+	if drs.StatusCode != http.StatusOK {
+		t.Fatalf("delete 应 200: %d %s", drs.StatusCode, dres)
 	}
 }

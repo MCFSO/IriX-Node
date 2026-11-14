@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -343,6 +344,22 @@ func (c *mslxHubConn) handleInvocation(msg srMessage) {
 		command, cmdErr := hubStringArg(msg.Arguments, 1)
 		if cmdErr != nil || strings.TrimSpace(command) == "" {
 			c.sendInvocation("CommandResult", map[string]any{"success": false, "message": "命令不能为空"})
+			c.complete(msg.InvocationID, nil, "")
+			return
+		}
+		// 与 MCSM 兼容层一致：^c / 0x03 等按 Ctrl+C（停止实例）处理，
+		// 不能当命令写进标准输入（服务端会报 Unknown or incomplete command ^c）。
+		if isConsoleInterrupt(command) {
+			if inst := c.instanceByHubID(instanceID); inst != nil {
+				alog.Printf("兼容层：控制台收到 Ctrl+C，按停止处理（实例 %s）", inst.Config.Nickname)
+				safeGo("MSLX 兼容层控制台中断", func() {
+					if err := c.srv.d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
+						alog.Printf("MSLX 兼容层：Ctrl+C 停止实例失败（%s）：%v", inst.Config.Nickname, err)
+					}
+				})
+				c.sendInvocation("ReceiveLog", "[irix-node] 收到 Ctrl+C：已向实例发送停止指令\r\n")
+			}
+			c.sendInvocation("CommandResult", map[string]any{"success": true, "message": "已按 Ctrl+C 停止实例"})
 			c.complete(msg.InvocationID, nil, "")
 			return
 		}
