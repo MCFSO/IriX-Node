@@ -171,6 +171,8 @@ type mslxCompat struct {
 	linkKey   string
 	slaveMode bool
 	node      mslxNodeState
+	// nodeVerify 主节点签发令牌的核对缓存（key = 令牌，30 秒）
+	nodeVerify mslxNodeVerifyCache
 
 	ids *mslxIDMap // 实例 uuid ↔ 整数 id 映射（持久化于 {data}/compat-mslx-ids.json）
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。

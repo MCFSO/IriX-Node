@@ -134,16 +134,30 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 其余接口需要有效 JWT
+	// 面板探活：MSLX WebPanel 判定子节点在线的方式是直接请求
+	// GET {节点}/api/status（带 x-node-id 头、3 秒超时）。原生 MSLX 在这里走
+	// 节点授权（x-node-id + 主节点签发的节点令牌）；我们无法验证主节点签名的
+	// 令牌，因此该接口按「公开状态」处理——与 MSLX 匿名访问时的行为一致
+	// （返回未登录用户 + 版本信息），不涉及任何账户数据。
+	if segs[0] == "status" && len(segs) == 1 {
+		ms.handleStatus(w, r)
+		return
+	}
+
+	// 其余接口需要有效 JWT：先认本节点账户令牌，
+	// 再认「主节点代理」请求（x-node-id + 主节点签发的节点令牌 → 向主节点核对）
 	claims, ok := ms.authenticate(r)
+	if !ok {
+		if c, okNode := ms.authorizeNodeRequest(r); okNode {
+			claims, ok = c, true
+		}
+	}
 	if !ok {
 		mslxFail(w, http.StatusUnauthorized, "未登录或登录已过期，请重新登录")
 		return
 	}
 
 	switch segs[0] {
-	case "status":
-		ms.handleStatus(w, r)
 	case "update":
 		mslxOK(w, map[string]any{
 			"currentVersion":  Version,
@@ -411,18 +425,55 @@ func (ms *mslxCompat) handleUser(w http.ResponseWriter, r *http.Request, segs []
 }
 
 // handleStatus 节点运行状态。
+// handleStatus 节点状态。
+//
+// 该接口同时是 MSLX 面板的子节点探活入口（GET /api/status + x-node-id，3 秒超时），
+// 因此**允许匿名**访问；但匿名/节点代理请求只返回公开信息（版本、节点标识、
+// 链接状态），主机指标与实例统计仅对通过本节点账户认证的调用者返回，
+// 避免把兼容层端口变成信息泄露面。
 func (ms *mslxCompat) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d := ms.d
+	link := ms.currentNodeLink()
+	pub := map[string]any{
+		"version":         Version,
+		"daemonName":      "irix-node",
+		"slaveMode":       ms.slaveMode,
+		"linked":          link != nil,
+		"protocolVersion": mslxNodeProtocolVersion,
+		"time":            timesys.Now().UnixMilli(),
+	}
+	if link != nil {
+		pub["nodeId"] = link.NodeID
+	}
+	authorized := false
+	if _, ok := ms.authenticate(r); ok {
+		authorized = true
+	} else if _, ok := ms.authorizeNodeRequest(r); ok {
+		// 主节点代理请求（带节点令牌）：主节点自己也会用该接口做节点同步，
+		// 通过核验后同样返回完整信息。
+		authorized = true
+	}
+	if !authorized {
+		mslxOK(w, pub, "获取成功")
+		return
+	}
 	total := len(d.mcAllInstanceDetails())
 	running := d.CountRunning()
-	mslxOK(w, map[string]any{
+	full := map[string]any{
 		"version":         Version,
 		"daemonName":      "irix-node",
 		"instanceTotal":   total,
 		"instanceRunning": running,
 		"system":          mcSystemView(d),
+		"slaveMode":       ms.slaveMode,
+		"linked":          link != nil,
+		"protocolVersion": mslxNodeProtocolVersion,
 		"time":            timesys.Now().UnixMilli(),
-	}, "获取成功")
+	}
+	if link != nil {
+		full["nodeId"] = link.NodeID
+	}
+	mslxOK(w, full, "获取成功")
 }
 
 // ---------------------------------------------------------------------------

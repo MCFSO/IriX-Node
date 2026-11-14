@@ -243,6 +243,11 @@ func (ms *mslxCompat) handleNodeAcceptLink(w http.ResponseWriter, r *http.Reques
 	}
 	ms.setNodeLink(link)
 	alog.Printf("MSLX 兼容层：已与主节点 %s 建立链接（nodeId=%s）", masterURL, link.NodeID)
+	// 立即上报一次：主节点以「10 秒内有上报」判定节点在线，等 2 秒窗口
+	// 会让面板先闪一下离线。
+	if status, err := ms.reportNodeStats(&http.Client{Timeout: 3 * time.Second}, link); err != nil {
+		alog.Printf("MSLX 兼容层：首次状态上报失败（HTTP %d, %v），将继续每 2 秒重试", status, err)
+	}
 	mslxOK(w, map[string]any{"nodeId": link.NodeID, "commsKey": link.CommsKey}, "链接成功")
 }
 
@@ -487,4 +492,112 @@ func roundPercent(v float64) float64 {
 		return 100
 	}
 	return float64(int(v*10+0.5)) / 10
+}
+
+// ---------------------------------------------------------------------------
+// 主节点代理请求的鉴权
+// ---------------------------------------------------------------------------
+
+// mslxNodeVerifyCache 主节点校验结果的短缓存（key = 令牌），
+// 避免面板每个请求都回源主节点（面板会并发打很多接口）。
+type mslxNodeVerifyCache struct {
+	mu    sync.Mutex
+	items map[string]mslxNodeVerifyItem
+}
+
+type mslxNodeVerifyItem struct {
+	claims  *mslxClaims
+	expires time.Time
+}
+
+// authorizeNodeRequest 校验「主节点代理」请求。
+//
+// MSLX 面板在纳管子节点后，会带着 x-node-id + 主节点签发的节点令牌直接请求
+// 子节点接口。原生子节点把令牌回源到主节点 /api/node/verify-token（带
+// x-api-key = commsKey）验证；我们无法本地验证主节点签名，因此同样回源核对：
+// 主节点返回 200 即视为已授权（admin 角色由主节点给出的 role 决定）。
+func (ms *mslxCompat) authorizeNodeRequest(r *http.Request) (*mslxClaims, bool) {
+	link := ms.currentNodeLink()
+	if link == nil {
+		return nil, false
+	}
+	nodeID := strings.TrimSpace(r.Header.Get("x-node-id"))
+	if nodeID == "" {
+		nodeID = strings.TrimSpace(r.URL.Query().Get("x-node-id"))
+	}
+	if nodeID == "" || nodeID != link.NodeID {
+		return nil, false
+	}
+	tok := tokenFromRequest(r)
+	if tok == "" {
+		// 面板探活（/api/status）走的是无令牌的节点请求：已在上游按公开
+		// 状态处理；其余接口无令牌一律拒绝。
+		return nil, false
+	}
+	// 命中缓存
+	ms.nodeVerify.mu.Lock()
+	if ms.nodeVerify.items == nil {
+		ms.nodeVerify.items = map[string]mslxNodeVerifyItem{}
+	}
+	if item, ok := ms.nodeVerify.items[tok]; ok && timesys.Now().Before(item.expires) {
+		ms.nodeVerify.mu.Unlock()
+		return item.claims, true
+	}
+	ms.nodeVerify.mu.Unlock()
+
+	claims, ok := verifyNodeTokenAtMaster(link, tok)
+	if !ok {
+		return nil, false
+	}
+	ms.nodeVerify.mu.Lock()
+	if ms.nodeVerify.items == nil {
+		ms.nodeVerify.items = map[string]mslxNodeVerifyItem{}
+	}
+	// 简单的容量保护：超过 512 条就整体清空（节点侧并发有限，够用）
+	if len(ms.nodeVerify.items) > 512 {
+		ms.nodeVerify.items = map[string]mslxNodeVerifyItem{}
+	}
+	ms.nodeVerify.items[tok] = mslxNodeVerifyItem{claims: claims, expires: timesys.Now().Add(30 * time.Second)}
+	ms.nodeVerify.mu.Unlock()
+	return claims, true
+}
+
+// verifyNodeTokenAtMaster 向主节点核对节点令牌。
+func verifyNodeTokenAtMaster(link *mslxNodeLink, token string) (*mslxClaims, bool) {
+	body, err := json.Marshal(map[string]any{"token": token})
+	if err != nil {
+		return nil, false
+	}
+	req, err := http.NewRequest(http.MethodPost, link.MasterURL+"/api/node/verify-token", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", link.CommsKey)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			UserID string `json:"userId"`
+			Name   string `json:"name"`
+			Role   string `json:"role"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Code != 200 {
+		return nil, false
+	}
+	return &mslxClaims{
+		UserID: env.Data.UserID,
+		Name:   env.Data.Name,
+		Role:   env.Data.Role,
+	}, true
 }

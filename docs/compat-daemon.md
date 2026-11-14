@@ -202,7 +202,9 @@ MSLX 的节点纳管不是普通 REST 登录，而是**主节点与子节点的�
 | 2 | 主节点 | `POST {节点}/api/node/accept-link` | 带 `linkKey`、`pairingId`、`masterUrl`、`masterId` |
 | 3 | 子节点（本节点） | `GET {主节点}/api/node/protocol?pairingId=…` | 反向确认主节点认可本次配对（5 秒超时） |
 | 4 | 本节点返回 | `{code:200,message:"链接成功",data:{nodeId,commsKey}}` | 关系落盘 `{data}/compat-mslx-node.json`（0600） |
-| 5 | 本节点 | `POST {主节点}/api/node/report-stats` | 每 2 秒上报 `{cpu,memTotal,memUsed,memUsage,timestamp}`，头 `x-api-key: commsKey`；主节点回 `410` 表示关系撤销 → 自动清除本地链接 |
+| 5 | 本节点 | `POST {主节点}/api/node/report-stats` | 每 2 秒上报 `{cpu,memTotal,memUsed,memUsage,timestamp}`，头 `x-api-key: commsKey`；主节点回 `410` 表示关系撤销 → 自动清除本地链接。链接成功后**立即上报一次**，避免面板先闪一下离线 |
+| 6 | 面板 | `GET {节点}/api/status`（头 `x-node-id`） | **面板判定子节点在线就靠这个探活**（3 秒超时）。因此该接口匿名可访问，但匿名只返回公开信息（版本 / nodeId / 链接状态）；主机指标与实例统计仅对通过本节点账户或主节点核验的调用返回 |
+| 7 | 面板 | 其余 `{节点}/api/...` + `x-node-id` + 主节点签发的节点令牌 | 本节点把令牌回源到主节点 `POST {主节点}/api/node/verify-token`（头 `x-api-key: commsKey`）核对，通过后按该身份放行（结果缓存 30 秒） |
 
 另有 `POST /api/node/update-link`（主节点同步地址变更）与 `POST /api/node/remove-link`
 （幂等解除）；`GET /api/node/status`（需登录）可查看当前链接状态。
@@ -235,7 +237,7 @@ WebPanel 后端地址填 `http://<本机IP>:7891`（与 `compat.mslx.port` 一�
 | `GET /api/ping` | 存活探测（匿名） |
 | `POST /api/auth/login` | 登录签发 JWT（匿名；5 分钟内 10 次失败封禁来源 60 分钟） |
 | `GET /api/user/me`、`POST /api/user/logout` | 当前账号 / 退出（无服务端会话状态） |
-| `GET /api/status` | 节点运行状态与主机指标 |
+| `GET /api/status` | 节点运行状态。**匿名可访问**（面板探活用）：匿名只返回版本 / nodeId / 链接状态；认证或主节点核验后返回主机指标与实例统计 |
 | `GET /api/node/protocol` | 协议标识（匿名，供面板识别） |
 | `GET /api/update/info` | 版本信息（不支持自更新） |
 | `GET /api/instance/list` | 实例列表（`id/name/basePath/status/statusText/…`） |

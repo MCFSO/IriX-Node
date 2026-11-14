@@ -32,6 +32,7 @@ type fakeMSLXMaster struct {
 	reports   []fakeStats // 收到的状态上报
 	keys      []string    // 收到的 x-api-key
 	gone      bool        // 回 410 模拟关系撤销
+	commsKey  string      // 链接后主节点登记的通讯密钥（verify-token 校验用）
 }
 
 type fakeStats struct {
@@ -315,5 +316,137 @@ func TestCompatMSLXNodeRejectsNonSlaveMode(t *testing.T) {
 	})
 	if code != http.StatusBadRequest || !strings.Contains(out["message"].(string), "子节点模式") {
 		t.Fatalf("非子节点模式应拒绝: %d %v", code, out)
+	}
+}
+
+// TestCompatMSLXStatusProbeIsAnonymous 面板判定子节点在线的方式是
+// GET {节点}/api/status（带 x-node-id 头、3 秒超时）—— 必须匿名 200，
+// 否则节点永远显示离线。
+func TestCompatMSLXStatusProbeIsAnonymous(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+
+	for _, withHeader := range []bool{false, true} {
+		req, err := http.NewRequest(http.MethodGet, base+"/api/status", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if withHeader {
+			req.Header.Set("x-node-id", "probe-node")
+		}
+		resp, err := testClient.Do(req)
+		if err != nil {
+			t.Fatalf("探活请求失败: %v", err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("探活必须 200（x-node-id=%v），实际 %d %s", withHeader, resp.StatusCode, raw)
+		}
+		var env struct {
+			Code int            `json:"code"`
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil || env.Code != 200 {
+			t.Fatalf("探活响应异常: %s", raw)
+		}
+		if env.Data["version"] == nil {
+			t.Fatalf("探活响应应含版本信息: %s", raw)
+		}
+		// 匿名探活不返回主机指标/实例统计（避免信息泄露）
+		if _, ok := env.Data["system"]; ok {
+			t.Fatalf("匿名探活不应返回主机指标: %s", raw)
+		}
+	}
+}
+
+// TestCompatMSLXNodeProxiedRequest 主节点代理请求（x-node-id + 主节点令牌）
+// 必须经主节点 /api/node/verify-token 核对后放行。
+func TestCompatMSLXNodeProxiedRequest(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	const linkKey = "qa-mslx-link-key-000000000003"
+	base := startTestCompat(t, d, &nodeOptions{
+		CompatMSLXEnabled: true,
+		CompatMSLXPort:    0,
+		CompatMSLXUser:    "admin",
+		CompatMSLXPass:    mslxTestPass,
+		CompatMSLXLinkKey: linkKey,
+	}, "mslx")
+
+	pairing := strings.Repeat("d", 32)
+	master := newFakeMSLXMaster(t, pairing)
+	// 主节点侧增加 verify-token 端点
+	master.srv.Config.Handler.(*http.ServeMux).HandleFunc("/api/node/verify-token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != master.commsKey {
+			writeCompatJSON(w, http.StatusUnauthorized, mslxResponse{Code: 401, Message: "无效的通讯密钥"})
+			return
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Token != "node-token-ok" {
+			writeCompatJSON(w, http.StatusUnauthorized, mslxResponse{Code: 401, Message: "无效的节点令牌"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200, "message": "验证成功",
+			"data": map[string]any{"userId": "u-1", "name": "admin", "role": "admin"},
+		})
+	})
+
+	code, out := postJSONToCompat(t, base+"/api/node/accept-link", map[string]any{
+		"protocolVersion": mslxNodeProtocolVersion,
+		"masterId":        "m-1",
+		"masterUrl":       master.srv.URL,
+		"linkKey":         linkKey,
+		"pairingId":       pairing,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("链接失败: %d %v", code, out)
+	}
+	data, _ := out["data"].(map[string]any)
+	nodeID, _ := data["nodeId"].(string)
+	master.mu.Lock()
+	master.commsKey, _ = data["commsKey"].(string)
+	master.mu.Unlock()
+
+	// 无令牌的节点请求（除 status 外）必须 401
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/instance/list", nil)
+	req.Header.Set("x-node-id", nodeID)
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("无令牌的节点请求应 401，实际 %d", resp.StatusCode)
+	}
+
+	// 主节点核验通过的令牌 → 放行
+	req, _ = http.NewRequest(http.MethodGet, base+"/api/instance/list", nil)
+	req.Header.Set("x-node-id", nodeID)
+	req.Header.Set("x-user-token", "node-token-ok")
+	resp, err = testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("主节点核验通过的请求应放行，实际 %d %s", resp.StatusCode, raw)
+	}
+
+	// 主节点拒绝的令牌 → 401
+	req, _ = http.NewRequest(http.MethodGet, base+"/api/instance/list", nil)
+	req.Header.Set("x-node-id", nodeID)
+	req.Header.Set("x-user-token", "bad-token")
+	resp, err = testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("主节点拒绝的令牌应 401，实际 %d", resp.StatusCode)
 	}
 }
