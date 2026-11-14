@@ -79,10 +79,11 @@ func (ms *mslxCompat) handler() http.Handler {
 			http.Error(w, "来源不在 compat.mslx.allowPanelIps 允许范围内", http.StatusForbidden)
 			return
 		}
-		// 浏览器前端跨源访问需要的响应头（节点自身 CORS 中间件对本前缀已生效，
-		// 这里再补一次，保证单独部署时也可用）。
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, x-user-token, x-api-key, Authorization")
+		// 跨源响应头由节点自身的 CORS 中间件按来源白名单统一下发（含
+		// Access-Control-Allow-Origin / -Credentials）。这里**不再**写
+		// Access-Control-Allow-Origin: * —— 那会绕过白名单让任意站点读取
+		// 兼容层响应，并与中间件下发的 Allow-Credentials 冲突。
+		w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

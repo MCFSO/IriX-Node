@@ -28,8 +28,12 @@ import (
 // corsAllowedHeaders 固定放行的跨源请求头（节点实际读取的全部请求头）。
 // 设备绑定会话的 4 个证明头也在内：浏览器 WebCrypto 客户端可正常预检；
 // 浏览器 WebSocket 仍无法设置请求头，required 模式仅桌面客户端可用。
+// 兼容层（第三方面板）跨源调用使用的小写自定义头同样在内：
+// MSLX 面板对子节点发的是 X-Node-Id + X-User-Token（主节点签发的节点令牌），
+// MCSM 面板走 X-Api-Key；缺任何一个，浏览器预检就会失败——面板随即判定节点离线。
 const corsAllowedHeaders = "Authorization, Content-Type, X-Auth-Token, X-Vault-Token, " +
-	"X-Device-Id, X-Session-Timestamp, X-Session-Seq, X-Session-Proof"
+	"X-Device-Id, X-Session-Timestamp, X-Session-Seq, X-Session-Proof, " +
+	"X-Node-Id, X-User-Token, X-Api-Key"
 
 // setCorsOrigins 解析额外的跨源来源白名单（-cors-origins / 配置文件 corsOrigins，
 // 逗号分隔，形如 https://panel.example.com，可带端口；大小写不敏感）。

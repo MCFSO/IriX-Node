@@ -450,3 +450,62 @@ func TestCompatMSLXNodeProxiedRequest(t *testing.T) {
 		t.Fatalf("主节点拒绝的令牌应 401，实际 %d", resp.StatusCode)
 	}
 }
+
+// TestCompatMSLXCorsPreflightForNodeProbe 面板对子节点的探活是**跨源**请求，
+// 带 x-node-id / x-user-token 两个自定义头，浏览器会先发预检。
+// 允许头清单里缺任何一个，预检就会失败，面板随即判定节点离线。
+func TestCompatMSLXCorsPreflightForNodeProbe(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+
+	req, err := http.NewRequest(http.MethodOptions, base+"/api/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://localhost:1027")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "x-node-id,x-user-token")
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatalf("预检请求失败: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		t.Fatalf("预检应 204/200，实际 %d", resp.StatusCode)
+	}
+	allowOrigin := resp.Header.Get("Access-Control-Allow-Origin")
+	if allowOrigin == "" {
+		t.Fatalf("预检必须回 Access-Control-Allow-Origin（来源 http://localhost:1027）")
+	}
+	allowHeaders := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers"))
+	for _, h := range []string{"x-node-id", "x-user-token", "x-api-key", "content-type"} {
+		if !strings.Contains(allowHeaders, h) {
+			t.Fatalf("Allow-Headers 缺少 %s（面板探活会因预检失败而判离线）：%q", h, allowHeaders)
+		}
+	}
+	t.Logf("[验证] 预检放行：origin=%s headers=%s", allowOrigin, allowHeaders)
+}
+
+// TestCompatMSLXStatusCorsOnActualGet 实际 GET 也要带 CORS 头，否则浏览器读不到响应。
+func TestCompatMSLXStatusCorsOnActualGet(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/api/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://localhost:1027")
+	req.Header.Set("x-node-id", "node-x")
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("探活应 200，实际 %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") == "" {
+		t.Fatal("实际响应缺少 Access-Control-Allow-Origin，浏览器会丢弃响应")
+	}
+}

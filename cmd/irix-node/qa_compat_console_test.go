@@ -121,3 +121,96 @@ func TestCompatMCSMConsoleSurvivesLateStart(t *testing.T) {
 		t.Fatal("实例后启动时控制台应自动收到实时输出（否则用户只能退出重进）")
 	}
 }
+
+// TestIsConsoleInterrupt Ctrl+C 的各种写法都要识别，普通命令不能误判。
+func TestIsConsoleInterrupt(t *testing.T) {
+	yes := []string{"^c", "^C", "\x03", "ctrl+c", "CTRL+C", " Ctrl+C ", "^c\n", "^c\r\n"}
+	for _, s := range yes {
+		if !isConsoleInterrupt(s) {
+			t.Fatalf("%q 应识别为 Ctrl+C", s)
+		}
+	}
+	no := []string{"stop", "say ^c", "c", "^", "", "list", "help ^C"}
+	for _, s := range no {
+		if isConsoleInterrupt(s) {
+			t.Fatalf("%q 不应识别为 Ctrl+C", s)
+		}
+	}
+}
+
+// TestCompatMCSMConsoleCtrlCStopsInstance 控制台发 ^c 必须按「停止」处理，
+// 而不是把 ^c 当成一行命令写给服务端（线上日志会变成
+// 「Unknown or incomplete command ... ^c<--[HERE]」）。
+func TestCompatMCSMConsoleCtrlCStopsInstance(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMCSM(t, d)
+	addr := strings.TrimPrefix(base, "http://")
+
+	// 注意：这里不用 t.TempDir()——停止实例后子进程可能短暂占住工作目录，
+	// Windows 上会让 TempDir 清理报错（与被测行为无关）。
+	cwd, err := os.MkdirTemp("", "irix-ctrlc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+
+	main := newEIOClient(t, base+"/socket.io/")
+	main.connect()
+	if status, data := main.requestRaw("auth", "k1", mcsmTestKey); status != 200 {
+		t.Fatalf("认证失败: %d %s", status, data)
+	}
+	const pass = "qa-ctrlc-pass"
+	if status, data := main.requestRaw("passport/register", "k2", map[string]any{
+		"name": "stream_channel", "password": pass,
+		"parameter": map[string]any{"instanceUuid": inst.InstanceUuid},
+	}); status != 200 {
+		t.Fatalf("注册通行证失败: %d %s", status, data)
+	}
+	ws := openStreamClient(t, addr)
+	defer ws.conn.Close()
+	ws.sendTextAny(`42["stream/auth",{"data":{"password":"` + pass + `"}}]`)
+	if pkt := ws.waitSocketPacket("42", 5*time.Second); !strings.Contains(pkt, `"data":true`) {
+		t.Fatalf("stream/auth 应成功: %q", pkt)
+	}
+
+	// 面板的指令输入框发 ^c
+	ws.sendTextAny(`42["stream/input",{"data":{"command":"^c"}}]`)
+
+	// 应被翻译成停止：实例状态在期限内置为已停止/停止中
+	deadline := time.Now().Add(15 * time.Second)
+	stopped := false
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		st := inst.Status
+		inst.mu.Unlock()
+		if st == StatusStopped || st == StatusStopping {
+			stopped = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !stopped {
+		t.Fatal("^c 应触发停止（而不是作为命令写入标准输入）")
+	}
+	// 等子进程真正退出：Windows 上进程未退干净会占住工作目录，
+	// 导致 TempDir 清理失败（与被测逻辑无关）。
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		proc := inst.Proc
+		inst.mu.Unlock()
+		if proc == nil || !proc.IsRunning() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

@@ -945,6 +945,38 @@ func mcEventStreamDetail(mc *mcsmCompat, s *eioSession, _ json.RawMessage) (any,
 	return detail, nil
 }
 
+// isConsoleInterrupt 判断输入是否为「Ctrl+C」。
+//
+// 面板的控制台是**指令输入框**而不是原始终端：用户按 Ctrl+C 并不会产生 0x03，
+// 常见的是直接发来字面量 "^c"（也有客户端发 0x03 或 "^C"/"ctrl+c"）。
+// 这些都不是服务端能理解的命令：按命令写入会让服务端日志里出现
+// 「Unknown or incomplete command ... ^c<--[HERE]」，用户的本意却是中断/停止。
+func isConsoleInterrupt(s string) bool {
+	t := strings.TrimSpace(strings.TrimRight(s, "\r\n"))
+	switch t {
+	case "\x03", "^c", "^C", "ctrl+c", "Ctrl+c", "Ctrl+C", "ctrl-C", "Ctrl-C", "CTRL+C", "ctrl-c", "CTRL-C":
+		return true
+	}
+	return false
+}
+
+// handleConsoleInterrupt 把「Ctrl+C」翻译成本节点的停止动作。
+//
+// 与真实终端的 Ctrl+C 语义对齐：向实例发停止指令（实例配置的 stopCommand），
+// 超时由既有停止逻辑强制终止；同时把一行提示推给控制台，避免用户以为没反应。
+func handleConsoleInterrupt(mc *mcsmCompat, s *eioSession, inst *Instance) {
+	alog.Printf("兼容层：控制台收到 Ctrl+C，按停止处理（实例 %s）", inst.Config.Nickname)
+	safeGo("兼容层控制台中断", func() {
+		if err := mc.d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
+			alog.Printf("兼容层：Ctrl+C 停止实例失败（%s）：%v", inst.Config.Nickname, err)
+		}
+	})
+	s.push("instance/stdout", map[string]any{
+		"instanceUuid": inst.InstanceUuid,
+		"text":         "[irix-node] 收到 Ctrl+C：已向实例发送停止指令（等同面板「停止」）\n",
+	})
+}
+
 // mcEventStreamInput 控制台命令行输入。
 func mcEventStreamInput(mc *mcsmCompat, s *eioSession, data json.RawMessage) (any, error) {
 	var req struct {
@@ -959,6 +991,10 @@ func mcEventStreamInput(mc *mcsmCompat, s *eioSession, data json.RawMessage) (an
 	inst := mc.d.Find(uuid)
 	if inst == nil {
 		return nil, errors.New("控制台会话未绑定实例")
+	}
+	if isConsoleInterrupt(req.Command) {
+		handleConsoleInterrupt(mc, s, inst)
+		return true, nil
 	}
 	inst.mu.Lock()
 	proc := inst.Proc
@@ -983,6 +1019,10 @@ func mcEventStreamWrite(mc *mcsmCompat, s *eioSession, data json.RawMessage) (an
 	inst := mc.d.Find(uuid)
 	if inst == nil {
 		return nil, errors.New("控制台会话未绑定实例")
+	}
+	if isConsoleInterrupt(req.Input) {
+		handleConsoleInterrupt(mc, s, inst)
+		return true, nil
 	}
 	inst.mu.Lock()
 	proc := inst.Proc
