@@ -63,6 +63,11 @@ type mcsmCompat struct {
 	// version 上报给面板的版本号（空 = 用本节点 Version）；
 	// 面板按主次版本号比较，配成面板期望值可消除「有更新」红字。
 	version string
+	// pingIv / pingTo engine.io 心跳参数（0 = 用默认 25s/20s）。
+	// 挂在实例上而非包级变量：测试可压低间隔覆盖心跳分支，且不会与
+	// 其它会话的心跳 goroutine 产生数据竞争。
+	pingIv time.Duration
+	pingTo time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*eioSession   // sid → 会话
@@ -565,6 +570,22 @@ func (d *Daemon) compatAddrOf(layer string) string {
 		}
 	}
 	return ""
+}
+
+// pingInterval 返回 engine.io 服务端 ping 间隔。
+func (mc *mcsmCompat) pingInterval() time.Duration {
+	if mc != nil && mc.pingIv > 0 {
+		return mc.pingIv
+	}
+	return eioPingIntervalDefault
+}
+
+// pingTimeout 返回等待客户端 pong 的宽限时间。
+func (mc *mcsmCompat) pingTimeout() time.Duration {
+	if mc != nil && mc.pingTo > 0 {
+		return mc.pingTo
+	}
+	return eioPingTimeoutDefault
 }
 
 // reportVersion 返回上报给 MCSManager 面板的版本号。

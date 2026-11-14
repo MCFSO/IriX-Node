@@ -33,14 +33,16 @@ const (
 	eioMaxSessions = 256              // 同时在线会话上限（防资源耗尽）
 )
 
-// engine.io 心跳参数。
+// engine.io 心跳默认参数。
 //
-// 声明为 var 而非 const：WebSocket 传输必须由服务端按时下发 ping（"2"），
-// 否则 socket.io-client 会在 pingInterval+pingTimeout 后主动断开并重连
-// （表现为每 45s 断一次）。测试需要压低这些值以覆盖心跳与超时分支。
-var (
-	eioPingInterval = 25 * time.Second // 服务端下发 ping 的间隔
-	eioPingTimeout  = 20 * time.Second // 等待 pong 的宽限
+// WebSocket 传输必须由服务端按时下发 ping（"2"），否则 socket.io-client 会在
+// pingInterval+pingTimeout 后主动断开并重连（线上表现为每 45s 断一次）。
+// 实际取值挂在 mcsmCompat 上（pingIv/pingTo），默认即下面两项；测试通过
+// 该实例字段压低间隔，而不是改包级变量——包级可变状态会被其它会话的
+// 心跳 goroutine 并发读取，-race 下会直接报数据竞争。
+const (
+	eioPingIntervalDefault = 25 * time.Second // 服务端下发 ping 的间隔
+	eioPingTimeoutDefault  = 20 * time.Second // 等待 pong 的宽限
 )
 
 // eioSession 一个 engine.io 会话（先轮询，可升级为 WebSocket）。
@@ -171,8 +173,8 @@ func (mc *mcsmCompat) pollingOpen(w http.ResponseWriter, r *http.Request) {
 	handshake := map[string]any{
 		"sid":          s.sid,
 		"upgrades":     []string{"websocket"},
-		"pingInterval": int(eioPingInterval / time.Millisecond),
-		"pingTimeout":  int(eioPingTimeout / time.Millisecond),
+		"pingInterval": int(mc.pingInterval() / time.Millisecond),
+		"pingTimeout":  int(mc.pingTimeout() / time.Millisecond),
 		"maxPayload":   eioMaxPayload,
 	}
 	body, _ := json.Marshal(handshake)
@@ -239,8 +241,8 @@ func (mc *mcsmCompat) websocketTransport(w http.ResponseWriter, r *http.Request,
 		handshake := map[string]any{
 			"sid":          s.sid,
 			"upgrades":     []string{},
-			"pingInterval": int(eioPingInterval / time.Millisecond),
-			"pingTimeout":  int(eioPingTimeout / time.Millisecond),
+			"pingInterval": int(mc.pingInterval() / time.Millisecond),
+			"pingTimeout":  int(mc.pingTimeout() / time.Millisecond),
 			"maxPayload":   eioMaxPayload,
 		}
 		body, _ := json.Marshal(handshake)
@@ -352,8 +354,9 @@ func (s *eioSession) startWSHeartbeat() {
 	closedCh := s.closedCh
 	s.mu.Unlock()
 
+	interval, timeout := s.srv.pingInterval(), s.srv.pingTimeout()
 	safeGo("engine.io 心跳", func() {
-		t := time.NewTicker(eioPingInterval)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
@@ -369,7 +372,7 @@ func (s *eioSession) startWSHeartbeat() {
 				return
 			}
 			// 超过 pingInterval+pingTimeout 没有任何 pong：判定对端失联
-			if idle > eioPingInterval+eioPingTimeout {
+			if idle > interval+timeout {
 				s.close()
 				return
 			}

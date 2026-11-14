@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
@@ -206,14 +207,32 @@ func TestCompatMCSMStreamAuthRejectsWrongPass(t *testing.T) {
 
 // TestCompatMCSMWebSocketHeartbeat WebSocket 传输必须由服务端下发 engine.io ping，
 // 且对端不回复 pong 时按超时断开（否则客户端 45s 后自己重连）。
+//
+// 心跳间隔通过**该层实例字段**压低（不是包级变量）——包级可变状态会被其它
+// 会话的心跳 goroutine 并发读取，-race 下会直接报数据竞争。
 func TestCompatMCSMWebSocketHeartbeat(t *testing.T) {
-	oldInterval, oldTimeout := eioPingInterval, eioPingTimeout
-	eioPingInterval, eioPingTimeout = 150*time.Millisecond, 150*time.Millisecond
-	t.Cleanup(func() { eioPingInterval, eioPingTimeout = oldInterval, oldTimeout })
-
 	d, _ := newTestDaemon(t)
-	base := setupTestMCSM(t, d)
-	addr := strings.TrimPrefix(base, "http://")
+	// 先完成凭据/配置解析并压低心跳，再启动监听
+	d.setupCompat(&nodeOptions{
+		CompatMCSMEnabled: true,
+		CompatMCSMPort:    0,
+		CompatMCSMKey:     mcsmTestKey,
+	})
+	if d.compatMC == nil {
+		t.Fatal("MCSManager 兼容层未初始化")
+	}
+	d.compatMC.pingIv = 150 * time.Millisecond
+	d.compatMC.pingTo = 150 * time.Millisecond
+	d.startCompatServers()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = d.stopCompatServers(ctx)
+	})
+	addr := d.compatAddrOf("mcsm")
+	if addr == "" {
+		t.Fatal("MCSManager 兼容层未监听")
+	}
 
 	// 正常回 pong：连接应保持
 	ws := openStreamClient(t, addr)
