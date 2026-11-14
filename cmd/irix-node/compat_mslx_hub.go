@@ -475,9 +475,8 @@ func (c *mslxHubConn) subscribeConsole(id uint32) {
 	c.mu.Unlock()
 	safeGo("MSLX 兼容层控制台推送", func() {
 		defer recoverLog("MSLX 兼容层控制台推送")
-		for line := range ch {
-			c.sendInvocation("ReceiveLog", line)
-		}
+		// 与 MCSM 兼容层一致：按 30ms 窗口合并输出，避免高输出速率把面板冲垮
+		mcPumpOutput(ch, func(text string) { c.sendInvocation("ReceiveLog", text) })
 	})
 	safeGo("MSLX 兼容层控制台回落", func() {
 		defer recoverLog("MSLX 兼容层控制台回落")

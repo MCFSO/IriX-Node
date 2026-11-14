@@ -605,12 +605,12 @@ func (mc *mcsmCompat) forwardOutput(inst *Instance, s *eioSession) {
 	s.addCleanup(cancel)
 	safeGo("MCSM 兼容层输出转发", func() {
 		defer recoverLog("MCSM 兼容层输出转发")
-		for line := range ch {
+		mcPumpOutput(ch, func(text string) {
 			s.push("instance/stdout", map[string]any{
 				"instanceUuid": inst.InstanceUuid,
-				"text":         line + "\n",
+				"text":         text,
 			})
-		}
+		})
 	})
 	// 进程退出后订阅通道不会关闭：靠会话关闭或实例重启时取消。
 	go func() {
@@ -619,6 +619,52 @@ func (mc *mcsmCompat) forwardOutput(inst *Instance, s *eioSession) {
 		cancel()
 		s.stopForward(inst.InstanceUuid)
 	}()
+}
+
+// mcOutputFrameMax 单帧输出上限（字节）。
+//
+// 合并推送的上限：既避免高输出速率把帧数推爆，也避免超大帧占满面板内存。
+const mcOutputFrameMax = 16 << 10
+
+// mcOutputFlushInterval 输出合并窗口。
+//
+// 逐行推一帧会让高输出速率的服务端把面板冲垮：实测一台狂刷日志的实例
+// 3 秒内产生近 5 万帧（面板端表现为忽而卡死、忽而一次性涌出，很不流畅），
+// 而真实 MCSM daemon 推的是 stdout 数据块。这里按 30ms 窗口合并：
+// 高输出时每窗口一帧（约 33 帧/秒，终端观感即时），积压超过 16KB 立即发，
+// 低输出时的延迟最坏只有 30ms。
+const mcOutputFlushInterval = 30 * time.Millisecond
+
+// mcPumpOutput 把订阅通道里的输出行按窗口合并后交给 pushFn 推送。
+//
+// 保证：不丢行、顺序不变、单帧不超过 mcOutputFrameMax 字节、通道关闭时冲刷剩余内容。
+func mcPumpOutput(ch <-chan string, pushFn func(text string)) {
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		pushFn(b.String())
+		b.Reset()
+	}
+	t := time.NewTicker(mcOutputFlushInterval)
+	defer t.Stop()
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				flush()
+				return
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+			if b.Len() >= mcOutputFrameMax {
+				flush()
+			}
+		case <-t.C:
+			flush()
+		}
+	}
 }
 
 // stopForward 取消某个实例的输出转发。
