@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"irix/node/internal/sysinfo"
+
+	"irix/node/internal/timesys"
 )
 
 // vaultMigration 迁移状态（持久化于 vault.json）。
@@ -143,7 +145,7 @@ func (v *vaultState) runMigration() {
 		v.d.auditLogf("vault.migrate 阶段二失败: %v", err)
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 	v.mu.Lock()
 	v.migration.CompletedAt = &now
 	err := v.save()
@@ -197,7 +199,7 @@ func (v *vaultState) markInstancesDone() error {
 		v.migration = &vaultMigration{FilesDone: map[string]bool{}}
 	}
 	if v.migration.StartedAt.IsZero() {
-		v.migration.StartedAt = time.Now()
+		v.migration.StartedAt = timesys.Now()
 	}
 	v.migration.InstancesDone = true
 	return v.save()

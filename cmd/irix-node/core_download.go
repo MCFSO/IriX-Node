@@ -153,6 +153,7 @@ func (d *Daemon) runDownloadCore(taskID string, task *task, url, dest, sha512Hex
 	// 与集群传输同一套 checkTransferIP 规则（CodeQL 审计 #7）。
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DialContext = d.coreDownloadDialContext()
+	tr.TLSClientConfig = outboundTLSConfig()
 	client := &http.Client{
 		Timeout:   2 * time.Minute,
 		Transport: tr,

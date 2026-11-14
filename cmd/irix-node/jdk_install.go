@@ -145,9 +145,13 @@ func validateDownloadURL(raw string) error {
 }
 
 // jdkHTTPClient 构造安装下载用客户端（重定向逐跳校验 https）。
+// TLS 服务器证书有效期使用节点时间（与集群拉取/核心下载一致）。
 func jdkHTTPClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = outboundTLSConfig()
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return validateDownloadURL(req.URL.String())
 		},

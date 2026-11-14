@@ -283,6 +283,8 @@ Go 来源：`daemon.go` 的 `Instance.Detail()`。列表每条与详情接口返
 | --- | --- | --- | --- |
 | GET | `/api/overview` | 节点概览 | overview.go |
 | GET | `/api/load` | 负载调谐状态 | loadtuner.go |
+| GET | `/api/time` | 时间系统状态 | time_handlers.go |
+| POST | `/api/time/sync` | 立即触发 Roughtime 同步 | time_handlers.go |
 | GET | `/api/service/remote_service_instances` | 实例列表（分页/过滤） | instance.go |
 | GET | `/api/instance` | 实例详情 | instance.go |
 | POST | `/api/instance` | 创建实例 | instance.go |
@@ -421,6 +423,30 @@ Go 来源：`daemon.go` 的 `Instance.Detail()`。列表每条与详情接口返
 ```json
 { "status": 200, "data": { "state": "normal", "since": 1710000000000, "gomaxprocs": 8, "gcPercent": 100, "cpuBusy": 0.02, "goroutines": 45, "heapAlloc": 20971520, "numCPU": 8 }, "time": 1710000000000 }
 ```
+
+### 4.3 GET /api/time —— 时间系统状态
+
+返回节点自有时间系统（Roughtime + 漂移补偿 + 时钟纪律）的当前状态。
+无查询参数。字段与语义详见 `docs/time-system.md` §7，关键字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `enabled` | bool | 是否启用 Roughtime 同步（`-time-sync`） |
+| `quality` | string | `synced` / `holdover` / `unlocked` |
+| `trustworthy` | bool | 当前时间是否可用于安全判定（本次进程内同步成功且在保持窗口/不确定度内） |
+| `now` / `unixMilli` | string / int64 | 节点当前时间 |
+| `lastSync` / `syncAgeSeconds` | string / float | 上次在线同步时间与距今时长 |
+| `offsetMillis` | float | 上次观测到的「服务器真值 - 系统墙钟」 |
+| `uncertaintyMillis` | float | 当前时间误差上界（含服务器半径、待校正量、保持漂移） |
+| `ratePpm` | float | 频率校正（漂移补偿） |
+| `steps` / `slews` | int | 步进 / 缓变次数 |
+| `servers` | array | 每台服务器：地址、协议、最近成功/错误、偏差、半径、RTT、成功/失败计数 |
+
+### 4.4 POST /api/time/sync —— 立即同步
+
+无 body。最长 15 秒，执行一轮多服务器 Roughtime 查询；成功且时间可信返回
+200 + 与 `GET /api/time` 相同的 `data`；未启用、全部不可达或未达到一致性门槛时
+返回 500/503，`data` 为中文原因。
 
 ---
 

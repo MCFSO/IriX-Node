@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // snapshotTimeFormat 备份文件名时间格式（2026-08-20-10-00-00.zip）。
@@ -206,7 +208,7 @@ func (d *Daemon) runSnapshot(taskID string, task *task, uuid, cwd string) {
 		fail(errors.New("目录为空或无可备份文件"))
 		return
 	}
-	dest := filepath.Join(d.backupsDirOf(uuid), time.Now().Format(snapshotTimeFormat)+".zip")
+	dest := filepath.Join(d.backupsDirOf(uuid), timesys.Now().Format(snapshotTimeFormat)+".zip")
 	if err := createSnapshotZip(dest, cwd, files, total, task); err != nil {
 		fail(err)
 		return

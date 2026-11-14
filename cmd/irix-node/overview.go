@@ -6,9 +6,10 @@ package main
 import (
 	"net/http"
 	"runtime"
-	"time"
 
 	"irix/node/internal/sysinfo"
+
+	"irix/node/internal/timesys"
 )
 
 // handleOverview 获取节点概览。
@@ -19,7 +20,9 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 	// Linux 各读一次 /etc/os-release），而这些值运行期内恒定不变。
 	hostname, osType, platform, release, distro := sysinfo.HostStaticInfo()
 
-	now := time.Now()
+	now := timesys.Now()
+	// 时间系统健康度（docs/time-system.md）：概览页可据此提示「节点时间不可信」。
+	timeStatus := d.timeStatus()
 	// 磁盘容量与内存均带短 TTL 缓存：仪表盘秒级刷新无需每次 statfs /
 	// 重复采样（原先 totalMem/freeMem/memUsage 各自采样一次，共三遍）。
 	diskTotal, diskUsed, diskUsage := sysinfo.CachedDiskInfo(d.DataDir)
@@ -49,6 +52,11 @@ func (d *Daemon) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"node":            runtime.Version(),
 		"time":            now.UnixMilli(),
 		"cwd":             d.DataDir,
+		// 时间系统健康度：quality=synced/holdover/unlocked，trustworthy 表示
+		// 是否可用于安全判定，uncertainty 为当前误差上界（毫秒）。
+		"timeQuality":     timeStatus.Quality,
+		"timeTrustworthy": timeStatus.Trustworthy,
+		"timeUncertainty": timeStatus.UncertaintyMillis,
 	}
 
 	processInfo := map[string]any{

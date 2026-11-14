@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed" // 仅用于内嵌 config.example.json（[]byte 嵌入需空导入，见 embed 包文档）
 	"encoding/json"
 	"fmt"
@@ -79,6 +80,75 @@ type DefenseConfig struct {
 	Enabled                *bool    `json:"enabled"`                // 仅为识别误配；防御不可关闭
 }
 
+// MCSMCompatConfig 配置文件 compat.mcsm 块：MCSManager Daemon 协议兼容。
+// 开启后本节点在 prefix 子路径下同时提供：
+//   - socket.io（engine.io v4）事件通道（MCSManager 面板按「节点」连接时使用）；
+//   - /download/<票据>/<文件>、/upload/<票据> 直连传输通道与首页占位页。
+//
+// 认证沿用 MCSM 的「节点密钥」模型：面板节点配置里的 apiKey 必须与 key 一致。
+// 该密钥等价于节点最高权限，请使用长随机串，且不要与账户密码复用。
+type MCSMCompatConfig struct {
+	Enabled       *bool    `json:"enabled"`       // 是否开启（默认 false，需显式开启）
+	Prefix        string   `json:"prefix"`        // 挂载前缀（默认 /mcsm；面板节点 URL 需带上此前缀）
+	Key           string   `json:"key"`           // 面板配对密钥（等价节点最高权限，必填）
+	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
+}
+
+// MSLXCompatConfig 配置文件 compat.mslx 块：MSLX Daemon 协议兼容。
+// 开启后本节点在 prefix 子路径下提供 MSLX 的 REST 接口（/api/...）与
+// SignalR 控制台/系统监视通道（/api/hubs/...），供 MSLX WebPanel 连接。
+// 认证使用 JWT（HS256，「x-user-token」头 / access_token 查询参数）：
+// 账号取自 username/password，签名密钥取自 jwtSecret
+// （空 = 首次启动随机生成并写入 {data}/compat-mslx-secret，重启后保持）。
+type MSLXCompatConfig struct {
+	Enabled       *bool    `json:"enabled"`       // 是否开启（默认 false，需显式开启）
+	Prefix        string   `json:"prefix"`        // 挂载前缀（默认 /mslx）
+	Username      string   `json:"username"`      // 登录用户名（默认 admin）
+	Password      string   `json:"password"`      // 登录密码（必填，建议长随机串）
+	JWTSecret     string   `json:"jwtSecret"`     // JWT 签名密钥（空 = 自动生成并持久化）
+	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
+}
+
+// CompatConfig 配置文件 compat 块：第三方 Daemon 协议兼容（两个开关可同时开启）。
+// 两层各自挂在独立子路径下，互不干扰，也不与节点自身 API 冲突。
+// 底层处理逻辑全部为本节点自有代码：只对齐线上协议与字段语义，不引入其源码
+// （避免 MCSManager 的 Apache-2.0 与 MSLX 的许可证与本项目产生许可证冲突）。
+type CompatConfig struct {
+	MCSM *MCSMCompatConfig `json:"mcsm"` // MCSManager Daemon 兼容（nil = 未配置）
+	MSLX *MSLXCompatConfig `json:"mslx"` // MSLX Daemon 兼容（nil = 未配置）
+}
+
+// TimeServerConfig 配置文件 time.servers 条目：一台 Roughtime 服务器。
+type TimeServerConfig struct {
+	Name      string `json:"name"`      // 展示名（空 = 地址）
+	Address   string `json:"address"`   // UDP 地址 host:port
+	PublicKey string `json:"publicKey"` // 长期 Ed25519 公钥（base64，信任根）
+	Protocol  string `json:"protocol"`  // auto（默认）/ legacy / rfc10049
+}
+
+// TimeConfig 配置文件 time 块：节点自有时间系统（docs/time-system.md）。
+// 节点以 Roughtime 为唯一外部时间源，通过多源一致性判定与时钟伺服
+// （漂移补偿 + slew/step）维护自己的时间，业务/TLS/会话全部使用该时间。
+type TimeConfig struct {
+	Enabled              *bool              `json:"enabled"`              // 是否启用 Roughtime 同步（默认 true）
+	Servers              []TimeServerConfig `json:"servers"`              // 服务器列表（空 = 内置默认列表）
+	IntervalSeconds      *int               `json:"intervalSeconds"`      // 同步间隔（秒，默认 300）
+	TimeoutMillis        *int               `json:"timeoutMillis"`        // 单服务器查询超时（毫秒，默认 1500）
+	Samples              *int               `json:"samples"`              // 每轮查询服务器数（默认 3）
+	MinAgreement         *int               `json:"minAgreement"`         // 至少多少台一致才采纳（默认 2）
+	MaxSlewPPM           *int               `json:"maxSlewPPM"`           // 相位校正最大速率（ppm，默认 500）
+	MaxRatePPM           *int               `json:"maxRatePPM"`           // 频率校正钳制（ppm，默认 500）
+	StepThresholdMillis  *int               `json:"stepThresholdMillis"`  // 超过该误差直接步进（毫秒，默认 2000）
+	MaxSlewOffsetMillis  *int               `json:"maxSlewOffsetMillis"`  // 待校正量上限（毫秒，默认 10000）
+	MinRateSpanMinutes   *int               `json:"minRateSpanMinutes"`   // 频率拟合最小跨度（分钟，默认 30）
+	HoldoverLimitHours   *int               `json:"holdoverLimitHours"`   // 保持窗口（小时，默认 24）
+	MaxUncertaintyMillis *int               `json:"maxUncertaintyMillis"` // 可信判定的不确定度上限（毫秒，默认 5000）
+	HoldoverDriftPPM     *int               `json:"holdoverDriftPPM"`     // 保持模式漂移上界（ppm，默认 100）
+	BootWaitMillis       *int               `json:"bootWaitMillis"`       // 启动等待首轮同步（毫秒，默认 1500；0 = 不等待）
+	TLSRequireTrusted    *bool              `json:"tlsRequireTrusted"`    // 时间不可信时拒绝 TLS 握手（默认 false，避免离线节点自锁）
+	StateFile            string             `json:"stateFile"`            // 状态文件（空 = {data}/timesys.json）
+}
+
 // Config config.json 配置文件结构。
 // 布尔/整数字段用指针：nil = 配置未写该字段（回退默认值）；
 // 非 nil = 显式设置（含 false/0，会覆盖内置默认值）。
@@ -103,6 +173,8 @@ type Config struct {
 	Vault             *VaultConfig    `json:"vault"`             // 加密保险库（nil = 未配置）
 	Accounts          *AccountsConfig `json:"accounts"`          // 账户管理存储（nil = 默认 SQLite）
 	Defense           *DefenseConfig  `json:"defense"`           // DDoS/CC 防御调优（nil = 全部默认值）
+	Time              *TimeConfig     `json:"time"`              // 节点自有时间系统（nil = 默认启用 + 内置服务器）
+	Compat            *CompatConfig   `json:"compat"`            // 第三方 Daemon 协议兼容（nil = 两层均关闭）
 }
 
 //go:embed config.example.json
@@ -121,10 +193,80 @@ func ensureConfigFile(path string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(path, exampleConfigJSON, 0o644); err != nil {
+	// 示例配置里 compat 的 key/password 为空；首次生成时直接填入随机值，
+	// 保证「就算兼容层没开，配置里也有东西」，用户开启后无需自己编密钥。
+	content := withGeneratedCompatSecrets(exampleConfigJSON)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// withGeneratedCompatSecrets 在示例配置文本里填入随机生成的兼容层凭据。
+// 生成失败（几乎不可能）时原样返回，不影响配置文件创建。
+func withGeneratedCompatSecrets(template []byte) []byte {
+	text := string(template)
+	text = fillEmptyJSONField(text, "mcsm", "key", randomToken(compatSecretLen))
+	text = fillEmptyJSONField(text, "mslx", "password", randomToken(compatSecretLen))
+	return []byte(text)
+}
+
+// fillEmptyJSONField 把 text 里 block 段内仍为空的 field 字段填上 value。
+// 只在该字段确实为空时替换，模板被改过（已有值）就原样返回。
+func fillEmptyJSONField(text, block, field, value string) string {
+	if value == "" {
+		return text
+	}
+	pos, ok := emptyJSONFieldPos(text, block, field)
+	if !ok {
+		return text
+	}
+	quoted, err := json.Marshal(value)
+	if err != nil {
+		return text
+	}
+	return text[:pos] + string(quoted) + text[pos+2:]
+}
+
+// emptyJSONFieldPos 定位 block 段内 "field": "" 中空字符串的起始引号下标。
+//
+// 只在 block 出现位置之后 4096 字节范围内查找：配置文件里同名键可能在别处
+// 出现（如 _comment_* 说明文字里），限定范围可避免误改其它字段。
+// 采用文本定位而不是整体 json 解析+重写，是为了保留用户配置里的注释顺序与排版。
+func emptyJSONFieldPos(text, block, field string) (int, bool) {
+	blockPos := strings.Index(text, `"`+block+`"`)
+	if blockPos < 0 {
+		return 0, false
+	}
+	limit := blockPos + 4096
+	if limit > len(text) {
+		limit = len(text)
+	}
+	fieldPos := strings.Index(text[blockPos:limit], `"`+field+`"`)
+	if fieldPos < 0 {
+		return 0, false
+	}
+	i := blockPos + fieldPos + len(field) + 2
+	skipSpace := func() {
+		for i < len(text) {
+			switch text[i] {
+			case ' ', '\t', '\r', '\n':
+				i++
+			default:
+				return
+			}
+		}
+	}
+	skipSpace()
+	if i >= len(text) || text[i] != ':' {
+		return 0, false
+	}
+	i++
+	skipSpace()
+	if i+1 >= len(text) || text[i] != '"' || text[i+1] != '"' {
+		return 0, false // 已有值（或不是字符串）：不动
+	}
+	return i, true
 }
 
 // loadConfigFile 从 path 加载配置文件。
@@ -141,6 +283,9 @@ func loadConfigFile(path string) (cfg *Config, loaded bool, err error) {
 		}
 		return nil, false, fmt.Errorf("读取配置文件 %s 失败: %w", path, err)
 	}
+	// 容忍 UTF-8 BOM：Windows 记事本等编辑器保存的 JSON 会带 BOM，
+	// 而 encoding/json 遇到 BOM 会直接报错（表现为「配置文件无法解析」）。
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, false, fmt.Errorf("解析配置文件 %s 失败: %w", path, err)
 	}
@@ -198,6 +343,37 @@ type nodeOptions struct {
 	DefenseBanMinutes   int
 	DefenseBlockedUAs   string // 静态封禁 UA（换行分隔；保持 nodeOptions 可比较）
 	DefenseDisableWarn  bool   // 配置写了 defense.enabled=false（会被忽略）
+	// 时间系统（docs/time-system.md）：Roughtime + 漂移补偿 + 时钟纪律
+	TimeEnabled            bool   // 是否启用 Roughtime 同步
+	TimeServers            string // 命令行覆盖的服务器列表（host:port@base64，逗号分隔）
+	TimeServersConfig      string // 配置文件 time.servers 编码（每行 name|address|key|protocol；保持可比较）
+	TimeIntervalSeconds    int
+	TimeTimeoutMillis      int
+	TimeSamples            int
+	TimeMinAgreement       int
+	TimeMaxSlewPPM         int
+	TimeMaxRatePPM         int
+	TimeStepMillis         int
+	TimeMaxSlewOffsetMs    int
+	TimeMinRateSpanMinutes int
+	TimeHoldoverLimitHours int
+	TimeMaxUncMillis       int
+	TimeHoldoverDriftPPM   int
+	TimeBootWaitMillis     int
+	TimeTLSRequireTrusted  bool
+	TimeStateFile          string
+	// 第三方 Daemon 协议兼容（compat 块；两层可同时开启）
+	ConfigPath        string // 配置文件实际路径（兼容层自动生成凭据后回写用；不参与合并）
+	CompatMCSMEnabled bool   // MCSManager Daemon 兼容开关
+	CompatMCSMPrefix  string // 挂载前缀（默认 /mcsm）
+	CompatMCSMKey     string // 面板配对密钥
+	CompatMCSMIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
+	CompatMSLXEnabled bool   // MSLX Daemon 兼容开关
+	CompatMSLXPrefix  string // 挂载前缀（默认 /mslx）
+	CompatMSLXUser    string // 登录用户名
+	CompatMSLXPass    string // 登录密码
+	CompatMSLXSecret  string // JWT 签名密钥（空 = 自动生成）
+	CompatMSLXIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
 }
 
 // applyConfig 应用配置文件：仅覆盖未被命令行显式设置的项。
@@ -352,6 +528,97 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 		}
 		if len(cfg.Defense.BlockedUserAgents) > 0 {
 			o.DefenseBlockedUAs = strings.Join(cfg.Defense.BlockedUserAgents, "\n")
+		}
+	}
+	if cfg.Time != nil {
+		tc := cfg.Time
+		if !setFlags["time-sync"] && tc.Enabled != nil {
+			o.TimeEnabled = *tc.Enabled
+		}
+		if !setFlags["time-servers"] && len(tc.Servers) > 0 {
+			o.TimeServersConfig = encodeTimeServersConfig(tc.Servers)
+		}
+		if !setFlags["time-interval"] && tc.IntervalSeconds != nil {
+			o.TimeIntervalSeconds = *tc.IntervalSeconds
+		}
+		if !setFlags["time-timeout-ms"] && tc.TimeoutMillis != nil {
+			o.TimeTimeoutMillis = *tc.TimeoutMillis
+		}
+		if tc.Samples != nil {
+			o.TimeSamples = *tc.Samples
+		}
+		if tc.MinAgreement != nil {
+			o.TimeMinAgreement = *tc.MinAgreement
+		}
+		if tc.MaxSlewPPM != nil {
+			o.TimeMaxSlewPPM = *tc.MaxSlewPPM
+		}
+		if tc.MaxRatePPM != nil {
+			o.TimeMaxRatePPM = *tc.MaxRatePPM
+		}
+		if !setFlags["time-step-ms"] && tc.StepThresholdMillis != nil {
+			o.TimeStepMillis = *tc.StepThresholdMillis
+		}
+		if tc.MaxSlewOffsetMillis != nil {
+			o.TimeMaxSlewOffsetMs = *tc.MaxSlewOffsetMillis
+		}
+		if tc.MinRateSpanMinutes != nil {
+			o.TimeMinRateSpanMinutes = *tc.MinRateSpanMinutes
+		}
+		if tc.HoldoverLimitHours != nil {
+			o.TimeHoldoverLimitHours = *tc.HoldoverLimitHours
+		}
+		if tc.MaxUncertaintyMillis != nil {
+			o.TimeMaxUncMillis = *tc.MaxUncertaintyMillis
+		}
+		if tc.HoldoverDriftPPM != nil {
+			o.TimeHoldoverDriftPPM = *tc.HoldoverDriftPPM
+		}
+		if !setFlags["time-boot-wait-ms"] && tc.BootWaitMillis != nil {
+			o.TimeBootWaitMillis = *tc.BootWaitMillis
+		}
+		if !setFlags["time-tls-require-trusted"] && tc.TLSRequireTrusted != nil {
+			o.TimeTLSRequireTrusted = *tc.TLSRequireTrusted
+		}
+		if tc.StateFile != "" {
+			o.TimeStateFile = tc.StateFile
+		}
+	}
+	// 第三方 Daemon 协议兼容（compat 块）：两个开关独立，可同时开启。
+	if cfg.Compat != nil {
+		if mc := cfg.Compat.MCSM; mc != nil {
+			if mc.Enabled != nil {
+				o.CompatMCSMEnabled = *mc.Enabled
+			}
+			if mc.Prefix != "" {
+				o.CompatMCSMPrefix = mc.Prefix
+			}
+			if mc.Key != "" {
+				o.CompatMCSMKey = mc.Key
+			}
+			if len(mc.AllowPanelIPs) > 0 {
+				o.CompatMCSMIPs = strings.Join(mc.AllowPanelIPs, "\n")
+			}
+		}
+		if mx := cfg.Compat.MSLX; mx != nil {
+			if mx.Enabled != nil {
+				o.CompatMSLXEnabled = *mx.Enabled
+			}
+			if mx.Prefix != "" {
+				o.CompatMSLXPrefix = mx.Prefix
+			}
+			if mx.Username != "" {
+				o.CompatMSLXUser = mx.Username
+			}
+			if mx.Password != "" {
+				o.CompatMSLXPass = mx.Password
+			}
+			if mx.JWTSecret != "" {
+				o.CompatMSLXSecret = mx.JWTSecret
+			}
+			if len(mx.AllowPanelIPs) > 0 {
+				o.CompatMSLXIPs = strings.Join(mx.AllowPanelIPs, "\n")
+			}
 		}
 	}
 }

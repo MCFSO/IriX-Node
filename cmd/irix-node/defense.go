@@ -42,6 +42,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // 防御默认阈值。全部可通过 config.json defense 块调整；没有关闭开关。
@@ -259,7 +261,7 @@ func (s *defenseState) applyOptions(o defenseOptions) {
 		s.bans[defenseBanKey("ua", ua)] = &defenseBan{
 			Kind: "ua", Value: ua, Until: 0,
 			Reason: "配置文件 defense.blockedUserAgents 静态封禁",
-			Source: "config", CreatedAt: time.Now().UnixMilli(),
+			Source: "config", CreatedAt: timesys.Now().UnixMilli(),
 		}
 	}
 }
@@ -294,7 +296,7 @@ func (s *defenseState) startCleanup() {
 				if !waitNextTick(ctx, ticker.C) {
 					return
 				}
-				s.sweep(time.Now())
+				s.sweep(timesys.Now())
 			}
 		})
 	})
@@ -347,7 +349,7 @@ func (d *Daemon) defenseMiddleware(next http.Handler) http.Handler {
 		ip := clientIP(r)
 		ua := requestUserAgent(r)
 		loopback := isLoopbackSource(ip)
-		now := time.Now()
+		now := timesys.Now()
 
 		// 1) 封禁表（手动/配置/自动）
 		// 环回来源的「解除封禁」请求豁免 UA 封禁：管理员误封自己的浏览器 UA 后，
@@ -471,7 +473,7 @@ func (s *defenseState) noteHeaderRulesLocked(findings []defenseHeaderFinding) {
 // 环回来源豁免自动封禁与 IP 封禁（避免节点把自己锁死），但**人工/配置的
 // User-Agent 封禁仍然生效**——那是管理员的显式意图，理应对本机面板同样适用。
 func (s *defenseState) activeBan(ip, ua string, loopback bool) (defenseBan, bool) {
-	now := time.Now().UnixMilli()
+	now := timesys.Now().UnixMilli()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ua != "" {
@@ -633,7 +635,7 @@ func (s *defenseState) banIPLocked(e *defenseIP, ip, reason string) defenseBan {
 // 手动/配置封禁优先：已存在时直接返回，不被自动策略覆盖或缩短。
 func (s *defenseState) banLocked(kind, value, reason, source string, strikes int) defenseBan {
 	key := defenseBanKey(kind, value)
-	now := time.Now()
+	now := timesys.Now()
 	if old, ok := s.bans[key]; ok {
 		if old.Source == "manual" || old.Source == "config" {
 			return *old
@@ -749,7 +751,7 @@ func takeDefenseToken(tokens *float64, last *time.Time, rate float64, burst int,
 // eventLocked 追加防御事件（只保留最近 defenseEventKeep 条）。
 func (s *defenseState) eventLocked(kind, value, reason string, until int64) {
 	s.events = append(s.events, defenseEvent{
-		At: time.Now().UnixMilli(), Kind: kind, Value: value, Reason: reason, Until: until,
+		At: timesys.Now().UnixMilli(), Kind: kind, Value: value, Reason: reason, Until: until,
 	})
 	if len(s.events) > defenseEventKeep {
 		s.events = append([]defenseEvent(nil), s.events[len(s.events)-defenseEventKeep:]...)
@@ -790,7 +792,7 @@ func (s *defenseState) loadLocked() {
 		alog.Printf("警告: 防御封禁文件 %s 损坏（%v），按空表处理", file, err)
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := timesys.Now().UnixMilli()
 	for _, b := range doc.ManualBans {
 		kind := strings.ToLower(strings.TrimSpace(b.Kind))
 		value := strings.TrimSpace(b.Value)
@@ -869,7 +871,7 @@ func (s *defenseState) addManualBan(kind, value string, ttl time.Duration, reaso
 	if len(reason) > defenseBanReasonMax {
 		reason = reason[:defenseBanReasonMax]
 	}
-	now := time.Now()
+	now := timesys.Now()
 	var until int64
 	if ttl > 0 {
 		until = now.Add(ttl).UnixMilli()
@@ -916,7 +918,7 @@ func (s *defenseState) removeBan(kind, value string) bool {
 func (s *defenseState) snapshot() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := timesys.Now()
 	cfg := s.cfg
 
 	var uaBans, ipBans []map[string]any
@@ -1071,7 +1073,7 @@ func defenseBanRemaining(b defenseBan) time.Duration {
 	if b.Until == 0 {
 		return 0
 	}
-	remain := time.Until(time.UnixMilli(b.Until))
+	remain := timesys.Until(time.UnixMilli(b.Until))
 	if remain < 0 {
 		return 0
 	}

@@ -30,6 +30,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // 设备协议常量。
@@ -310,7 +312,7 @@ func (s *accountSystem) issueDeviceChallenge(username, deviceID, purpose string)
 		return "", time.Time{}, err
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(buf)
-	now := time.Now()
+	now := timesys.Now()
 	expires := now.Add(deviceChallengeTTL)
 
 	s.deviceMu.Lock()
@@ -345,7 +347,7 @@ func (s *accountSystem) consumeDeviceChallenge(nonce, username, deviceID, purpos
 	if nonce == "" {
 		return false
 	}
-	now := time.Now()
+	now := timesys.Now()
 	s.deviceMu.Lock()
 	defer s.deviceMu.Unlock()
 	c, ok := s.deviceChallenges[nonce]
@@ -373,7 +375,7 @@ func (s *accountSystem) verifySessionProof(token, username, deviceID, proofKey s
 	if err != nil {
 		return false
 	}
-	if delta := time.Now().Unix() - ts; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
+	if delta := timesys.Now().Unix() - ts; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
 		return false
 	}
 	seq, err := strconv.ParseUint(seqText, 10, 64)
@@ -398,7 +400,7 @@ func (s *accountSystem) verifySessionProof(token, username, deviceID, proofKey s
 
 // acceptProofSeq 在会话的滑动窗口中接受序号（O(1)，每会话约 150 字节）。
 func (s *accountSystem) acceptProofSeq(token, username string, seq uint64) bool {
-	now := time.Now()
+	now := timesys.Now()
 	s.proofMu.Lock()
 	defer s.proofMu.Unlock()
 	if s.proofWindows == nil {
@@ -475,7 +477,7 @@ func (d *Daemon) verifyDeviceLogin(username string, p *deviceLoginProof) (*accou
 	if _, err := decodeProofKey(p.ProofKey); err != nil {
 		return nil, err
 	}
-	if delta := time.Now().Unix() - p.Timestamp; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
+	if delta := timesys.Now().Unix() - p.Timestamp; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
 		return nil, errors.New("时间戳超出允许范围")
 	}
 	// 先消费挑战：即使签名错误也不能重复使用同一 nonce。
@@ -489,7 +491,7 @@ func (d *Daemon) verifyDeviceLogin(username string, p *deviceLoginProof) (*accou
 	if dev == nil {
 		return nil, errors.New("设备未绑定")
 	}
-	if err := verifyDeviceSignature(dev, dev.PublicKey, deviceLoginTranscript(username, p, d.TLSFingerprint), p.Signature); err != nil {
+	if err := verifyDeviceSignature(dev, dev.PublicKey, deviceLoginTranscript(username, p, d.tlsFingerprintValue()), p.Signature); err != nil {
 		return nil, err
 	}
 	d.accounts.touchDevice(dev.DeviceID)
@@ -545,7 +547,7 @@ func (d *Daemon) registerDevice(username string, req *deviceRegisterRequest) (*a
 	if len(name) > accountDeviceNameMax {
 		name = name[:accountDeviceNameMax]
 	}
-	if delta := time.Now().Unix() - req.Timestamp; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
+	if delta := timesys.Now().Unix() - req.Timestamp; delta > int64(deviceProofSkew/time.Second) || delta < -int64(deviceProofSkew/time.Second) {
 		return nil, errors.New("时间戳超出允许范围")
 	}
 	if len(req.Signature) > deviceSignatureMaxLen {
@@ -557,7 +559,7 @@ func (d *Daemon) registerDevice(username string, req *deviceRegisterRequest) (*a
 	}
 	descriptorHash := sha256.Sum256([]byte(req.Descriptor))
 	if err := verifyDeviceSignature(&accountDevice{KeyType: keyType}, req.PublicKey,
-		deviceRegisterTranscript(username, req, deviceID, hex.EncodeToString(descriptorHash[:]), d.TLSFingerprint), req.Signature); err != nil {
+		deviceRegisterTranscript(username, req, deviceID, hex.EncodeToString(descriptorHash[:]), d.tlsFingerprintValue()), req.Signature); err != nil {
 		return nil, err
 	}
 	n, err := d.accounts.countDevices(username)

@@ -13,7 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // handleInstanceImport 导入目录创建实例。
@@ -74,7 +75,7 @@ func (d *Daemon) handleInstanceImport(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.FillDefaults()
 	d.applyVaultDefault(&cfg)
-	cfg.CreateDatetime = time.Now().UnixMilli()
+	cfg.CreateDatetime = timesys.Now().UnixMilli()
 	cfg.LastDatetime = cfg.CreateDatetime
 	inst := NewInstance("", cfg)
 	if err := d.Add(inst); err != nil {

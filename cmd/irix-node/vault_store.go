@@ -384,6 +384,7 @@ func (s *vaultStore) writeFile(v *vaultState, path string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	// 该时间与文件系统 mtime（fi.ModTime）比较，必须取系统时钟域，不能用节点时间。
 	now := time.Now().Unix()
 	s.mu.Lock()
 	old := s.index[path]

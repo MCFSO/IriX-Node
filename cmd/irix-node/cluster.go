@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // clusterMtimeFormat 同步条目 mtime 的字符串格式（与文档示例一致）。
@@ -388,7 +390,7 @@ func (d *Daemon) handleClusterHeartbeat(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	body["time"] = time.Now().UnixMilli()
+	body["time"] = timesys.Now().UnixMilli()
 	d.clusterMu.Lock()
 	d.clusterHeartbeat = body
 	if id, _ := body["id"].(string); id != "" {
@@ -420,7 +422,7 @@ func (d *Daemon) handleClusterEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
-	body["time"] = time.Now().UnixMilli()
+	body["time"] = timesys.Now().UnixMilli()
 	d.clusterMu.Lock()
 	d.clusterEvents = append(d.clusterEvents, body)
 	if len(d.clusterEvents) > maxClusterEvents {
@@ -683,6 +685,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 	// 重定向逐跳校验（防「先放行、再跳到内网」的跳板式 SSRF）。
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DialContext = d.transferDialContext()
+	tr.TLSClientConfig = outboundTLSConfig()
 	client := &http.Client{
 		Timeout:   30 * time.Minute,
 		Transport: tr,
@@ -714,7 +717,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 	}
 	// 轮询快照进度直到完成（大世界备份可能耗时，上限 15 分钟）
 	var archivePath string
-	pollDeadline := time.Now().Add(15 * time.Minute)
+	pollDeadline := timesys.Now().Add(15 * time.Minute)
 	progressURL := base + "/api/instance/snapshot-progress?jobId=" + url.QueryEscape(snapJobID)
 	for {
 		prog, pErr := getJSON(client, progressURL, token)
@@ -737,7 +740,7 @@ func (d *Daemon) runTransfer(jobID string, job *transferJob, instanceID, addr, t
 			fail(fmt.Errorf("远端快照失败: %s", msg))
 			return
 		default:
-			if time.Now().After(pollDeadline) {
+			if timesys.Now().After(pollDeadline) {
 				fail(fmt.Errorf("远端快照超时（15 分钟）"))
 				return
 			}

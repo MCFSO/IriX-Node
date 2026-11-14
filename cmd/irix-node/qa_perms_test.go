@@ -20,7 +20,7 @@ import (
 // routeSourceFiles 参与路由注册的源文件（反向扫描清单）。
 var routeSourceFiles = []string{
 	"instance.go", "cluster.go", "container.go", "vault.go", "accounts_handlers.go",
-	"defense_handlers.go", "device_handlers.go",
+	"defense_handlers.go", "device_handlers.go", "time_handlers.go",
 }
 
 // permExemptRoutes 免权限目录的路由：直连票据通道、公开登录入口与设备挑战。

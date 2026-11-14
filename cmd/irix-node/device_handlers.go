@@ -67,7 +67,7 @@ func (d *Daemon) handleDeviceChallenge(w http.ResponseWriter, r *http.Request) {
 		Nonce:          nonce,
 		ExpiresAt:      expires.UnixMilli(),
 		Purpose:        body.Purpose,
-		TLSFingerprint: d.TLSFingerprint,
+		TLSFingerprint: d.tlsFingerprintValue(),
 	})
 }
 
@@ -306,7 +306,7 @@ func (d *Daemon) handleAccountDevicePolicy(w http.ResponseWriter, r *http.Reques
 	if policy == accountDevicePolicyRequired {
 		// required 的安全前提是客户端能固定校验服务端身份；节点未启用 TLS 时
 		// 中间人可终止明文连接并转发设备签名，设备绑定无法阻止 MITM。
-		if d.TLSFingerprint == "" {
+		if d.tlsFingerprintValue() == "" {
 			writeError(w, http.StatusBadRequest, "开启设备绑定 required 必须先启用 TLS（tls-mode=auto 或 manual）")
 			return
 		}

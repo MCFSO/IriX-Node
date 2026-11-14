@@ -9,7 +9,8 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
-	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // 设备绑定策略与限制。
@@ -64,7 +65,7 @@ func (s *accountSystem) setDevicePolicy(username, policy string) error {
 	}
 	res, err := s.db.Exec(rebindSQL(s.driver,
 		`UPDATE accounts SET device_policy = ?, updated_at = ? WHERE username = ?`),
-		normalized, time.Now().UnixMilli(), username)
+		normalized, timesys.Now().UnixMilli(), username)
 	if err != nil {
 		return err
 	}
@@ -76,7 +77,7 @@ func (s *accountSystem) setDevicePolicy(username, policy string) error {
 
 // createDevice 新建设备绑定。device_id 已存在时返回可识别的重复错误。
 func (s *accountSystem) createDevice(dev *accountDevice) error {
-	now := time.Now().UnixMilli()
+	now := timesys.Now().UnixMilli()
 	if dev.CreatedAt == 0 {
 		dev.CreatedAt = now
 	}
@@ -168,5 +169,5 @@ func (s *accountSystem) deleteDevicesByUser(username string) {
 // touchDevice 更新设备最近使用时间（登录成功时调用；失败不影响登录）。
 func (s *accountSystem) touchDevice(deviceID string) {
 	_, _ = s.db.Exec(rebindSQL(s.driver,
-		`UPDATE account_devices SET last_seen = ? WHERE device_id = ?`), time.Now().UnixMilli(), deviceID)
+		`UPDATE account_devices SET last_seen = ? WHERE device_id = ?`), timesys.Now().UnixMilli(), deviceID)
 }

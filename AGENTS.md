@@ -27,7 +27,8 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 | `cmd/irix-node/` | 程序入口与核心（`package main`）：HTTP API、实例与进程管理、账户、保险库、集群等。`Daemon` 的所有方法必须与 `Daemon` 同包，故集中于此目录 |
 | `internal/sysinfo/` | 系统与进程探测：主机指标（CPU/内存/网络/运行时间）、磁盘余量、数据目录选址、进程身份核对与资源占用（含 `_windows`/`_linux`/`_bsd` 平台实现） |
 | `internal/platform/` | 进程级 OS 适配：OpenBSD pledge(2)/unveil(2) 权限自限制、RLIMIT_NOFILE 提升、平台信号装配 |
-| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 密钥派生、AES-GCM 包裹、TOTP、挑战签名校验、自签/手动 TLS |
+| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 密钥派生、AES-GCM 包裹、TOTP、挑战签名校验、自签/手动 TLS（证书日期与链校验使用节点时间） |
+| `internal/timesys/` | 节点自有时间系统：Roughtime（RFC 10049 + 部署版）客户端与签名/Merkle 校验、漂移补偿、slew/step 时钟纪律、保持与状态持久化、多源 quorum |
 | `docs/` | 设计与接口文档（`api/` 为接口分册，`audit/` 为审计报告） |
 | `scripts/` | 部署脚本（systemd 安装） |
 | `bin/` | 本地构建产物（已被 `.gitignore` 忽略） |
@@ -62,6 +63,15 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 | `device_auth.go` | 设备绑定协议：Ed25519/P-256 挑战签名、一次性挑战、会话逐请求 HMAC-SHA256 证明、序号窗口 |
 | `device_store.go` | 设备公钥与账户设备策略的 SQL 持久化（`account_devices` 表、`device_policy` 列） |
 | `device_handlers.go` | 设备管理 API：挑战、设备注册/列表/撤销、管理员设备与策略接口 |
+| `time_system.go` | 时间系统启动编排：配置合并、全局时间源安装、TLS 证书签发/校验/续签、日志与 HTTP Date 接入 |
+| `time_handlers.go` | 时间系统 API：`GET /api/time`、`POST /api/time/sync` |
+| `compat.go` | 第三方 Daemon 协议兼容层的注册与共享件：`compat` 配置校验、子路径挂载、来源白名单、MCSM 实例视图字段映射 |
+| `compat_mcsm_engine.go` | MCSManager 兼容层传输引擎（自有实现）：engine.io v4 轮询 + WebSocket 升级 + socket.io v4 包 |
+| `compat_mcsm.go` | MCSManager 兼容层事件分发与实例/信息/控制台/票据/计划任务事件、实例状态推送 |
+| `compat_mcsm_file.go` | MCSManager 兼容层文件事件与直连下载/分片上传通道、URL 下载任务 |
+| `compat_mslx.go` | MSLX 兼容层 REST：JWT（HS256）认证、`{code,message,data}` 信封、实例与设置接口、整数 id 映射 |
+| `compat_mslx_files.go` | MSLX 兼容层文件管理接口（列表/读写/新建/删除/重命名/复制/移动/上传/下载） |
+| `compat_mslx_hub.go` | MSLX 兼容层 SignalR JSON 协议最小实现（控制台 `ReceiveLog`、系统监视 `ReceiveSystemStats`） |
 
 ## 约定
 
@@ -72,6 +82,11 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 - **账户权限**：新路由注册时必须相邻调用 `perm(组名, 路由模式, 中文描述)`
   纳入端点权限目录（`qa_perms_test.go` 会反向扫描源码校验漏标注）。
   规则见 `docs/accounts-design.md`。
+- **时间**：一切**墙钟语义**（持久化时间戳、过期/封禁/审计/证书日期、API `time`
+  字段）必须使用 `timesys.Now()/Since()/Until()`，禁止直接 `time.Now()`。
+  例外仅限系统时间域与耗时测量：网络读写 deadline、`time.Since` 性能计时、
+  进程启动时间/`fi.ModTime()`/uptime 等 OS 上报值、`crypto/tls` 内部票据轮换；
+  这些位置保留 `time.Now()` 并加注释说明。详见 `docs/time-system.md`。
 - **风格**：`gofmt` 排版；导出符号带中文注释；类型为 `*Daemon` 的方法。
 - **平台差异**：系统相关代码拆成 `_windows`/`_linux`/`_bsd`/`_other` 后缀文件，
   用 `//go:build` 标签区分，新平台能力必须补齐对应文件（现主要位于 `internal/sysinfo`、
@@ -91,6 +106,22 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 - 文件路径操作必须经过 `NormalizePath` 防止 `..` 越界。
 - 实例状态常量：`StatusBusy=-1, StatusStopped=0, StatusStopping=1, StatusStarting=2, StatusRunning=3`。
 
+## 第三方 Daemon 兼容（`compat` 块）
+
+- `config.json` 的 `compat.mcsm` / `compat.mslx` 各自独立开关，**可同时开启**，
+  分别挂载在独立子路径（默认 `/mcsm`、`/mslx`，见 `compatPrefix`），
+  未启用（nil）时不注册任何路由。协议细节见 `docs/compat-daemon.md`。
+- **许可证边界（硬约束）**：兼容层只能对齐线上协议与字段语义，
+  **不得复制、翻译或引入** MCSManager（Apache-2.0）与 MSLX 的源码；
+  传输层（engine.io/socket.io、SignalR JSON 协议、JWT）必须基于标准库自行实现，
+  不新增依赖。业务动作一律复用本节点既有能力（`startInstance`/`stopInstance`、
+  `tickets`、`safeResolve`、`sysinfo`、`timesys`）。
+- 兼容层不走节点账户权限体系（MCSM 用节点密钥、MSLX 用 JWT），因此
+  **不要**为其路由调用 `perm()`；兼容层文件也不在 `qa_perms_test.go` 的
+  反向扫描清单内（用 `mux.Handle(前缀+"/", ...)` 整体挂载）。
+- 文件路径必须走 `safeResolve`/`NormalizePath`，不得放宽节点既有边界检查。
+- 兼容层流量仍经过审计与防御中间件；新增能力时须补 `qa_compat_*_test.go` 用例。
+
 ## 数据目录
 
 - `instances.json`：实例配置列表（`PersistedInstance`）。
@@ -100,6 +131,12 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
   `accounts.device_policy` / `sessions.device_id` / `sessions.proof_key` 列
   （旧库启动时自动补列，见 `accounts.go` 的 `accountsSchemaMigrations`）。
 - `defense.json`：人工封禁的 IP / User-Agent 列表（自动封禁只在运行期，到期自动解除）。
+- `timesys.json`：时间系统状态（频率校正、上次同步、保持锚点；0600 原子写），
+  重启后据此进入 holdover，见 `docs/time-system.md`。
+- `compat-secrets.json`：兼容层自动生成的凭据（`mcsmKey` / `mslxPassword` /
+  `mslxJwtSecret`；0600 原子写）。配置里对应字段留空时以此为准，生成后还会
+  定点回写配置文件（即使 `enabled=false` 也生成，保证"配置里总有东西"）。
+- `compat-mslx-ids.json`：MSLX 兼容层实例 uuid ↔ 整数 id 映射（重启后 id 不变）。
 - `auth.hash`：v1.1.0 及更早版本的配对码哈希，已废弃、不再读写。
 
 ## 配置文件
@@ -108,4 +145,5 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
   自动生成一份示例配置，生成失败仅告警不阻断启动）。
   字段见 `cmd/irix-node/config.example.json`；优先级为 **命令行显式参数 > 配置文件 > 默认值**。
   布尔/整数字段用指针区分「未设置」（回退默认值）与「显式 false/0」。
+  `time` 块配置 Roughtime 服务器、同步间隔、slew/step 阈值与保持参数。
 - Linux systemd 安装脚本生成 `/etc/irix-node/config.json` 并以 `-config` 启动。

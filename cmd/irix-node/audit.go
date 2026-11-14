@@ -27,6 +27,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // auditBodyMax 审计捕获请求体的字节上限（只保留前缀，防大上传撑爆审计日志）。
@@ -262,7 +264,7 @@ func (d *Daemon) auditMiddleware(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		d.auditLogf("%s | %s | %s %s%s | %d | %s | %s",
-			time.Now().Format("2006-01-02 15:04:05.000"),
+			timesys.Now().Format("2006-01-02 15:04:05.000"),
 			clientIP(r), r.Method, redactPath(r.URL.Path), redactQuery(r.URL.RawQuery),
 			status, time.Since(start).Round(time.Millisecond), body)
 	})

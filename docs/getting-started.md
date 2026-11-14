@@ -29,6 +29,16 @@ Windows 提供 `amd64` / `arm64` 两个架构的 Release 产物（`irix-node-win
 | `-redis-addr` | Redis 地址（空 = 不启用，账户会话与权限直接走数据库） | 空 |
 | `-redis-password` | Redis 密码 | 空 |
 | `-redis-db` | Redis 库号 | `0` |
+| `-time-sync` | 启用节点自有时间系统（Roughtime + 漂移补偿 + 时钟纪律）；关闭后全部时间判定回退系统时钟 | 开启 |
+| `-time-servers` | Roughtime 服务器列表（逗号分隔 `host:port@base64公钥`；空 = 配置文件 `time.servers` 或内置列表） | 空 |
+| `-time-interval` | 周期同步间隔（秒，最小 5） | `300` |
+| `-time-timeout-ms` | 单台服务器查询超时（毫秒） | `1500` |
+| `-time-boot-wait-ms` | 启动等待首轮同步上限（毫秒，0 = 不等待） | `1500` |
+| `-time-tls-require-trusted` | 时间不可信时拒绝 TLS 握手（默认关闭，避免离线节点把管理入口锁死） | 关闭 |
+
+> 时间系统会用 Roughtime 签名时间校准节点时钟，并让会话过期、封禁、审计、
+> 实例时间戳与 TLS 证书签发/校验全部使用该时间；详见[时间系统](time-system.md)。
+> 断网时按指数退避重试，已同步过的节点进入 holdover（不确定度随时长增长）。
 
 ## 账户管理
 
@@ -75,3 +85,24 @@ token 有效期 30 天，剩余不足一半时自动滑动续期。管理员可�
 
 Linux systemd 安装（`scripts/install-systemd.sh`）会生成 `/etc/irix-node/config.json`
 并以 `-config` 启动；修改后 `systemctl restart irix-node` 生效。
+
+## 第三方面板兼容（可选）
+
+配置文件另有 `compat` 块，用于让现成的第三方面板把本节点当作它们自己的
+Daemon 使用；`mcsm`（MCSManager 面板）与 `mslx`（MSLX WebPanel）两个开关
+**可以同时开启**，各自挂在独立子路径下（默认 `/mcsm`、`/mslx`），默认全关：
+
+```json
+{
+  "compat": {
+    "mcsm": { "enabled": true, "prefix": "/mcsm" },
+    "mslx": { "enabled": true, "prefix": "/mslx", "username": "admin" }
+  }
+}
+```
+
+`key` / `password` / `jwtSecret` **留空即可**：首次启动会随机生成、写入
+`{data}/compat-secrets.json` 并回写到配置文件里（即使 `enabled=false` 也会先备好），
+启动日志会打印可直接使用的地址与凭据，面板照抄即可。兼容层凭据等价于节点最高
+权限（建实例、下发命令、读写实例文件），公网暴露时请配合 `allowPanelIps` 限制来源。
+协议范围、面板填写方式与不支持清单见[第三方 Daemon 协议兼容](compat-daemon.md)。

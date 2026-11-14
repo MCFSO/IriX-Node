@@ -11,10 +11,12 @@ func (d *Daemon) newHTTPServer(addr string) *http.Server {
 	d.RegisterRoutes(mux)
 	return &http.Server{
 		Addr: addr,
-		// 中间件链顺序：在途登记 → 恒开 DDoS/CC 防御（封禁/头部规范/限频）
-		// → 审计 → CORS → 保险库门禁 → API body 限额 → 请求体读空闲超时 → 路由。
-		// 防御必须在最外层：被拦截的攻击流量不写审计、不进业务，拒绝响应自带 CORS 头。
-		Handler: d.trackRequests(d.defenseMiddleware(d.auditMiddleware(d.corsMiddleware(d.vaultGate(limitAPIBody(idleBodyTimeout(mux))))))),
+		// 中间件链顺序：时间系统 Date 头（最外层，被拒绝的请求也带节点时间）
+		// → 在途登记 → 恒开 DDoS/CC 防御（封禁/头部规范/限频）
+		// → 审计 → CORS → 保险库门禁 → API body 限额
+		// → 请求体读空闲超时 → 路由。
+		// 防御必须在业务之前：被拦截的攻击流量不写审计、不进业务，拒绝响应自带 CORS 头。
+		Handler: clockDateMiddleware(d.trackRequests(d.defenseMiddleware(d.auditMiddleware(d.corsMiddleware(d.vaultGate(limitAPIBody(idleBodyTimeout(mux)))))))),
 		// 只限制请求头与空闲连接，保留大文件流式上传/下载的能力。
 		// 请求体另由 idleBodyTimeout 做「读空闲」超时（见 httpidle.go）：
 		// 不使用 ReadTimeout/WriteTimeout，否则会按整请求计时切断大文件传输。

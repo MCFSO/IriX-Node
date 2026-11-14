@@ -155,6 +155,8 @@ func (p *Process) sampleCPUPercent() float64 {
 		return 0
 	}
 	pid := p.cmd.Process.Pid
+	// CPU 占用是「耗时测量」，取系统单调时钟：节点时间可能因 Roughtime
+	// 校时步进，跨步进计算使用率会失真（甚至出现负间隔）。
 	now := time.Now()
 	cpu, ok := sysinfo.ProcCPUTicks(pid)
 	if !ok {

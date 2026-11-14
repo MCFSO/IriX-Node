@@ -11,7 +11,7 @@
 | 前提 | 说明 |
 | --- | --- |
 | TLS 开启 | `-tls-mode auto`（自签）或 `manual`（正式证书）；`-vault` 强制要求 TLS，否则拒绝启动。等保部署必须开启（远程管理传输保密） |
-| NTP 时钟同步 | TOTP 依赖服务器时钟准确（偏差 >±30s 将导致解锁失败） |
+| NTP 时钟同步 | TOTP 依赖服务器时钟准确（偏差 >±30s 将导致解锁失败）。v1.5.0+ 节点自带 Roughtime 时间系统（`docs/time-system.md`）：会话/封禁/TOTP/审计时间戳与 TLS 证书有效期都使用该校准时间，系统墙钟偏差不再直接破坏 TOTP 与证书判定；建议同时保留主机 NTP 作为兜底 |
 | 密码策略 | 保险库账号密码默认 ≥12 位且含大小写+数字，90 天更换（`-vault-password-expire-days`，可配 `-vault-force-expire` 强制） |
 | 审计落盘 | `-audit-log` 保持默认开启；审计轮转归档到 `{data}/backup/audit/`（防覆盖丢失） |
 | 备份 | 定期 `POST /api/vault/backup` 导出加密备份包；恢复令牌物理保管（丢失 = 数据不可恢复） |

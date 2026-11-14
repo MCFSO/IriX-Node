@@ -31,7 +31,8 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 | `cmd/irix-node/` | 程序入口与核心（`package main`）。Go 要求方法与其类型同包，`Daemon` 的 260+ 方法因此集中在此目录 |
 | `internal/sysinfo/` | 系统与进程探测：主机指标、磁盘余量、数据目录选址、进程身份与资源占用（含各平台实现） |
 | `internal/platform/` | 进程级 OS 适配：OpenBSD pledge/unveil 权限自限制、RLIMIT_NOFILE 提升、信号装配 |
-| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 派生、AES-GCM 包裹、TOTP、挑战签名校验、TLS |
+| `internal/vaultcrypto/` | 保险库密码学原语：PBKDF2 派生、AES-GCM 包裹、TOTP、挑战签名校验、TLS（证书日期/链校验/续签使用节点时间） |
+| `internal/timesys/` | 节点自有时间系统：Roughtime（RFC 10049 + 部署版）客户端与签名/Merkle 校验、漂移补偿、slew/step 时钟纪律、holdover 与状态持久化、多源 quorum |
 | `docs/` | 设计与接口文档（`api/` 接口分册、`audit/` 审计报告） |
 | `scripts/` | 部署脚本；`bin/` 为本地构建产物（已 gitignore） |
 
@@ -65,6 +66,28 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 | `device_auth.go` | 设备绑定协议：Ed25519/P-256 挑战签名、一次性挑战（60s）、逐请求 HMAC-SHA256 证明、1024 位序号窗口 |
 | `device_store.go` | 设备公钥与账户设备策略 SQL：`account_devices` 表、`accounts.device_policy`、`sessions.device_id/proof_key` |
 | `device_handlers.go` | 设备管理 API：`/api/auth/device/challenge`、`/api/auth/devices*`、管理员设备与策略接口 |
+| `time_system.go` | 时间系统编排：配置合并、安装全局时间源、TLS 证书签发/校验/自动续签、日志时间戳与 HTTP Date 接入 |
+| `time_handlers.go` | 时间系统 API：`GET /api/time`（状态）、`POST /api/time/sync`（立即同步） |
+| `compat.go` | 第三方 Daemon 兼容层：`compat` 配置校验与子路径挂载、来源白名单、MCSM 实例视图字段映射 |
+| `compat_mcsm_engine.go` | MCSManager 兼容层传输引擎（自有实现）：engine.io v4 轮询 + WebSocket 升级 + socket.io v4 包 |
+| `compat_mcsm.go` | MCSManager 兼容层事件分发：实例/信息/控制台/票据/计划任务事件与状态推送 |
+| `compat_mcsm_file.go` | MCSManager 兼容层文件事件、直连下载/分片上传通道、URL 下载任务 |
+| `compat_mslx.go` | MSLX 兼容层 REST：JWT（HS256）、`{code,message,data}` 信封、实例与设置接口、整数 id 映射 |
+| `compat_mslx_files.go` | MSLX 兼容层文件管理接口（列表/读写/新建/删除/重命名/复制/移动/上传/下载） |
+| `compat_mslx_hub.go` | MSLX 兼容层 SignalR JSON 协议最小实现（控制台 `ReceiveLog`、`ReceiveSystemStats`） |
+
+## 第三方 Daemon 兼容（`compat` 块）
+
+- `config.json` 的 `compat.mcsm` / `compat.mslx` 独立开关，**可同时开启**，各挂独立子路径
+  （默认 `/mcsm`、`/mslx`）；未启用时不注册任何路由。协议见 `docs/compat-daemon.md`。
+- **许可证边界（硬约束）**：只对齐线上协议与字段语义，**不得复制/翻译/引入**
+  MCSManager（Apache-2.0）与 MSLX 的源码；传输层（socket.io、SignalR、JWT）
+  必须基于标准库自研，不新增依赖；业务动作复用 `startInstance`/`stopInstance`、
+  `tickets`、`safeResolve`、`sysinfo`、`timesys`。
+- 兼容层不接入账户权限体系（MCSM 用节点密钥、MSLX 用 JWT），因此**不调用** `perm()`，
+  也不在 `qa_perms_test.go` 反向扫描清单内（用 `mux.Handle(前缀+"/", ...)` 整体挂载）。
+- 文件路径必须走 `safeResolve`/`NormalizePath`，不放宽既有边界检查。
+- 变更兼容层须补 `qa_compat_*_test.go` 用例（含完整中间件链与 SignalR WebSocket 端到端）。
 
 ## 锁与并发
 
@@ -80,6 +103,11 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 - **依赖**：依赖最小化——核心仍是标准库；仅数据库驱动（`go-sql-driver/mysql`、
   `jackc/pgx`、`modernc.org/sqlite`）、`redis/go-redis` 与 `golang.org/x/crypto`
   允许（`go.mod` 直接依赖即这些）。新增依赖须先说明理由。
+- **时间**：一切**墙钟语义**（持久化时间戳、过期/封禁/审计/证书日期、API `time`
+  字段）必须使用 `timesys.Now()/Since()/Until()`，禁止直接 `time.Now()`。
+  例外仅限系统时间域与耗时测量：网络读写 deadline、`time.Since` 性能计时、
+  进程启动时间/`fi.ModTime()`/uptime 等 OS 上报值、`crypto/tls` 内部票据轮换；
+  这些位置保留 `time.Now()` 并加注释说明。详见 `docs/time-system.md`。
 - **账户权限**：新路由注册时必须相邻调用 `perm(组名, 路由模式, 中文描述)`
   纳入端点权限目录（`qa_perms_test.go` 反向扫描源码校验漏标注）。
   规则见 `docs/accounts-design.md`。
@@ -114,6 +142,10 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
   accounts.db      # 账户库（sqlite 默认；-accounts-driver 可换 mysql/postgres）
                    # 含 account_devices / sessions.device_id/proof_key / accounts.device_policy
   defense.json     # 人工封禁的 IP / User-Agent（自动封禁只在运行期）
+  timesys.json     # 时间系统状态（频率校正/上次同步/保持锚点，0600 原子写）
+  compat-secrets.json   # 兼容层自动生成的凭据（mcsmKey/mslxPassword/mslxJwtSecret，0600）
+                        # 配置字段留空时以此为准，并会定点回写配置文件（enabled=false 也生成）
+  compat-mslx-ids.json  # MSLX 兼容层实例 uuid ↔ 整数 id 映射
   logs/            # 实例日志落盘（-instance-log 开启时）：{uuid}.log + 轮转 {uuid}.log.1
                    # 审计日志（-audit-log 开启时）：audit.log + 轮转 audit.log.1
 ```
@@ -132,6 +164,7 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 - **管理员内网限制**：`auth` 与登录入口都调用 `adminIntranetAllowed`（`admin_access.go`），管理员来源默认必须是环回或 RFC 1918（IPv6 ULA/链路本地）；公网来源即使密码正确也不签发会话、已有会话也 403。可用 `-admin-intranet-only=false` / `adminIntranetOnly=false` 显式关闭（默认 true）。普通账户不受限；跨公网集群调用请使用非管理员账户并只授予集群端点权限。
 - **设备绑定（v1.4.0+）**：客户端生成 Ed25519/P-256 设备密钥（推荐 TPM/系统密钥库），用一次性挑战签名登录；`accountSession.DeviceID/ProofKey` 绑定会话后，每个请求校验 `X-Device-Id` / `X-Session-Timestamp` / `X-Session-Seq` / `X-Session-Proof`（HMAC-SHA256 + 1024 位序号窗口，热路径无 DB）。账户 `devicePolicy=optional|required`（默认 optional，required 强制 TLS 且至少一台设备）；策略变更/撤销设备/删账户都会撤销会话。协议与客户端交接见 `docs/device-binding.md`。
 - **首启引导**：`Daemon.ensureAdminAccount`（`auth.go`）在账户库无管理员账户时随机生成管理员用户名/密码并入库，凭据只在启动日志出现一次；共享账户库多节点并发启动时以「已有管理员即让位」避免重复创建。凭据丢失只能删除账户库重新生成（或直接操作账户库）。
+- **时间系统（v1.5.0+）**：`internal/timesys` 以 Roughtime 为唯一外部时间源（RFC 10049 + 已部署 legacy 格式），校验 Ed25519 签名与 Merkle 包含证明后得到带半径的时间区间；多源按区间相交取最大一致组（`minAgreement`）剔除虚假源；受纪律时钟锚定单调时钟，对 (单调时刻, 真值) 做最小二乘估计晶振 ppm 并平滑校正，小误差按 `maxSlewPPM` 缓变、大误差 step；不确定度随离线时长按漂移上界增长，状态落盘 `{data}/timesys.json` 供重启 holdover。启动时先等首轮同步（`time-boot-wait-ms`）再初始化账户/TLS；TLS 证书 NotBefore/NotAfter 按节点时间签发并按不确定度回拨 NotBefore，`tls.Config.Time` 与出站 HTTPS 链校验都指向 `timesys.Now()`，自签证书在节点时间失效时自动重签并热替换。`GET /api/time`、`POST /api/time/sync` 暴露状态与手动同步，见 `docs/time-system.md`。
 
 ## 测试
 
@@ -144,6 +177,10 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 | `qa_audit_test.go` | 审计日志测试：请求细节落盘、token/apikey 打码、请求体捕获与截断、关闭开关、查询打码/控制字符转义 |
 | `qa_defense_test.go` | DDoS/CC 防御与管理员内网限制：头部规范判定、Via 拦截与累计封禁、UA 并发/频率封禁、IP 限流与环回豁免、人工封禁持久化、防御接口、RFC 1918 来源校验 |
 | `qa_device_test.go` | 设备绑定：Ed25519/P-256 注册与挑战登录、逐请求 HMAC/时间戳/序号防重放、required 策略、设备撤销/最后一台保护/管理员降级、旧库补列迁移、证明性能基准 |
+| `qa_time_test.go` | 时间系统集成：/api/time 状态与手动同步、响应 time 字段/HTTP Date、会话过期跟随节点时间、TLS 证书签发/自动续签/manual 过期拒绝、配置合并 |
+| `qa_compat_mcsm_test.go` | MCSManager 兼容层：engine.io 握手/心跳、socket.io 认证、实例增删启停杀、文件事件、通行证绑定下载、前缀/白名单解析、完整中间件链 |
+| `qa_compat_mslx_test.go` | MSLX 兼容层：JWT 登录与伪造拒绝、实例列表/动作、文件全套操作、Hub 协商、501/404、两层同时开启 |
+| `qa_compat_mslx_ws_test.go` | MSLX SignalR WebSocket 端到端：握手、JoinGroup、ReceiveLog 推送、SendCommand 应答、系统监视 |
 | `qa_perf_test.go` | 性能测试：万实例加载、大目录列表、大日志截取 |
 | `qa_scale_test.go` | 规模测试：十万实例、日志缓冲内存占用、Tail 开销 |
 

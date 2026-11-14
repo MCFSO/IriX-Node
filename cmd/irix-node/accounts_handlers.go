@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // identity 认证后的请求身份。
@@ -90,12 +92,12 @@ func (d *Daemon) authenticate(r *http.Request) *identity {
 		return nil
 	}
 	sess, ok := d.accounts.lookupSession(token)
-	if !ok || sess.ExpiresAt <= time.Now().UnixMilli() {
+	if !ok || sess.ExpiresAt <= timesys.Now().UnixMilli() {
 		return nil
 	}
 	// 滑动续期：剩余不足一半时延长一整个 TTL（每天最多写一次，避免频繁落库）
-	if remain := sess.ExpiresAt - time.Now().UnixMilli(); remain < int64(accountSessionTTL/2/time.Millisecond) {
-		sess.ExpiresAt = time.Now().Add(accountSessionTTL).UnixMilli()
+	if remain := sess.ExpiresAt - timesys.Now().UnixMilli(); remain < int64(accountSessionTTL/2/time.Millisecond) {
+		sess.ExpiresAt = timesys.Now().Add(accountSessionTTL).UnixMilli()
 		d.accounts.putSession(token, sess, accountSessionTTL)
 	}
 	return &identity{
@@ -198,15 +200,15 @@ func (d *Daemon) handleAccountLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "管理员账户仅允许从内网地址（RFC 1918）登录")
 		return
 	}
-	sess := accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: time.Now().Add(accountSessionTTL).UnixMilli()}
+	sess := accountSession{Username: a.Username, IsAdmin: a.IsAdmin, ExpiresAt: timesys.Now().Add(accountSessionTTL).UnixMilli()}
 	// required 的安全前提是 TLS 通道 + 客户端固定指纹；节点 TLS 被关闭后
 	// 即使 DB 里仍是 required，也不能退化为明文设备登录。
-	if a.DevicePolicy == accountDevicePolicyRequired && d.TLSFingerprint == "" {
+	if a.DevicePolicy == accountDevicePolicyRequired && d.tlsFingerprintValue() == "" {
 		writeError(w, http.StatusForbidden, "该账户已启用设备绑定，但节点未启用 TLS，无法完成安全登录")
 		return
 	}
 	if body.Device != nil {
-		if d.TLSFingerprint == "" {
+		if d.tlsFingerprintValue() == "" {
 			writeError(w, http.StatusForbidden, "设备登录需要节点启用 TLS（tls-mode=auto 或 manual）")
 			return
 		}

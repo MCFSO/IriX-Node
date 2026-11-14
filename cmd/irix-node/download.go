@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // ticketKind 票据用途类型：下载与上传严格区分。
@@ -72,7 +74,7 @@ func (ts *ticketStore) create(kind ticketKind, uuid, cwd, dir, file string) stri
 	defer ts.mu.Unlock()
 	if len(ts.tickets) >= maxTickets {
 		// 先尝试回收过期票据
-		now := time.Now()
+		now := timesys.Now()
 		for k, v := range ts.tickets {
 			if now.After(v.expires) {
 				delete(ts.tickets, k)
@@ -89,7 +91,7 @@ func (ts *ticketStore) create(kind ticketKind, uuid, cwd, dir, file string) stri
 		cwd:     cwd,
 		dir:     dir,
 		file:    file,
-		expires: time.Now().Add(10 * time.Minute),
+		expires: timesys.Now().Add(10 * time.Minute),
 	}
 	return password
 }
@@ -99,7 +101,7 @@ func (ts *ticketStore) Get(password string) *transferTicket {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	t := ts.tickets[password]
-	if t == nil || time.Now().After(t.expires) {
+	if t == nil || timesys.Now().After(t.expires) {
 		return nil
 	}
 	return t
@@ -111,7 +113,7 @@ func (ts *ticketStore) cleanupLoop(ctx context.Context) {
 	defer ticker.Stop()
 	for waitNextTick(ctx, ticker.C) {
 		ts.mu.Lock()
-		now := time.Now()
+		now := timesys.Now()
 		for k, v := range ts.tickets {
 			if now.After(v.expires) {
 				delete(ts.tickets, k)

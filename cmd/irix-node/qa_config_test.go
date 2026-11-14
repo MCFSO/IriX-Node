@@ -12,14 +12,28 @@ import (
 // baseOptions 返回与 main 中 flag 默认值一致的选项基线。
 func baseOptions() *nodeOptions {
 	return &nodeOptions{
-		Port:           12346,
-		BindHost:       "",
-		DataDir:        "",
-		InstanceLog:    true,
-		InstanceLogMax: 64,
-		AuditLog:       true,
-		AuditLogMax:    64,
-		LoadTune:       true,
+		Port:                   12346,
+		BindHost:               "",
+		DataDir:                "",
+		InstanceLog:            true,
+		InstanceLogMax:         64,
+		AuditLog:               true,
+		AuditLogMax:            64,
+		LoadTune:               true,
+		TimeEnabled:            true,
+		TimeIntervalSeconds:    defaultTimeIntervalSeconds,
+		TimeTimeoutMillis:      defaultTimeTimeoutMillis,
+		TimeSamples:            defaultTimeSamples,
+		TimeMinAgreement:       defaultTimeMinAgreement,
+		TimeMaxSlewPPM:         defaultTimeMaxSlewPPM,
+		TimeMaxRatePPM:         defaultTimeMaxRatePPM,
+		TimeStepMillis:         defaultTimeStepMillis,
+		TimeMaxSlewOffsetMs:    defaultTimeMaxSlewOffsetMS,
+		TimeMinRateSpanMinutes: defaultTimeMinRateSpanMin,
+		TimeHoldoverLimitHours: defaultTimeHoldoverHours,
+		TimeMaxUncMillis:       defaultTimeMaxUncMillis,
+		TimeHoldoverDriftPPM:   defaultTimeDriftPPM,
+		TimeBootWaitMillis:     defaultTimeBootWaitMillis,
 	}
 }
 
@@ -221,5 +235,85 @@ func TestApplyConfig(t *testing.T) {
 	o.applyConfig(nil, map[string]bool{})
 	if *o != *baseOptions() {
 		t.Fatalf("nil 配置不应改动选项: %+v", o)
+	}
+}
+
+// TestApplyConfigCompat compat 块（两层兼容开关）的合并与默认值。
+func TestApplyConfigCompat(t *testing.T) {
+	on := true
+	off := false
+
+	// 未配置 compat：两层均关闭（默认全关，必须显式开启）
+	o := baseOptions()
+	o.applyConfig(&Config{}, map[string]bool{})
+	if o.CompatMCSMEnabled || o.CompatMSLXEnabled {
+		t.Fatalf("默认应关闭两层兼容: %+v", o)
+	}
+
+	// 两层同时开启 + 各字段生效
+	o = baseOptions()
+	o.applyConfig(&Config{Compat: &CompatConfig{
+		MCSM: &MCSMCompatConfig{
+			Enabled:       &on,
+			Prefix:        "/panel-mcsm",
+			Key:           "k-123",
+			AllowPanelIPs: []string{"127.0.0.1", "10.0.0.0/8"},
+		},
+		MSLX: &MSLXCompatConfig{
+			Enabled:       &on,
+			Prefix:        "/panel-mslx",
+			Username:      "root",
+			Password:      "p-123",
+			JWTSecret:     "s-1234567890abcdef",
+			AllowPanelIPs: []string{"192.168.0.0/16"},
+		},
+	}}, map[string]bool{})
+	if !o.CompatMCSMEnabled || !o.CompatMSLXEnabled {
+		t.Fatalf("两层应可同时开启: %+v", o)
+	}
+	if o.CompatMCSMPrefix != "/panel-mcsm" || o.CompatMCSMKey != "k-123" {
+		t.Fatalf("MCSM 配置未生效: %+v", o)
+	}
+	if o.CompatMCSMIPs != "127.0.0.1\n10.0.0.0/8" {
+		t.Fatalf("MCSM 来源白名单未生效: %q", o.CompatMCSMIPs)
+	}
+	if o.CompatMSLXPrefix != "/panel-mslx" || o.CompatMSLXUser != "root" ||
+		o.CompatMSLXPass != "p-123" || o.CompatMSLXSecret != "s-1234567890abcdef" {
+		t.Fatalf("MSLX 配置未生效: %+v", o)
+	}
+	if o.CompatMSLXIPs != "192.168.0.0/16" {
+		t.Fatalf("MSLX 来源白名单未生效: %q", o.CompatMSLXIPs)
+	}
+
+	// 显式 false 覆盖：只关闭其中一层
+	o = baseOptions()
+	o.applyConfig(&Config{Compat: &CompatConfig{
+		MCSM: &MCSMCompatConfig{Enabled: &off},
+		MSLX: &MSLXCompatConfig{Enabled: &on, Password: "p"},
+	}}, map[string]bool{})
+	if o.CompatMCSMEnabled || !o.CompatMSLXEnabled {
+		t.Fatalf("单层开关应独立生效: %+v", o)
+	}
+}
+
+// TestLoadConfigFileToleratesBOM 配置文件带 UTF-8 BOM 时仍可解析
+// （Windows 记事本等编辑器默认会写 BOM）。
+func TestLoadConfigFileToleratesBOM(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	content := []byte(`{"port":23456,"compat":{"mcsm":{"enabled":true,"key":"k"}}}`)
+	withBOM := append([]byte{0xEF, 0xBB, 0xBF}, content...)
+	if err := os.WriteFile(path, withBOM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, loaded, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatalf("带 BOM 的配置应可解析: %v", err)
+	}
+	if !loaded || cfg.Port != 23456 {
+		t.Fatalf("配置内容异常: loaded=%v cfg=%+v", loaded, cfg)
+	}
+	if cfg.Compat == nil || cfg.Compat.MCSM == nil || cfg.Compat.MCSM.Key != "k" {
+		t.Fatalf("compat 块未解析: %+v", cfg.Compat)
 	}
 }

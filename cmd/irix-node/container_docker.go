@@ -15,7 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // containerRuntimeInfo 能力探测：Linux 节点 → Docker。
@@ -362,7 +363,7 @@ func dockerLimits(id string, memoryMb int, cpus float64) error {
 // dockerClone 克隆容器：commit 当前文件系统为临时镜像，再以新名字创建容器。
 // Docker 无原生 clone 命令，commit+create 是标准等效做法。
 func dockerClone(id, name string) (map[string]any, error) {
-	img := "irix-clone-" + strconv.FormatInt(time.Now().UnixMilli(), 10)
+	img := "irix-clone-" + strconv.FormatInt(timesys.Now().UnixMilli(), 10)
 	if _, err := cliRun(cliLongTimeout, "docker", "commit", id, img); err != nil {
 		return nil, fmt.Errorf("提交容器文件系统失败: %w", err)
 	}
@@ -394,7 +395,7 @@ func dockerExport(d *Daemon, id string) (map[string]any, error) {
 	if err := os.MkdirAll(expDir, 0o755); err != nil {
 		return nil, err
 	}
-	fileName := id + "-" + strconv.FormatInt(time.Now().UnixMilli(), 10) + ".tar"
+	fileName := id + "-" + strconv.FormatInt(timesys.Now().UnixMilli(), 10) + ".tar"
 	filePath := filepath.Join(expDir, fileName)
 	f, err := os.Create(filePath)
 	if err != nil {

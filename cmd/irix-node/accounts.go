@@ -26,6 +26,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL 驱动（database/sql）
 	"github.com/redis/go-redis/v9"     // Redis 客户端（自带连接池）
 	"golang.org/x/crypto/bcrypt"
+
+	"irix/node/internal/timesys"
 )
 
 // 账户与会话常量。
@@ -364,7 +366,7 @@ func (s *accountSystem) createAccount(username, password string, isAdmin bool) e
 	if err != nil {
 		return err
 	}
-	now := time.Now().UnixMilli()
+	now := timesys.Now().UnixMilli()
 	_, err = s.db.Exec(rebindSQL(s.driver,
 		`INSERT INTO accounts (username, password_hash, is_admin, permissions, created_at, updated_at)
 		 VALUES (?, ?, ?, '{}', ?, ?)`),
@@ -440,7 +442,7 @@ func (s *accountSystem) setPermissions(username string, perms map[string]bool) e
 	}
 	res, err := s.db.Exec(rebindSQL(s.driver,
 		`UPDATE accounts SET permissions = ?, updated_at = ? WHERE username = ?`),
-		string(data), time.Now().UnixMilli(), username)
+		string(data), timesys.Now().UnixMilli(), username)
 	if err != nil {
 		return err
 	}
@@ -461,7 +463,7 @@ func (s *accountSystem) putPassword(username, password string) error {
 	}
 	res, err := s.db.Exec(rebindSQL(s.driver,
 		`UPDATE accounts SET password_hash = ?, updated_at = ? WHERE username = ?`),
-		string(hash), time.Now().UnixMilli(), username)
+		string(hash), timesys.Now().UnixMilli(), username)
 	if err != nil {
 		return err
 	}
@@ -540,7 +542,7 @@ func (s *accountSystem) deleteAccount(username string) error {
 // cachedSession 读取会话缓存；未命中或已过期返回 false。
 // 会话本身在缓存期内到期时同样视为未命中，并顺手清除条目。
 func (s *accountSystem) cachedSession(token string) (accountSession, bool) {
-	now := time.Now()
+	now := timesys.Now()
 	s.cacheMu.RLock()
 	e, ok := s.sessCache[token]
 	s.cacheMu.RUnlock()
@@ -560,7 +562,7 @@ func (s *accountSystem) cacheSession(token string, sess accountSession) {
 	if s.sessCache == nil {
 		s.sessCache = map[string]sessCacheEntry{}
 	}
-	s.sessCache[token] = sessCacheEntry{sess: sess, expires: time.Now().Add(accountSessCacheTTL)}
+	s.sessCache[token] = sessCacheEntry{sess: sess, expires: timesys.Now().Add(accountSessCacheTTL)}
 	s.cacheMu.Unlock()
 }
 
@@ -576,7 +578,7 @@ func (s *accountSystem) cachedPerms(username string) (map[string]bool, bool) {
 	s.cacheMu.RLock()
 	e, ok := s.permCache[username]
 	s.cacheMu.RUnlock()
-	if !ok || time.Now().After(e.expires) {
+	if !ok || timesys.Now().After(e.expires) {
 		return nil, false
 	}
 	out := make(map[string]bool, len(e.perms))
@@ -596,7 +598,7 @@ func (s *accountSystem) cachePerms(username string, perms map[string]bool) {
 	if s.permCache == nil {
 		s.permCache = map[string]permCacheEntry{}
 	}
-	s.permCache[username] = permCacheEntry{perms: cp, expires: time.Now().Add(accountPermCacheTTL)}
+	s.permCache[username] = permCacheEntry{perms: cp, expires: timesys.Now().Add(accountPermCacheTTL)}
 	s.cacheMu.Unlock()
 }
 
@@ -621,7 +623,7 @@ func newAccountToken() (string, error) {
 
 // putSession 写入会话：SQL 权威落库（UPSERT）+ Redis 缓存（TTL）。
 func (s *accountSystem) putSession(token string, sess accountSession, ttl time.Duration) {
-	now := time.Now().UnixMilli()
+	now := timesys.Now().UnixMilli()
 	if sess.ExpiresAt <= now {
 		return
 	}
@@ -692,7 +694,7 @@ func (s *accountSystem) lookupSession(token string) (accountSession, bool) {
 		return accountSession{}, false
 	}
 	sess.ExpiresAt = expiresAt
-	if sess.ExpiresAt <= time.Now().UnixMilli() {
+	if sess.ExpiresAt <= timesys.Now().UnixMilli() {
 		_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE token = ?`), token)
 		return accountSession{}, false
 	}
@@ -794,7 +796,7 @@ func (s *accountSystem) revokeUserSessions(username, keepToken string) {
 
 // purgeExpiredSessions 清理过期会话（登录时顺手执行，避免独立后台任务）。
 func (s *accountSystem) purgeExpiredSessions() {
-	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE expires_at < ?`), time.Now().UnixMilli())
+	_, _ = s.db.Exec(rebindSQL(s.driver, `DELETE FROM sessions WHERE expires_at < ?`), timesys.Now().UnixMilli())
 	s.purgeLoginFails()
 }
 
@@ -813,7 +815,7 @@ func loginFailKeys(username, ip string) (string, string) {
 // 无限次尝试仍可离线穷举弱密码，此处封死在线爆破通道。
 func (s *accountSystem) loginBlocked(username, ip string) bool {
 	uk, ik := loginFailKeys(username, ip)
-	now := time.Now()
+	now := timesys.Now()
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
 	for _, k := range []string{uk, ik} {
@@ -828,7 +830,7 @@ func (s *accountSystem) loginBlocked(username, ip string) bool {
 // 窗口内达到阈值即锁定。bcrypt 校验本身有固定耗时，此计数不构成额外放大。
 func (s *accountSystem) recordLoginFailure(username, ip string) {
 	uk, ik := loginFailKeys(username, ip)
-	now := time.Now()
+	now := timesys.Now()
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
 	if s.loginFails == nil {
@@ -882,7 +884,7 @@ func (s *accountSystem) clearLoginFailures(username, ip string) {
 func (s *accountSystem) purgeLoginFails() {
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
-	s.purgeLoginFailsLocked(time.Now())
+	s.purgeLoginFailsLocked(timesys.Now())
 }
 
 // purgeLoginFailsLocked purgeLoginFails 的无锁版本（调用方已持 loginMu）。
@@ -930,17 +932,17 @@ func (s *accountSystem) redisReady() bool {
 	}
 	s.rdMu.Lock()
 	defer s.rdMu.Unlock()
-	return time.Now().After(s.rdDown)
+	return timesys.Now().After(s.rdDown)
 }
 
 // redisFailed 进入降级冷却：冷却期内一律走 SQL，到期自动重试恢复。
 func (s *accountSystem) redisFailed() {
 	s.rdMu.Lock()
-	if time.Now().Before(s.rdDown) {
+	if timesys.Now().Before(s.rdDown) {
 		s.rdMu.Unlock()
 		return // 已在冷却期，不重复告警
 	}
-	s.rdDown = time.Now().Add(accountRedisCoold)
+	s.rdDown = timesys.Now().Add(accountRedisCoold)
 	s.rdMu.Unlock()
 	alog.Printf("Redis 缓存不可用，账户鉴权回退数据库（%s 后自动重试）", accountRedisCoold)
 }
@@ -954,7 +956,7 @@ func (s *accountSystem) redisGetSession(token string) (accountSession, bool) {
 		return accountSession{}, false
 	}
 	var sess accountSession
-	if json.Unmarshal(data, &sess) != nil || sess.ExpiresAt <= time.Now().UnixMilli() {
+	if json.Unmarshal(data, &sess) != nil || sess.ExpiresAt <= timesys.Now().UnixMilli() {
 		return accountSession{}, false
 	}
 	return sess, true
@@ -968,7 +970,7 @@ func (s *accountSystem) redisSetSession(token string, sess accountSession) {
 	if err != nil {
 		return
 	}
-	ttl := time.Duration(sess.ExpiresAt-time.Now().UnixMilli()) * time.Millisecond
+	ttl := time.Duration(sess.ExpiresAt-timesys.Now().UnixMilli()) * time.Millisecond
 	if ttl <= 0 {
 		return
 	}

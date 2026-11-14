@@ -80,5 +80,60 @@
     "redisPassword": "",
     "redisDB": 0,
     "redisPoolSize": 16
+  },
+  "_comment_time": "time: 节点自有时间系统（docs/time-system.md）。节点不信任系统墙钟：用 Roughtime（RFC 10049，兼容已部署旧格式）从多台互相独立的服务器获取带签名、带半径的时间，做多源一致性判定、漂移补偿（ppm 频率校正）与时钟纪律（小误差按 maxSlewPPM 缓变、大误差 step），并把锚点/频率落盘 {data}/timesys.json 供重启保持。业务时间、TLS 证书签发与链校验、会话/封禁/审计时间戳全部使用该时间。servers 留空 = 内置公网服务器列表（Cloudflare/int08h/roughtime.se 等）；自建服务器请填写 name/address/publicKey（长期 Ed25519 公钥 base64）与 protocol（auto/legacy/rfc10049）。enabled=false 时全部时间判定回退系统时钟。",
+  "time": {
+    "enabled": true,
+    "_comment_servers": "servers: 自定义 Roughtime 服务器列表；留空使用内置列表。示例：[{\"name\":\"internal\",\"address\":\"10.0.0.5:5319\",\"publicKey\":\"<32字节Ed25519公钥base64>\",\"protocol\":\"rfc10049\"}]",
+    "servers": [],
+    "_comment_intervalSeconds": "intervalSeconds: 周期同步间隔（秒，最小 5，默认 300）。失败后按 1.5 倍指数退避，不超过该间隔。",
+    "intervalSeconds": 300,
+    "_comment_timeoutMillis": "timeoutMillis: 单台服务器 UDP 查询超时（毫秒，默认 1500）。",
+    "timeoutMillis": 1500,
+    "_comment_samples": "samples: 每轮查询的服务器数量（1-16，默认 3），按列表轮转以覆盖全部服务器。",
+    "samples": 3,
+    "_comment_minAgreement": "minAgreement: 至少多少台服务器的带半径时间区间互相一致才采纳本轮结果（默认 2，用于剔除孤立的说谎/故障服务器）。只配置 1 台时自动放宽为 1。",
+    "minAgreement": 2,
+    "_comment_maxSlewPPM": "maxSlewPPM: 相位校正最大速率（ppm，默认 500，约 1.8 秒/小时）。误差在 stepThresholdMillis 以内时按该速率平滑追赶，不跳变。",
+    "maxSlewPPM": 500,
+    "_comment_maxRatePPM": "maxRatePPM: 频率校正钳制（ppm，默认 500），防止测量噪声把漂移估计带飞。",
+    "maxRatePPM": 500,
+    "_comment_stepThresholdMillis": "stepThresholdMillis: 误差超过该值直接步进（毫秒，默认 2000）。步进会跳变，只用于首次锁定或系统时钟严重偏差。",
+    "stepThresholdMillis": 2000,
+    "_comment_maxSlewOffsetMillis": "maxSlewOffsetMillis: 待校正量上限（毫秒，默认 10000），超过改为步进（避免长时间带着大误差缓变）。",
+    "maxSlewOffsetMillis": 10000,
+    "_comment_minRateSpanMinutes": "minRateSpanMinutes: 频率拟合所需的最小样本跨度（分钟，默认 30）；样本不足时不做频率校正。",
+    "minRateSpanMinutes": 30,
+    "_comment_holdoverLimitHours": "holdoverLimitHours: 保持窗口（小时，默认 24）；超过该时长未成功同步，时间标记为不可信。",
+    "holdoverLimitHours": 24,
+    "_comment_maxUncertaintyMillis": "maxUncertaintyMillis: 可信判定的不确定度上限（毫秒，默认 5000），含服务器半径、slew 余量与保持漂移。",
+    "maxUncertaintyMillis": 5000,
+    "_comment_holdoverDriftPPM": "holdoverDriftPPM: 保持模式下的漂移上界（ppm，默认 100），用于估算不确定度增长。",
+    "holdoverDriftPPM": 100,
+    "_comment_bootWaitMillis": "bootWaitMillis: 启动时等待首轮同步的上限（毫秒，默认 1500，0 = 不等待）。先同步再签发 TLS 证书可避免用错误时钟生成证书日期。",
+    "bootWaitMillis": 1500,
+    "_comment_tlsRequireTrusted": "tlsRequireTrusted: 时间不可信时拒绝 TLS 握手（默认 false，避免互联网中断时把管理入口锁死）。高安全或纯内网部署可设为 true。",
+    "tlsRequireTrusted": false,
+    "_comment_stateFile": "stateFile: 时间系统状态文件（空 = {data}/timesys.json），保存频率校正与保持锚点。",
+    "stateFile": ""
+  },
+  "_comment_compat": "compat: 第三方 Daemon 协议兼容（可选，默认全关）。开启后本节点可被现成的第三方控制面板当作它们自己的 Daemon 使用：mcsm = MCSManager 面板按「节点」连接（socket.io 事件通道 + 直连文件通道）；mslx = MSLX WebPanel 连接（REST /api/... + SignalR 控制台）。两者可同时开启，各自挂在独立子路径下，互不影响，也不与节点自身 API 冲突。底层处理逻辑全部为本节点自有代码（只对齐线协议与字段，不引入其源码，避免许可证冲突）。注意：兼容层凭据等价于节点最高权限（建实例、下发命令、读写实例文件），务必使用长随机串，并配合 allowPanelIps 限制来源。",
+  "compat": {
+    "_comment_mcsm": "mcsm: MCSManager Daemon 兼容。面板「新建节点」里地址填 http://<本机IP>:<端口>/mcsm，密钥填 key。prefix 为挂载子路径（默认 /mcsm，必须带前导斜杠且不能是根路径）；allowPanelIps 支持裸 IP 与 CIDR（空 = 不限制来源）。key 留空没有关系：首次启动会自动随机生成并写回这里（同时持久化到 {data}/compat-secrets.json），所以即使 enabled=false 也已经有一把密钥等着用。",
+    "mcsm": {
+      "enabled": false,
+      "prefix": "/mcsm",
+      "key": "",
+      "allowPanelIps": []
+    },
+    "_comment_mslx": "mslx: MSLX Daemon 兼容。WebPanel 后端地址填 http://<本机IP>:<端口>/mslx，用 username/password 登录（JWT 24 小时有效）。password 与 jwtSecret 留空同样会自动生成：password 写回这里、jwtSecret 写入 {data}/compat-secrets.json（重启后已签发的 token 仍有效）；实例在兼容层的整数 id 持久化于 {data}/compat-mslx-ids.json。",
+    "mslx": {
+      "enabled": false,
+      "prefix": "/mslx",
+      "username": "admin",
+      "password": "",
+      "jwtSecret": "",
+      "allowPanelIps": []
+    }
   }
 }

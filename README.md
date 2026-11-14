@@ -19,13 +19,17 @@ MCSM 节点与本节点。
 | [容器环境](docs/container.md) | Docker（Linux）/ Bastille（FreeBSD）支持与 PF 注意事项 |
 | [高并发压测调优](docs/perf-tuning.md) | 百万级连接的 OS 资源上限与代码侧优化 |
 | [加密保险库](docs/vault.md) | TOTP+密码+证书三重保护的数据加密存储 |
+| [时间系统](docs/time-system.md) | Roughtime 可信时间、漂移补偿、时钟纪律、TLS 证书时间与保持模式 |
 | [安全说明](docs/security.md) | 认证、设备绑定、路径越界防护、SSRF 防护与部署建议 |
+| [第三方 Daemon 兼容](docs/compat-daemon.md) | 让 MCSManager / MSLX 面板把本节点当作它们自己的 Daemon 使用（compat 块，两层可同时开启） |
 | [架构设计](docs/architecture.md) | 分层边界、请求生命周期、持久化一致性与优雅关停 |
 
 ### 设计文档（`docs/`）
 
 - `docs/accounts-design.md` — 账户与权限模型（端点级权限开关、连接池、Redis 缓存）
+- `docs/compat-daemon.md` — 第三方 Daemon 协议兼容（MCSManager socket.io / MSLX REST+SignalR，自有实现）
 - `docs/device-binding.md` — 客户端设备绑定协议（挑战登录、逐请求证明、客户端交接）
+- `docs/time-system.md` — 节点时间系统（Roughtime 校验、漂移补偿、slew/step、TLS 证书时间、holdover）
 - `docs/vault-design.md` — 加密保险库设计（密钥包裹、迁移、物化加密）
 - `docs/container-support.md` — 容器能力客户端契约（字段级）
 - `docs/cluster-node-api.md` — 集群节点 API（LAN 直传、协调）
@@ -41,12 +45,19 @@ cmd/irix-node/        程序入口与核心（HTTP API、实例与进程管理�
 internal/sysinfo/     系统与进程探测（主机指标、磁盘余量、数据目录选址、进程身份）
 internal/platform/    进程级 OS 适配（OpenBSD pledge/unveil、RLIMIT_NOFILE、信号装配）
 internal/vaultcrypto/ 保险库密码学原语（PBKDF2、AES-GCM、TOTP、证书校验与 TLS）
+internal/timesys/     节点自有时间系统（Roughtime 校验、漂移补偿、时钟纪律、holdover）
 docs/                 设计与接口文档（api/ 为分册，audit/ 为审计报告）
 scripts/              部署脚本（systemd 安装）
 bin/                  本地构建产物（已被 .gitignore 忽略）
 ```
 
 `internal/` 下的包不反向依赖主包，可独立编译与测试。
+
+节点自带一套时间系统：以 Roughtime（RFC 10049，兼容已部署旧格式）为唯一外部时间源，
+校验签名与 Merkle 证明后做多源一致性判定，再用漂移补偿（ppm 频率校正）与时钟纪律
+（slew/step）维护进程时间；会话、封禁、审计、实例时间戳与 TLS 证书签发/校验全部
+使用该时间。断网时进入 holdover 并按漂移上界增长不确定度。详见
+[时间系统](docs/time-system.md)。
 
 `cmd/irix-node/` 内源码按职责命名：`accounts_*.go` 账户、`container_*.go` 容器、
 `vault_*.go` 保险库、`process_*.go` 进程、`cluster.go`/`frp.go` 集群、`qa_*_test.go` 测试。

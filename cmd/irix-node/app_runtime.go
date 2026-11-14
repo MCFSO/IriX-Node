@@ -57,6 +57,8 @@ func (r *nodeRuntime) run(ctx context.Context) error {
 			r.daemon.workers.start(r.daemon.vault.janitor)
 			r.daemon.workers.start(r.daemon.vault.store.flushLoop)
 		}
+		// TLS 证书按节点时间巡检/续签（tls-mode=off 时为空转）。
+		r.daemon.workers.start(r.daemon.tlsJanitor)
 		if r.loadTune {
 			r.daemon.workers.start(tuner.loop)
 		}
@@ -137,6 +139,8 @@ func (r *nodeRuntime) shutdown(ctx context.Context) error {
 		r.daemon.processStarts.wait()
 		r.daemon.StopAutoSave()
 		r.daemon.workers.stop()
+		// 时间系统最后停止：前面所有清理产生的时间戳仍使用同一时钟。
+		r.daemon.stopTimeSystem()
 		if err := r.daemon.FlushDirty(); err != nil {
 			errs = append(errs, fmt.Errorf("实例配置关停前落盘失败: %w", err))
 		}

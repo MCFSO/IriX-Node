@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // InstanceStatus 实例运行状态（与 MCSM 一致）。
@@ -98,7 +101,7 @@ func (c *InstanceConfig) FillDefaults() {
 		c.PingConfig.Port = 25565
 	}
 	if c.EndTime == 0 {
-		c.EndTime = time.Now().AddDate(0, 0, 365).UnixMilli()
+		c.EndTime = timesys.Now().AddDate(0, 0, 365).UnixMilli()
 	}
 }
 
@@ -169,7 +172,7 @@ func (i *Instance) SetStatus(s int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.Status = s
-	i.Config.LastDatetime = time.Now().UnixMilli()
+	i.Config.LastDatetime = timesys.Now().UnixMilli()
 }
 
 // Detail 返回 MCSM 风格的 InstanceDetail JSON 结构。
@@ -298,7 +301,28 @@ type Daemon struct {
 
 	// TLSFingerprint 服务端证书 SHA-256（tls-mode auto/manual 时由 main 设置）。
 	// 设备挑战把它返回给客户端用于固定校验，防止中间人终止 TLS（见 device-binding.md）。
+	// 运行时可能因证书按节点时间自动续签而变化，读写请走 tlsFingerprintValue/
+	// setTLSFingerprint（tlsMu 保护）。
 	TLSFingerprint string
+
+	// 时间系统（docs/time-system.md）：Roughtime + 漂移补偿 + 时钟纪律。
+	// time 为 nil 表示尚未初始化（此时 timesys.Now() 回退到进程当前时间源）。
+	time        *timesys.System
+	timeRestore func() // 安装全局时间源前的恢复函数（测试用）
+	// TLS 证书状态：证书按节点时间校验，自签模式失效时自动续签。
+	tlsMu             sync.RWMutex
+	tlsMode           string
+	tlsDir            string
+	tlsCertFile       string
+	tlsKeyFile        string
+	tlsCert           atomic.Pointer[tls.Certificate]
+	tlsRequireTrusted bool
+	tlsNoticeDay      string // 证书到期提示的去重日期（每天最多一次）
+
+	// 第三方 Daemon 协议兼容层（compat 块，见 compat.go）：
+	// 各自挂在独立子路径下，nil 表示该层未启用；两层可同时启用。
+	compatMC   *mcsmCompat // MCSManager Daemon 兼容
+	compatMSLX *mslxCompat // MSLX Daemon 兼容
 }
 
 // NewDaemon 创建守护进程实例。
@@ -308,7 +332,7 @@ func NewDaemon(dataDir string) *Daemon {
 		Port:            12346,
 		UUID:            newUUID(),
 		Instances:       []*Instance{},
-		StartedAt:       time.Now(),
+		StartedAt:       timesys.Now(),
 		LogMaxBytes:     64 << 20, // 默认 64MB
 		metricsInterval: defaultMetricsInterval,
 		// 管理员内网限制默认开启（安全默认）；main 按命令行/配置文件覆盖。
@@ -333,6 +357,11 @@ func NewDaemon(dataDir string) *Daemon {
 	}
 	d.vault = newVaultState(d)
 	d.defense = newDefenseState(d)
+	// 未经过 main 初始化时提供一套「未启用」的时间系统：API 状态可读，
+	// 全局时间源（timesys.Now）仍可用（未锁定 = 系统时钟）。
+	if sys, err := timesys.New(timesys.Config{Enabled: false}); err == nil {
+		d.time = sys
+	}
 	return d
 }
 
@@ -375,7 +404,7 @@ func (d *Daemon) Load() error {
 	}
 	var list []PersistedInstance
 	if err := json.Unmarshal(data, &list); err != nil {
-		backup := d.instanceFile() + ".corrupt-" + fmt.Sprintf("%d", time.Now().UnixMilli())
+		backup := d.instanceFile() + ".corrupt-" + fmt.Sprintf("%d", timesys.Now().UnixMilli())
 		if rerr := os.Rename(d.instanceFile(), backup); rerr != nil {
 			return fmt.Errorf("解析 instances.json 失败: %w（备份损坏文件也失败: %v）", err, rerr)
 		}
@@ -606,7 +635,7 @@ func (d *Daemon) UpdateInstance(inst *Instance, cfg InstanceConfig) error {
 	inst.mu.Lock()
 	// CreateDatetime 必须在锁内读取：与并发 Update/Save 竞争
 	cfg.CreateDatetime = inst.Config.CreateDatetime
-	cfg.LastDatetime = time.Now().UnixMilli()
+	cfg.LastDatetime = timesys.Now().UnixMilli()
 	inst.Config = cfg
 	inst.mu.Unlock()
 	// 异步落盘：同 Add，由 saveLoop 合并写盘（注释见 Add）
@@ -724,11 +753,11 @@ func (d *Daemon) CwdOf(uuid string) (string, error) {
 func newUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		now := time.Now().UnixNano()
+		now := timesys.Now().UnixNano()
 		for i := 0; i < 8; i++ {
 			b[i] = byte(now >> (i * 8))
 		}
-		seed := uint64(time.Now().UnixNano()) ^ uint64(os.Getpid())<<32
+		seed := uint64(timesys.Now().UnixNano()) ^ uint64(os.Getpid())<<32
 		for i := 8; i < 16; i++ {
 			seed = seed*6364136223846793005 + 1442695040888963407
 			b[i] = byte(seed >> 56)

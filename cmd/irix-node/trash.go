@@ -19,7 +19,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // trashDirName 回收站目录名（备份排除项一致）。
@@ -138,7 +139,7 @@ func (d *Daemon) handleFileTrash(w http.ResponseWriter, r *http.Request) {
 			OriginalPath: slashRel(cwd, src),
 			TrashPath:    slashRel(cwd, dst),
 			Size:         size,
-			DeletedAt:    time.Now().UnixMilli(),
+			DeletedAt:    timesys.Now().UnixMilli(),
 		})
 	}
 	if err := d.saveTrash(body.UUID, items); err != nil {

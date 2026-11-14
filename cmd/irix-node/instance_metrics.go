@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"irix/node/internal/sysinfo"
+
+	"irix/node/internal/timesys"
 )
 
 // metricSample 单次实例指标采样。
@@ -52,7 +54,7 @@ func (d *Daemon) sampleAllMetrics() {
 		pid := proc.cmd.Process.Pid
 		down, up := cachedNetRates()
 		s := metricSample{
-			Time:        time.Now().UnixMilli(),
+			Time:        timesys.Now().UnixMilli(),
 			CPU:         round2(proc.sampleCPUPercent()),
 			MemoryMB:    sysinfo.ProcMemoryBytes(pid) >> 20,
 			DownloadBps: int64(down),
@@ -98,7 +100,7 @@ func (d *Daemon) handleInstanceMetrics(w http.ResponseWriter, r *http.Request) {
 	if minutes > 60 {
 		minutes = 60
 	}
-	since := time.Now().Add(-time.Duration(minutes) * time.Minute).UnixMilli()
+	since := timesys.Now().Add(-time.Duration(minutes) * time.Minute).UnixMilli()
 	inst.metricsMu.Lock()
 	samples := make([]metricSample, 0, len(inst.metrics))
 	for _, s := range inst.metrics {

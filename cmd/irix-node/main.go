@@ -26,7 +26,6 @@ import (
 
 	"irix/node/internal/platform"
 	"irix/node/internal/sysinfo"
-	"irix/node/internal/vaultcrypto"
 )
 
 func main() {
@@ -43,6 +42,8 @@ func main() {
 // runNode 是组合根：解析配置、初始化依赖，再交由运行时管理服务生命周期。
 // 返回错误而不是在初始化中直接退出，确保已经创建的资源能被释放。
 func runNode() error {
+	// 日志时间戳改用节点时间系统（此时尚未同步，等同系统时钟；同步后自动跟随）。
+	setupClockLogging()
 	var (
 		configPath     = flag.String("config", "config.json", "配置文件路径（JSON，不存在则首次启动自动生成示例配置）；全部启动参数均可写入配置文件（字段见 cmd/irix-node/config.example.json），命令行显式参数优先级高于配置文件")
 		port           = flag.Int("port", 12346, "监听端口（1-65535）")
@@ -79,6 +80,17 @@ func runNode() error {
 		redisAddr      = flag.String("redis-addr", "", "Redis 地址（如 127.0.0.1:6379；空 = 不启用 Redis 缓存，账户会话与权限直接走数据库）")
 		redisPassword  = flag.String("redis-password", "", "Redis 密码（无密码留空）")
 		redisDB        = flag.Int("redis-db", 0, "Redis 库号（0-15）")
+		// 时间系统（docs/time-system.md）：Roughtime + 漂移补偿 + 时钟纪律。
+		timeSync      = flag.Bool("time-sync", true, "启用节点自有时间系统：用 Roughtime 获取可信时间，做漂移补偿与时钟纪律；关闭则全部时间判定回退系统时钟")
+		timeServers   = flag.String("time-servers", "", "Roughtime 服务器列表（逗号分隔的 host:port@base64公钥；留空用配置文件 time.servers 或内置列表）")
+		timeInterval  = flag.Int("time-interval", defaultTimeIntervalSeconds, "Roughtime 同步间隔（秒，最小 5）")
+		timeTimeoutMS = flag.Int("time-timeout-ms", defaultTimeTimeoutMillis, "单台 Roughtime 服务器查询超时（毫秒）")
+		timeSamples   = flag.Int("time-samples", defaultTimeSamples, "每轮查询的服务器数量（1-16）")
+		timeMinAgree  = flag.Int("time-min-agreement", defaultTimeMinAgreement, "至少多少台服务器时间区间一致才采纳本轮结果（1-16；服务器少于该值时自动放宽）")
+		timeMaxSlew   = flag.Int("time-max-slew-ppm", defaultTimeMaxSlewPPM, "相位校正最大速率（ppm；500ppm 约每小时 1.8 秒，越小越平滑）")
+		timeStepMS    = flag.Int("time-step-ms", defaultTimeStepMillis, "误差超过该值时直接步进（毫秒；步进会跳变，仅用于首次锁定或大偏差）")
+		timeBootWait  = flag.Int("time-boot-wait-ms", defaultTimeBootWaitMillis, "启动时等待首轮 Roughtime 同步的上限（毫秒；0 = 不等待，后台继续同步）")
+		timeTLSTrust  = flag.Bool("time-tls-require-trusted", false, "时间不可信时拒绝 TLS 握手（默认 false，避免离线节点把管理入口锁死；高安全部署可开启）")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "IriX Node Daemon - 本地节点服务\n\n")
@@ -104,7 +116,6 @@ func runNode() error {
 	// 命令行显式设置的参数名集合：这些参数不被配置文件覆盖
 	setFlags := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
-
 	// 首次启动无配置文件时自动生成示例配置（生成失败仅告警，不阻断启动）
 	if created, err := ensureConfigFile(*configPath); err != nil {
 		log.Printf("警告: 自动生成配置文件 %s 失败: %v（将继续按命令行参数与默认值启动）", *configPath, err)
@@ -121,6 +132,7 @@ func runNode() error {
 		Port:                  *port,
 		BindHost:              *bindHost,
 		DataDir:               *dataDir,
+		ConfigPath:            *configPath, // 兼容层自动生成凭据后回写配置文件用
 		AdminIntranetOnly:     *adminIntranet,
 		InstanceLog:           *instanceLog,
 		InstanceLogMax:        *instanceLogMB,
@@ -151,6 +163,23 @@ func runNode() error {
 		RedisAddr:             *redisAddr,
 		RedisPassword:         *redisPassword,
 		RedisDB:               *redisDB,
+		// 时间系统
+		TimeEnabled:            *timeSync,
+		TimeServers:            *timeServers,
+		TimeIntervalSeconds:    *timeInterval,
+		TimeTimeoutMillis:      *timeTimeoutMS,
+		TimeSamples:            *timeSamples,
+		TimeMinAgreement:       *timeMinAgree,
+		TimeMaxSlewPPM:         *timeMaxSlew,
+		TimeMaxRatePPM:         defaultTimeMaxRatePPM,
+		TimeStepMillis:         *timeStepMS,
+		TimeMaxSlewOffsetMs:    defaultTimeMaxSlewOffsetMS,
+		TimeMinRateSpanMinutes: defaultTimeMinRateSpanMin,
+		TimeHoldoverLimitHours: defaultTimeHoldoverHours,
+		TimeMaxUncMillis:       defaultTimeMaxUncMillis,
+		TimeHoldoverDriftPPM:   defaultTimeDriftPPM,
+		TimeBootWaitMillis:     *timeBootWait,
+		TimeTLSRequireTrusted:  *timeTLSTrust,
 	}
 	opts.applyConfig(cfg, setFlags)
 
@@ -207,6 +236,13 @@ func runNode() error {
 	}
 	if opts.VaultEnabled && opts.TLSMode == "off" {
 		return errors.New("启用加密保险库（-vault）必须开启 TLS（tls-mode=auto 或 manual）：密码/TOTP/签名明文传输将完全破坏 Vault 的安全模型")
+	}
+	// 时间系统参数校验（docs/time-system.md）。
+	if opts.TimeIntervalSeconds < 5 {
+		return fmt.Errorf("time-interval 无效: %d 秒（须 ≥5；请检查命令行参数或配置文件 %s）", opts.TimeIntervalSeconds, *configPath)
+	}
+	if opts.TimeBootWaitMillis < 0 || opts.TimeBootWaitMillis > 60000 {
+		return fmt.Errorf("time-boot-wait-ms 无效: %d（须在 0-60000 之间；请检查命令行参数或配置文件 %s）", opts.TimeBootWaitMillis, *configPath)
 	}
 	if opts.VaultEnabled {
 		if opts.VaultIdleTimeout < 1 {
@@ -267,11 +303,22 @@ func runNode() error {
 			d.workers.stop()
 			d.closeAccounts()
 		}
+		d.stopTimeSystem()
 		// 所有请求与受管进程退出后，再排空审计文件；main 最后排空 stderr。
 		if d.AuditLog != nil {
 			d.AuditLog.Close()
 		}
 	}()
+	// 时间系统先于账户/TLS 初始化：会话过期、TOTP、证书日期、审计时间戳
+	// 全部依赖它（docs/time-system.md）。启动等待首轮同步是有时限的，
+	// 离线节点不会因此卡住启动。
+	timeCfg, err := buildTimeConfig(opts, opts.DataDir)
+	if err != nil {
+		return fmt.Errorf("时间系统配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
+	}
+	if err := d.initTimeSystem(timeCfg, time.Duration(opts.TimeBootWaitMillis)*time.Millisecond, opts.TimeTLSRequireTrusted); err != nil {
+		return fmt.Errorf("时间系统初始化失败: %w", err)
+	}
 	d.Port = opts.Port
 	d.AdminIntranetOnly = opts.AdminIntranetOnly
 	d.transferAllowCIDR = opts.TransferAllowCIDR
@@ -279,6 +326,9 @@ func runNode() error {
 		return fmt.Errorf("transfer-allow-cidr 配置无效: %w（请检查命令行参数或配置文件 %s）", err, *configPath)
 	}
 	d.setCorsOrigins(opts.CorsOrigins)
+	// 第三方 Daemon 协议兼容层（config.json 的 compat 块）：两个开关可同时开启，
+	// 各自挂在独立子路径下；配置不完整时仅告警并跳过，不影响主功能。
+	d.setupCompat(opts)
 	// DDoS/CC 防御：恒开、无关闭开关，这里只应用阈值调优与配置级静态 UA 封禁。
 	var blockedUAs []string
 	if strings.TrimSpace(opts.DefenseBlockedUAs) != "" {
@@ -411,17 +461,18 @@ func runNode() error {
 	d.BindHost = bind
 	addr := net.JoinHostPort(bind, strconv.Itoa(opts.Port))
 
-	// TLS 初始化：auto 生成自签证书 / manual 加载正式证书 / off 保持明文（打印一行提示）
+	// TLS 初始化：auto 生成自签证书 / manual 加载正式证书 / off 保持明文。
+	// 证书日期、链校验与续签全部围绕节点时间系统（time_system.go）。
 	var tlsCfg *tls.Config
 	tlsFingerprint := ""
 	switch opts.TLSMode {
 	case "auto":
-		tlsCfg, tlsFingerprint, err = vaultcrypto.EnsureSelfSignedTLS(filepath.Join(opts.DataDir, "tls"))
+		tlsCfg, tlsFingerprint, err = d.setupTLS("auto", "", "", filepath.Join(opts.DataDir, "tls"))
 		if err != nil {
 			return fmt.Errorf("TLS 自签证书初始化失败: %w", err)
 		}
 	case "manual":
-		tlsCfg, tlsFingerprint, err = vaultcrypto.LoadManualTLS(opts.TLSCert, opts.TLSKey)
+		tlsCfg, tlsFingerprint, err = d.setupTLS("manual", opts.TLSCert, opts.TLSKey, "")
 		if err != nil {
 			return err
 		}
@@ -429,7 +480,7 @@ func runNode() error {
 		alog.Printf("TLS 未开启（tls-mode=off），流量为明文传输；等保二级部署请设置 tls-mode=auto 或 manual")
 	}
 	// 设备绑定挑战会把证书指纹返回给客户端做固定校验；TLS 关闭时为空。
-	d.TLSFingerprint = tlsFingerprint
+	d.setTLSFingerprint(tlsFingerprint)
 
 	// 平台适配层不反向依赖主包日志器，这里注入异步日志输出（仅 OpenBSD 的
 	// pledge/unveil 自限制会用它输出一行启用日志）。
@@ -553,6 +604,10 @@ func limitAPIBody(next http.Handler) http.Handler {
 }
 
 // Version 守护进程版本号。
+// 1.5.0：新增节点自有时间系统（docs/time-system.md）——Roughtime（RFC 10049 +
+// 部署版格式）多源校验、漂移补偿（ppm）、slew/step 时钟纪律、holdover 与状态
+// 落盘；会话/封禁/审计/实例时间戳、HTTP Date 与 TLS 证书签发/链校验/续签全部
+// 围绕该时间源；新增 GET /api/time 与 POST /api/time/sync。
 // 1.4.0：新增客户端设备绑定（Ed25519 / ECDSA P-256 挑战登录、会话逐请求
 // HMAC 证明、optional/required 策略），为后续 TPM 2.0 密钥与客户端交接提供
 // 服务端协议；required 强制要求 TLS。
@@ -562,7 +617,7 @@ func limitAPIBody(next http.Handler) http.Handler {
 // 管理员用户名与密码（仅显示一次），全部 API 请求走账户会话 token。
 // 1.1.0：新增实时控制台 WebSocket、实例日志持久化查询、Java 检测/安装、
 // 核心下载、导入目录（docs/irix-node-local-parity.md M1）。
-const Version = "1.4.0"
+const Version = "1.5.0"
 
 // resolveBind 解析监听地址：显式 bind（-bind 参数或配置文件 bind 字段，
 // 已合并进 flagValue）优先；留空时读 IRIX_NODE_BIND_ALL 环境变量

@@ -3,6 +3,15 @@
 ## 能力概览
 
 - **概览**：`GET /api/overview` 返回主机信息、内存、实例统计。
+- **自有时间系统（Roughtime）**：节点不信任系统墙钟，用 Roughtime（RFC 10049，
+  兼容 Cloudflare/int08h/roughtime.se 等已部署旧格式）获取带签名与 Merkle 证明的时间区间；
+  多源区间相交取最大一致组（默认至少 2 台）剔除虚假源；受纪律时钟锚定单调时钟，
+  持续拟合晶振漂移（ppm）并平滑校正，小误差按最多 500ppm 缓变、大误差才步进；
+  断网时进入 holdover，不确定度按漂移上界增长，状态落盘 `{data}/timesys.json`。
+  会话/封禁/审计/实例时间戳、响应 `time` 字段、HTTP `Date`、日志时间戳、
+  **TLS 证书签发与证书链校验**全部使用该时间；自签证书在节点时间失效时自动重签。
+  状态与手动同步：`GET /api/time`、`POST /api/time/sync`。详见
+  [时间系统](time-system.md)。
 - **实例管理**：列表 / 详情 / 创建 / 更新 / 删除，启动 / 停止 / 重启 / 强制终止，
   命令下发（标准输入），输出日志（环形缓冲）。
 - **文件管理**：列表 / 读写 / 删除 / 移动 / 复制 / 压缩 / 解压 / 新建目录 /
@@ -56,6 +65,7 @@
   instances.json   # 实例配置列表（保险库模式下加密存储，见下）
   accounts.db      # 账户库（-accounts-driver 可换 mysql/postgres）
   defense.json     # 人工封禁的 IP / User-Agent（自动封禁仅在运行期）
+  timesys.json     # 时间系统状态（频率校正/上次同步/保持锚点）
   processes/       # 受管进程身份记录（实例退出后删除）
   vault/           # 加密保险库（-vault 开启时）
     vault.json     # 用户/密钥包裹/恢复令牌哈希/迁移标记

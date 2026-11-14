@@ -31,6 +31,8 @@ import (
 
 	"irix/node/internal/sysinfo"
 	"irix/node/internal/vaultcrypto"
+
+	"irix/node/internal/timesys"
 )
 
 // vault 常量（docs/vault-design.md §7.1/§8.6）。
@@ -276,7 +278,7 @@ func (v *vaultState) janitor(ctx context.Context) {
 	defer ticker.Stop()
 	for waitNextTick(ctx, ticker.C) {
 		v.mu.Lock()
-		now := time.Now()
+		now := timesys.Now()
 		unlockedAny := false
 		for k, s := range v.sessions {
 			if now.After(s.expiresAt) {
@@ -347,12 +349,12 @@ func (v *vaultState) validateVaultPassword(pw string) error {
 // vaultLimited 检查 key 是否处于锁定中（限速器；调用方须持有 v.mu）。
 func (v *vaultState) vaultLimited(key string) bool {
 	f := v.failures[key]
-	return f != nil && time.Now().Before(f.until)
+	return f != nil && timesys.Now().Before(f.until)
 }
 
 // vaultFail 记录一次失败；窗口内达到 maxAttempts → 进入锁定（调用方须持有 v.mu）。
 func (v *vaultState) vaultFail(key string) {
-	now := time.Now()
+	now := timesys.Now()
 	f := v.failures[key]
 	if f == nil || now.Sub(f.windowStart) > v.lockoutDuration {
 		f = &vaultFail{windowStart: now}
@@ -381,7 +383,7 @@ func (v *vaultState) sessionFor(r *http.Request) *vaultSession {
 		return nil
 	}
 	s := v.sessions[token]
-	if s == nil || time.Now().After(s.expiresAt) {
+	if s == nil || timesys.Now().After(s.expiresAt) {
 		return nil
 	}
 	if v.bindSessionIP && s.ip != "" && s.ip != clientIP(r) {
@@ -411,7 +413,7 @@ func (v *vaultState) unlockedSafe() bool {
 // 返回 (用户, 授权类型, 错误)；调用方须持有 v.mu。
 func (v *vaultState) vaultTarget(r *http.Request) (*vaultUser, string, error) {
 	if token := r.Header.Get("X-Vault-Token"); token != "" {
-		if it := v.initTokens[token]; it != nil && time.Now().Before(it.expires) {
+		if it := v.initTokens[token]; it != nil && timesys.Now().Before(it.expires) {
 			u := v.users[it.user]
 			if u != nil {
 				return u, "init", nil
@@ -542,7 +544,7 @@ func (d *Daemon) vaultGate(next http.Handler) http.Handler {
 		// 解锁状态：校验会话令牌并滑动续期。
 		// 读锁完成校验，续期按 vaultRenewInterval 节流后才取写锁：
 		// 每个请求都抢写锁会把全部数据面 API 串行化，高并发下吞吐骤降。
-		now := time.Now()
+		now := timesys.Now()
 		v.mu.RLock()
 		s := v.sessionFor(r) // 只读：map 查找 + 字段读取，读锁下安全
 		allowed := s != nil && !s.recovery

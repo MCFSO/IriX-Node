@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // writeJSON 输出 MCSM 风格的统一响应体 {status, data, time}，
@@ -24,7 +26,7 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": status,
 		"data":   data,
-		"time":   time.Now().UnixMilli(),
+		"time":   timesys.Now().UnixMilli(),
 	})
 }
 
@@ -59,6 +61,12 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/overview", d.auth(d.handleOverview))
 	perm("概览", "GET /api/load", "查看负载调谐状态")
 	mux.HandleFunc("GET /api/load", d.auth(d.handleLoad))
+
+	// 时间系统（docs/time-system.md）：Roughtime + 漂移补偿 + 时钟纪律
+	perm("时间系统", "GET /api/time", "查看节点时间系统状态")
+	mux.HandleFunc("GET /api/time", d.auth(d.handleTimeStatus))
+	perm("时间系统", "POST /api/time/sync", "立即触发一次 Roughtime 同步")
+	mux.HandleFunc("POST /api/time/sync", d.auth(d.handleTimeSync))
 
 	// 审计日志只读接口（docs/backend-requirements.md P0）
 	perm("审计", "GET /api/audit/log", "查看审计日志")
@@ -217,6 +225,10 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 
 	// DDoS/CC 防御状态与人工封禁（防御恒开，见 defense.go）
 	d.registerDefenseRoutes(mux)
+
+	// 第三方 Daemon 协议兼容层（config.json 的 compat 块，见 compat.go）：
+	// 未启用时为 nil，不注册任何路由。
+	d.registerCompat(mux)
 }
 
 // auth 包装器：校验账户会话，并按端点权限开关放行。
@@ -238,7 +250,7 @@ func (d *Daemon) auth(next http.HandlerFunc) http.HandlerFunc {
 		// 已绑定设备的会话必须携带逐请求 HMAC 证明（device_auth.go）：
 		// token 泄露但没有 proofKey 的请求一律拒绝。HMAC 校验约 1µs，走内存缓存。
 		// 设备会话同时要求节点 TLS：否则设备证明/会话密钥可能被中间人窃取。
-		if id.deviceID != "" && d.TLSFingerprint == "" {
+		if id.deviceID != "" && d.tlsFingerprintValue() == "" {
 			writeError(w, http.StatusForbidden, "设备绑定会话需要节点启用 TLS")
 			return
 		}
@@ -453,7 +465,7 @@ func (d *Daemon) handleInstanceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Cwd = abs
-	cfg.CreateDatetime = time.Now().UnixMilli()
+	cfg.CreateDatetime = timesys.Now().UnixMilli()
 	cfg.LastDatetime = cfg.CreateDatetime
 
 	inst := NewInstance("", cfg)
@@ -835,7 +847,7 @@ func (d *Daemon) autoRestart(inst *Instance) {
 		return
 	}
 	inst.mu.Lock()
-	now := time.Now()
+	now := timesys.Now()
 	if now.Sub(inst.arWindowStart) > 10*time.Second {
 		inst.arWindowStart = now
 		inst.arAttempts = 0

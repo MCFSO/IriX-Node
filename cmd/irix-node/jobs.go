@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // 任务状态常量。
@@ -100,7 +102,7 @@ func (s *taskStore) create() (string, *task) {
 		// 淘汰时必须同时从 order 摘除 id——只删 tasks 会在 order 中留下悬挂
 		// id，后续遍历（此处与 cleanupOnce）取到 nil 会在 t.mu 上 panic，
 		// 而 panic 发生在后台 goroutine 中会终止整个进程。
-		now := time.Now()
+		now := timesys.Now()
 		for i, id := range s.order {
 			t := s.tasks[id]
 			if t == nil { // 悬挂 id（历史遗留或并发淘汰）：直接摘除
@@ -123,7 +125,7 @@ func (s *taskStore) create() (string, *task) {
 		}
 	}
 	id := newUUID()
-	s.tasks[id] = &task{status: taskStatusRunning, percent: -1, createdAt: time.Now()}
+	s.tasks[id] = &task{status: taskStatusRunning, percent: -1, createdAt: timesys.Now()}
 	s.order = append(s.order, id)
 	return id, s.tasks[id]
 }
@@ -140,7 +142,7 @@ func (s *taskStore) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for waitNextTick(ctx, ticker.C) {
-		s.cleanupOnce(time.Now())
+		s.cleanupOnce(timesys.Now())
 	}
 }
 

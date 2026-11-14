@@ -20,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // CLI 绝对路径：FreeBSD 上以服务方式启动时 PATH 常不含 /usr/local/bin 与 sbin，
@@ -1352,7 +1354,7 @@ func (s *sessionStore) remove(id string) {
 
 // sweepLocked 清理已结束且超过保留时长的会话（调用方须持有 mu）。
 func (s *sessionStore) sweepLocked() {
-	cutoff := time.Now().Add(-sessionRetain)
+	cutoff := timesys.Now().Add(-sessionRetain)
 	for id, sess := range s.sessions {
 		sess.mu.Lock()
 		expired := !sess.running && !sess.endedAt.IsZero() && sess.endedAt.Before(cutoff)
@@ -1456,7 +1458,7 @@ func (d *Daemon) bastilleRunStart(name, command, cwd string, watch bool) (string
 		} else {
 			sess.exitCode = 0
 		}
-		sess.endedAt = time.Now()
+		sess.endedAt = timesys.Now()
 		sess.mu.Unlock()
 		var watchErr error
 		if watch {

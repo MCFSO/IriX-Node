@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"irix/node/internal/vaultcrypto"
+
+	"irix/node/internal/timesys"
 )
 
 // authFailed 统一认证失败响应（不区分 TOTP/密码/签名，防信息泄露）。
@@ -60,9 +62,9 @@ func (d *Daemon) handleVaultStatus(w http.ResponseWriter, r *http.Request) {
 		data["locked"] = !v.unlocked()
 		if s := v.sessionFor(r); s != nil && !s.recovery {
 			data["user"] = s.user
-			data["expiresIn"] = int(time.Until(s.expiresAt).Seconds())
+			data["expiresIn"] = int(timesys.Until(s.expiresAt).Seconds())
 			if u := v.users[s.user]; u != nil && v.passwordExpire > 0 &&
-				time.Since(u.PasswordChangedAt) >= v.passwordExpire {
+				timesys.Since(u.PasswordChangedAt) >= v.passwordExpire {
 				data["passwordExpired"] = true
 			}
 		}
@@ -154,7 +156,7 @@ func (d *Daemon) handleVaultInit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "密钥包裹失败")
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 
 	user := &vaultUser{
 		Name:              req.User,
@@ -189,7 +191,7 @@ func (d *Daemon) handleVaultInit(w http.ResponseWriter, r *http.Request) {
 	v.initTokens[initToken] = &vaultInitToken{
 		token:   initToken,
 		user:    req.User,
-		expires: time.Now().Add(initTokenTTL),
+		expires: timesys.Now().Add(initTokenTTL),
 	}
 	d.auditLogf("vault.init 初始化完成 user=%s", req.User)
 	writeOK(w, map[string]any{
@@ -230,7 +232,7 @@ func (d *Daemon) handleVaultTOTPVerify(w http.ResponseWriter, r *http.Request) {
 	// 授权解析：initToken 优先；其次恢复/解锁会话
 	var u *vaultUser
 	isInit := false
-	if it != nil && time.Now().Before(it.expires) {
+	if it != nil && timesys.Now().Before(it.expires) {
 		u = v.users[it.user]
 		isInit = true
 	} else if s := v.sessionFor(r); s != nil {
@@ -246,7 +248,7 @@ func (d *Daemon) handleVaultTOTPVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "TOTP 密钥损坏")
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 	win := now.Unix() / vaultcrypto.TotpPeriod
 	if !vaultcrypto.TotpVerify(secret, req.Code, now, 1, vaultcrypto.TotpDigits, vaultcrypto.TotpPeriod) || win <= u.lastTOTPWindow {
 		v.vaultFail(limiterKey)
@@ -333,7 +335,7 @@ func (d *Daemon) handleVaultChallenge(w http.ResponseWriter, r *http.Request) {
 	defer v.mu.Unlock()
 	// 池上限：先回收过期项，仍满则拒绝（防刷爆内存）
 	if len(v.challenges) >= maxChallenges {
-		now := time.Now()
+		now := timesys.Now()
 		for k, c := range v.challenges {
 			if now.After(c.expires) {
 				delete(v.challenges, k)
@@ -358,7 +360,7 @@ func (d *Daemon) handleVaultChallenge(w http.ResponseWriter, r *http.Request) {
 		id:      id,
 		purpose: req.Purpose,
 		value:   chValue,
-		expires: time.Now().Add(challengeTTL),
+		expires: timesys.Now().Add(challengeTTL),
 	}
 	writeOK(w, map[string]any{"challengeId": id, "challenge": chValue})
 }
@@ -388,7 +390,7 @@ func (d *Daemon) handleVaultCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch := v.challenges[req.ChallengeID]
-	if ch == nil || ch.used || time.Now().After(ch.expires) || ch.purpose != "cert-bind" {
+	if ch == nil || ch.used || timesys.Now().After(ch.expires) || ch.purpose != "cert-bind" {
 		writeError(w, http.StatusBadRequest, "挑战无效或已使用")
 		return
 	}
@@ -458,7 +460,7 @@ func (d *Daemon) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 	// 1) 挑战：存在性/用途/有效期校验；首试即作废（无论成败）
 	ch := v.challenges[req.ChallengeID]
-	if ch == nil || ch.purpose != "unlock" || ch.used || time.Now().After(ch.expires) {
+	if ch == nil || ch.purpose != "unlock" || ch.used || timesys.Now().After(ch.expires) {
 		writeError(w, http.StatusUnauthorized, "认证失败")
 		return
 	}
@@ -476,7 +478,7 @@ func (d *Daemon) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "TOTP 密钥损坏")
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 	win := now.Unix() / vaultcrypto.TotpPeriod
 	if !u.TOTPBound || !vaultcrypto.TotpVerify(secret, req.TOTP, now, 1, vaultcrypto.TotpDigits, vaultcrypto.TotpPeriod) || win <= u.lastTOTPWindow {
 		v.vaultFail(limiterKey)
@@ -523,7 +525,7 @@ func (d *Daemon) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 密码过期策略（A3/D15）
-	passwordExpired := v.passwordExpire > 0 && time.Since(u.PasswordChangedAt) >= v.passwordExpire
+	passwordExpired := v.passwordExpire > 0 && timesys.Since(u.PasswordChangedAt) >= v.passwordExpire
 	rewrapped := false
 	if passwordExpired && v.forceExpire {
 		if req.NewPassword == "" {
@@ -551,7 +553,7 @@ func (d *Daemon) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
 		}
 		u.KEKSaltB64 = b64e(newSalt)
 		u.MasterKeyWrapB64 = b64e(newWrap)
-		u.PasswordChangedAt = time.Now()
+		u.PasswordChangedAt = timesys.Now()
 		passwordExpired = false
 		rewrapped = true
 	}
@@ -724,7 +726,7 @@ func (d *Daemon) handleVaultPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	u.KEKSaltB64 = b64e(newSalt)
 	u.MasterKeyWrapB64 = b64e(newWrap)
-	u.PasswordChangedAt = time.Now()
+	u.PasswordChangedAt = timesys.Now()
 	// 作废该用户除当前会话外的全部会话（设计 §6.4）
 	currentToken := r.Header.Get("X-Vault-Token")
 	for k, s := range v.sessions {
@@ -811,7 +813,7 @@ func (d *Daemon) handleVaultRecovery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "令牌生成失败")
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 	v.sessions[sessionToken] = &vaultSession{
 		token:      sessionToken,
 		user:       target.Name,
@@ -891,7 +893,7 @@ func (d *Daemon) handleVaultUserAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "密钥生成失败")
 		return
 	}
-	now := time.Now()
+	now := timesys.Now()
 	v.users[req.User] = &vaultUser{
 		Name:              req.User,
 		TOTPSecretB64:     b64e(totpSecret),
@@ -913,7 +915,7 @@ func (d *Daemon) handleVaultUserAdd(w http.ResponseWriter, r *http.Request) {
 	v.initTokens[initToken] = &vaultInitToken{
 		token:   initToken,
 		user:    req.User,
-		expires: time.Now().Add(initTokenTTL),
+		expires: timesys.Now().Add(initTokenTTL),
 	}
 	d.auditLogf("vault.user.add user=%s 操作者=%s", req.User, s.user)
 	writeOK(w, map[string]any{
@@ -1046,7 +1048,7 @@ func (d *Daemon) handleVaultBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=irix-vault-backup-%d.zip", time.Now().Unix()))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=irix-vault-backup-%d.zip", timesys.Now().Unix()))
 	zw := zip.NewWriter(w)
 	addZipFile := func(name, path string) error {
 		data, err := os.ReadFile(path)

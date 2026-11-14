@@ -22,6 +22,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // asyncLogger 全局异步日志器：Printf 入队，后台单 goroutine 顺序写 stderr。
@@ -299,7 +301,7 @@ func (f *fileLogger) archiveRotated() {
 	// 毫秒时间戳 + 单调序号：同一毫秒内多次轮转（小文件高速轮转）不互相覆盖
 	f.archiveSeq++
 	dst := filepath.Join(dir, fmt.Sprintf("%s-%s-%03d.log", base,
-		time.Now().Format("20060102-150405.000"), f.archiveSeq))
+		timesys.Now().Format("20060102-150405.000"), f.archiveSeq))
 	if err := copyFile(src, dst); err != nil {
 		alog.Printf("警告: 日志归档 %s 失败: %v", dst, err)
 	}

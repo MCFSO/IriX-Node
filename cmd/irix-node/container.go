@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"irix/node/internal/timesys"
 )
 
 // errContainerUnsupported 当前平台不支持容器能力的哨兵错误。
@@ -1612,7 +1614,7 @@ func (d *Daemon) handleArchiveCreate(w http.ResponseWriter, r *http.Request) {
 		if base == "." || base == string(filepath.Separator) || base == "" {
 			base = "archive"
 		}
-		name = fmt.Sprintf("%s_%s.zip", base, time.Now().Format("20060102_150405"))
+		name = fmt.Sprintf("%s_%s.zip", base, timesys.Now().Format("20060102_150405"))
 	}
 	name, err := safeArchiveName(name)
 	if err != nil {

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"irix/node/internal/sysinfo"
+
+	"irix/node/internal/timesys"
 )
 
 // LogBuffer 线程安全的定容环形日志缓冲。
@@ -221,7 +223,7 @@ func (l *logLines) add(text string) {
 	if len(l.lines) >= l.max {
 		l.lines = append(l.lines[:0], l.lines[1:]...)
 	}
-	l.lines = append(l.lines, timedLine{ts: time.Now().UnixMilli(), text: text})
+	l.lines = append(l.lines, timedLine{ts: timesys.Now().UnixMilli(), text: text})
 }
 
 // since 返回时间戳晚于 ms 的所有行（按时间顺序，补 \n）。
@@ -581,7 +583,7 @@ func (p *Process) Info() map[string]any {
 		"pid":       pid,
 		"ctime":     p.started.UnixMilli(),
 		"elapsed":   int64(time.Since(p.started).Seconds()),
-		"timestamp": time.Now().UnixMilli(),
+		"timestamp": timesys.Now().UnixMilli(),
 	}
 }
 
