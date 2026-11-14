@@ -514,30 +514,9 @@ func mcInstanceBatch(mc *mcsmCompat, s *eioSession, data json.RawMessage, event 
 	return map[string]any{"instanceUuid": req.InstanceUUIDs[0], "instances": instances}, nil
 }
 
-// killInstance 强制终止实例（复用节点既有语义：先摘进程引用再终止，
-// 防止退出监听误判为崩溃而触发自动重启）。
+// killInstance 强制终止实例（实现见 Daemon.compatKillInstance，两层共用）。
 func (mc *mcsmCompat) killInstance(inst *Instance) error {
-	inst.SetStatus(StatusStopping)
-	inst.mu.Lock()
-	proc := inst.Proc
-	inst.Proc = nil
-	inst.mu.Unlock()
-	if proc != nil && proc.IsRunning() {
-		if err := proc.Kill(); err != nil {
-			inst.mu.Lock()
-			if inst.Proc == nil {
-				inst.Proc = proc
-			}
-			inst.mu.Unlock()
-			inst.SetStatus(StatusRunning)
-			return err
-		}
-		if err := mc.d.forgetProcessFor(inst.InstanceUuid, proc); err != nil {
-			alog.Printf("MCSManager 兼容层：清理进程记录失败: %v", err)
-		}
-	}
-	inst.SetStatus(StatusStopped)
-	return nil
+	return mc.d.compatKillInstance(inst)
 }
 
 func mcEventInstanceOpen(mc *mcsmCompat, s *eioSession, data json.RawMessage) (any, error) {

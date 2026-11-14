@@ -345,6 +345,44 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 	}
 }
 
+// compatKillInstance 强制终止实例（两个兼容层共用同一语义）。
+//
+// 与节点自身 /api/protected_instance/kill 一致：先摘掉进程引用再终止，
+// 防止退出监听 goroutine 误判为「意外退出」而触发 AutoRestart。
+// 额外处理一种竞态：Kill 期间进程可能已经自行退出（Kill 返回错误但进程
+// 确实不在了），此时按成功处理并落 Stopped，而不是把状态回滚成 Running。
+func (d *Daemon) compatKillInstance(inst *Instance) error {
+	if inst == nil {
+		return fmt.Errorf("实例不存在")
+	}
+	inst.SetStatus(StatusStopping)
+	inst.mu.Lock()
+	proc := inst.Proc
+	inst.Proc = nil
+	inst.mu.Unlock()
+	if proc != nil && proc.IsRunning() {
+		if err := proc.Kill(); err != nil {
+			if proc.IsRunning() {
+				// 确实没杀掉：恢复现场并如实报错
+				inst.mu.Lock()
+				if inst.Proc == nil {
+					inst.Proc = proc
+				}
+				inst.mu.Unlock()
+				inst.SetStatus(StatusRunning)
+				return err
+			}
+			alog.Printf("兼容层：实例 %s 的进程在强杀期间已自行退出（%v），按已停止处理",
+				inst.InstanceUuid, err)
+		}
+		if err := d.forgetProcessFor(inst.InstanceUuid, proc); err != nil {
+			alog.Printf("兼容层：清理实例 %s 进程记录失败: %v", inst.InstanceUuid, err)
+		}
+	}
+	inst.SetStatus(StatusStopped)
+	return nil
+}
+
 // registerCompat 把已启用的兼容层挂到路由表（由 RegisterRoutes 调用）。
 func (d *Daemon) registerCompat(mux *http.ServeMux) {
 	if d.compatMC != nil {

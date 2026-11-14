@@ -257,7 +257,7 @@ func TestCompatMCSMInstanceLifecycle(t *testing.T) {
 	// 创建实例
 	status, data := c.requestRaw("instance/new", "u2", map[string]any{
 		"nickname":     "兼容层实例",
-		"startCommand": "ping 127.0.0.1 -t",
+		"startCommand": echoCommand(),
 		"stopCommand":  "stop",
 		"cwd":          cwd,
 		"type":         "universal",
@@ -357,11 +357,24 @@ func TestCompatMCSMInstanceLifecycle(t *testing.T) {
 		t.Fatalf("下发命令失败: %d %s", status, data)
 	}
 
-	// 强杀
+	// 强杀（杀进程是异步回收，等状态落定再删，避免删除被「正在运行」拒绝）
 	if status, data := c.requestRaw("instance/kill", "u7", map[string]any{
 		"instanceUuids": []string{created.InstanceUUID},
 	}); status != 200 {
 		t.Fatalf("强杀实例失败: %d %s", status, data)
+	}
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		st = inst.Status
+		inst.mu.Unlock()
+		if st == StatusStopped {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st != StatusStopped {
+		t.Fatalf("强杀后实例应为已停止，实际 status=%d", st)
 	}
 
 	// 删除
@@ -391,7 +404,7 @@ func TestCompatMCSMFileOpsAndTickets(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := sampleInst(1, cwd)
-	inst.Config.StartCommand = "ping 127.0.0.1 -t"
+	inst.Config.StartCommand = echoCommand()
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}

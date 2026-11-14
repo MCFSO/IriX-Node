@@ -75,7 +75,7 @@ func TestCompatMSLXHubConsole(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := sampleInst(1, cwd)
-	inst.Config.StartCommand = "ping 127.0.0.1 -t"
+	inst.Config.StartCommand = echoCommand()
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}

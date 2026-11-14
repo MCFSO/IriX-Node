@@ -152,7 +152,7 @@ func TestCompatMSLXInstanceFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst := sampleInst(1, cwd)
-	inst.Config.StartCommand = "ping 127.0.0.1 -t"
+	inst.Config.StartCommand = echoCommand()
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -209,15 +209,30 @@ func TestCompatMSLXInstanceFlow(t *testing.T) {
 		t.Fatalf("实例应处于运行中，实际 %d", st)
 	}
 
-	// 强制结束
+	// 强制结束（杀进程是异步回收，留出轮询窗口）
 	action, _ = json.Marshal(map[string]any{"id": id, "action": "forceExit"})
-	if status, body := mslxDo(t, http.MethodPost, base+"/api/instance/action", token, action); status != http.StatusOK {
-		t.Fatalf("强制结束失败: %d %s", status, body)
+	statusForce, bodyForce := mslxDo(t, http.MethodPost, base+"/api/instance/action", token, action)
+	if statusForce != http.StatusOK {
+		t.Fatalf("强制结束请求失败: %d %s", statusForce, bodyForce)
 	}
-	inst.mu.Lock()
-	st = inst.Status
-	inst.mu.Unlock()
-	if st != StatusStopped {
+	var envForce mslxEnvelope
+	_ = json.Unmarshal(bodyForce, &envForce)
+	if strings.Contains(envForce.Message, "失败") {
+		t.Fatalf("强制结束动作报告失败: %s", envForce.Message)
+	}
+	stopped := false
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		st = inst.Status
+		inst.mu.Unlock()
+		if st == StatusStopped {
+			stopped = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !stopped {
 		t.Fatalf("强制结束后应为已停止，实际 %d", st)
 	}
 

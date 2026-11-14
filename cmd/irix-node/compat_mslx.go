@@ -718,35 +718,6 @@ func (ms *mslxCompat) handleInstanceAction(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// compatKillInstance 强制终止实例（与 MCSM 兼容层共用同一语义）。
-func (d *Daemon) compatKillInstance(inst *Instance) error {
-	if d.compatMC != nil {
-		return d.compatMC.killInstance(inst)
-	}
-	// 未启用 MCSM 兼容层时就地实现（保持两层的杀进程语义一致）
-	inst.SetStatus(StatusStopping)
-	inst.mu.Lock()
-	proc := inst.Proc
-	inst.Proc = nil
-	inst.mu.Unlock()
-	if proc != nil && proc.IsRunning() {
-		if err := proc.Kill(); err != nil {
-			inst.mu.Lock()
-			if inst.Proc == nil {
-				inst.Proc = proc
-			}
-			inst.mu.Unlock()
-			inst.SetStatus(StatusRunning)
-			return err
-		}
-		if err := d.forgetProcessFor(inst.InstanceUuid, proc); err != nil {
-			alog.Printf("MSLX 兼容层：清理进程记录失败: %v", err)
-		}
-	}
-	inst.SetStatus(StatusStopped)
-	return nil
-}
-
 // handleInstanceSettings 实例设置（general/{id}）。
 func (ms *mslxCompat) handleInstanceSettings(w http.ResponseWriter, r *http.Request, segs []string) {
 	if len(segs) < 2 || segs[0] != "general" {
