@@ -124,12 +124,10 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 	case segs[0] == "auth" && len(segs) == 2 && segs[1] == "login":
 		ms.handleLogin(w, r)
 		return
-	case segs[0] == "node" && len(segs) == 2 && segs[1] == "protocol":
-		mslxOK(w, map[string]any{
-			"protocol": "irix-node",
-			"version":  Version,
-			"mode":     "standalone",
-		}, "OK")
+	case segs[0] == "node" && len(segs) == 2 && segs[1] != "status":
+		// 子节点链接协议（MSLX 节点管理）：protocol / accept-link /
+		// update-link / remove-link 都是主节点匿名调用的；status 需登录。
+		ms.handleNode(w, r, segs[1:])
 		return
 	case segs[0] == "hubs":
 		ms.handleHub(w, r, segs[1:])
@@ -161,6 +159,8 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 		ms.handleFiles(w, r, segs[1:])
 	case "settings":
 		ms.handleSettings(w, r)
+	case "node":
+		ms.handleNode(w, r, segs[1:])
 	case "java":
 		mslxOK(w, ms.d.mcJavaList(), "获取成功")
 	case "docker", "plugins", "frp", "resource", "tasks", "admin":

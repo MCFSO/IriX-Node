@@ -128,7 +128,7 @@
       "version": "",
       "allowPanelIps": []
     },
-    "_comment_mslx": "mslx: MSLX Daemon 兼容，默认监听 7891。WebPanel 后端地址填 http://<本机IP>:7891（或这里的 port），用 username/password 登录（JWT 24 小时有效）。password 与 jwtSecret 留空同样会自动生成：password 写回这里、jwtSecret 写入 {data}/compat-secrets.json（重启后已签发的 token 仍有效）；实例在兼容层的整数 id 持久化于 {data}/compat-mslx-ids.json。",
+    "_comment_mslx": "mslx: MSLX Daemon 兼容，默认监听 7891。WebPanel 后端地址填 http://<本机IP>:7891（或这里的 port），用 username/password 登录（JWT 24 小时有效）。password 与 jwtSecret 留空同样会自动生成：password 写回这里、jwtSecret 写入 {data}/compat-secrets.json（重启后已签发的 token 仍有效）；实例在兼容层的整数 id 持久化于 {data}/compat-mslx-ids.json。linkKey 是 MSLX「设置 → 节点管理 → 添加节点」里要填的**配对密钥**（留空自动生成并回写）；slaveMode 默认 true —— MSLX 只在子节点模式下接受主节点链接，本节点就是以「子节点」身份被面板纳管。链接成功后关系持久化于 {data}/compat-mslx-node.json，并每 2 秒向主节点上报 CPU/内存。",
     "mslx": {
       "enabled": false,
       "bind": "",
@@ -136,6 +136,8 @@
       "username": "admin",
       "password": "",
       "jwtSecret": "",
+      "linkKey": "",
+      "slaveMode": true,
       "allowPanelIps": []
     }
   }

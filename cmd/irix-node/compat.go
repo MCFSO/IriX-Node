@@ -167,6 +167,11 @@ type mslxCompat struct {
 	failSince map[string]time.Time
 	banned    map[string]time.Time
 
+	// 子节点链接（MSLX 节点管理）：配对密钥 + 子节点模式 + 链接状态
+	linkKey   string
+	slaveMode bool
+	node      mslxNodeState
+
 	ids *mslxIDMap // 实例 uuid ↔ 整数 id 映射（持久化于 {data}/compat-mslx-ids.json）
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
@@ -193,6 +198,7 @@ type compatSecrets struct {
 	MCSMKey       string `json:"mcsmKey"`       // MCSManager 节点密钥
 	MSLXPassword  string `json:"mslxPassword"`  // MSLX 登录密码
 	MSLXJWTSecret string `json:"mslxJwtSecret"` // MSLX JWT 签名密钥
+	MSLXLinkKey   string `json:"mslxLinkKey"`   // MSLX 子节点配对密钥（面板「配对密钥」）
 }
 
 // compatSecretPath 自动凭据文件路径。
@@ -264,7 +270,7 @@ func maskSecret(s string) string {
 // 无论兼容层是否启用都会执行（用户要求「就算没开也要填一个东西在那里」），
 // 生成结果会持久化并尽力回写到配置文件对应字段。
 // 返回本轮新生成（需要提示用户）的字段说明。
-func (d *Daemon) resolveCompatSecrets(opts *nodeOptions) (mcKey, mslxPass string, jwtSecret []byte, notes []string) {
+func (d *Daemon) resolveCompatSecrets(opts *nodeOptions) (mcKey, mslxPass string, jwtSecret []byte, mslxLinkKey string, notes []string) {
 	sec := d.loadCompatSecrets()
 	changed := false
 
@@ -317,13 +323,29 @@ func (d *Daemon) resolveCompatSecrets(opts *nodeOptions) (mcKey, mslxPass string
 		jwtSecret = []byte(sec.MSLXJWTSecret)
 	}
 
+	// MSLX 子节点配对密钥（面板「链接新节点」里填的 LinkKey）：
+	// 与其它凭据一样支持自动生成 + 定点回写，保证配置里永远有值。
+	mslxLinkKey = strings.TrimSpace(opts.CompatMSLXLinkKey)
+	if mslxLinkKey == "" {
+		if sec.MSLXLinkKey == "" {
+			sec.MSLXLinkKey = randomToken(compatSecretLen)
+			changed = true
+			notes = append(notes, "已自动生成 compat.mslx.linkKey（子节点配对密钥）")
+			patchCompatConfigFile(opts.ConfigPath, "mslx", "linkKey", sec.MSLXLinkKey)
+		}
+		mslxLinkKey = sec.MSLXLinkKey
+	} else if sec.MSLXLinkKey != mslxLinkKey {
+		sec.MSLXLinkKey = mslxLinkKey
+		changed = true
+	}
+
 	if changed {
 		if err := d.saveCompatSecrets(sec); err != nil {
 			// 落盘失败不影响运行：本轮仍使用内存中的值，仅提示用户
 			notes = append(notes, "自动凭据写入 "+d.compatSecretPath()+" 失败: "+err.Error())
 		}
 	}
-	return mcKey, mslxPass, jwtSecret, notes
+	return mcKey, mslxPass, jwtSecret, mslxLinkKey, notes
 }
 
 // patchCompatConfigFile 把自动生成的凭据回写到配置文件里仍为空的字段。
@@ -376,7 +398,7 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 	}
 	// 无论是否启用都先解析凭据：保证配置文件与自动凭据文件里始终有值，
 	// 用户开启兼容层时无需自己编密钥。
-	mcKey, mslxPass, jwtSecret, notes := d.resolveCompatSecrets(opts)
+	mcKey, mslxPass, jwtSecret, mslxLinkKey, notes := d.resolveCompatSecrets(opts)
 	for _, n := range notes {
 		alog.Printf("兼容层凭据：%s", n)
 	}
@@ -437,8 +459,14 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 				failCount: map[string]int{},
 				failSince: map[string]time.Time{},
 				banned:    map[string]time.Time{},
+				linkKey:   mslxLinkKey,
+				slaveMode: !opts.CompatMSLXMaster,
 			}
 			d.compatMSLX.loadIDMap()
+			if link := d.compatMSLX.loadNodeLink(); link != nil {
+				d.compatMSLX.setNodeLink(link)
+				alog.Printf("MSLX 兼容层：已恢复与主节点 %s 的链接（nodeId=%s）", link.MasterURL, link.NodeID)
+			}
 			alog.Printf("MSLX Daemon 兼容层已启用（WebPanel 后端地址 http://<本机IP>:%d，账号 %s，密码 %s）",
 				port, user, mslxPass)
 		}
@@ -486,6 +514,8 @@ func (d *Daemon) startCompatServers() {
 			func() { d.compatMC = nil })
 	}
 	if d.compatMSLX != nil {
+		// 子节点状态上报（每 2 秒；仅在存在链接关系时真正发送）
+		d.compatMSLX.startNodeReporter()
 		d.startCompatListener("MSLX", d.compatMSLX.bind, d.compatMSLX.port,
 			d.compatMSLX.handler(),
 			func(addr string) { d.compatMSLX.addr = addr },

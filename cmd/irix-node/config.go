@@ -114,6 +114,8 @@ type MSLXCompatConfig struct {
 	Username      string   `json:"username"`      // 登录用户名（默认 admin）
 	Password      string   `json:"password"`      // 登录密码（留空 = 自动生成）
 	JWTSecret     string   `json:"jwtSecret"`     // JWT 签名密钥（留空 = 自动生成并持久化）
+	LinkKey       string   `json:"linkKey"`       // 子节点配对密钥（面板「配对密钥」；留空 = 自动生成）
+	SlaveMode     *bool    `json:"slaveMode"`     // 子节点模式（默认 true；MSLX 只在子节点模式下接受链接）
 	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
 	Prefix        string   `json:"prefix"`        // 已废弃：现为独立端口监听，填了只会在启动日志提示
 }
@@ -385,6 +387,8 @@ type nodeOptions struct {
 	CompatMSLXUser    string // 登录用户名
 	CompatMSLXPass    string // 登录密码（空 = 自动生成）
 	CompatMSLXSecret  string // JWT 签名密钥（空 = 自动生成）
+	CompatMSLXLinkKey string // 子节点配对密钥（空 = 自动生成）
+	CompatMSLXMaster  bool   // 主节点模式（默认 false = 子节点模式，MSLX 只在子节点模式下接受链接）
 	CompatMSLXIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
 	// 以下两项仅为「已废弃配置」的启动提示（兼容层已改为独立端口，不再用前缀）
 	CompatMCSMPrefix string
@@ -645,6 +649,14 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 			}
 			if mx.JWTSecret != "" {
 				o.CompatMSLXSecret = mx.JWTSecret
+			}
+			if v := strings.TrimSpace(mx.LinkKey); v != "" {
+				o.CompatMSLXLinkKey = v
+			}
+			// 默认子节点模式（master=false）：MSLX 只在子节点模式下接受链接请求
+			o.CompatMSLXMaster = false
+			if mx.SlaveMode != nil {
+				o.CompatMSLXMaster = !*mx.SlaveMode
 			}
 			if len(mx.AllowPanelIPs) > 0 {
 				o.CompatMSLXIPs = strings.Join(mx.AllowPanelIPs, "\n")

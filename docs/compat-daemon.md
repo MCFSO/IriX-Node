@@ -62,6 +62,8 @@
 | `mcsm.key` | 面板"节点密钥"（等价 MCSManager 的 apiKey）。**留空即自动生成**（见 §2.1） |
 | `mslx.username` / `mslx.password` | WebPanel 登录账号；密码**留空即自动生成**（见 §2.1） |
 | `mslx.jwtSecret` | JWT 签名密钥；留空即自动生成，写入 `{data}/compat-secrets.json` |
+| `mslx.linkKey` | MSLX「设置 → 节点管理 → 添加节点」里填的**配对密钥**；留空即自动生成（写回配置 + `{data}/compat-secrets.json`） |
+| `mslx.slaveMode` | 子节点模式，默认 `true`。MSLX 只在子节点模式下接受主节点的链接请求；本节点就是以「子节点」身份被面板纳管 |
 | `allowPanelIps` | 允许的面板来源（裸 IP 或 CIDR，数组）；留空 = 不限制来源 |
 | `mcsm.version` | 上报给面板的节点版本号。留空 = 本节点版本；面板用 `hasVersionUpdate()` 比较**主次版本号**，与面板自带 daemon 版本不一致就把节点标红「有更新」——想显示为最新就填面板所带的 daemon 版本（如 `4.5.0`） |
 | `prefix` | **已废弃**：面板不支持路径前缀，兼容层已改为独立端口；填了只在启动日志提示，不生效 |
@@ -188,6 +190,25 @@ Java 运行时下载/删除、远程自更新、MCSM 计划任务、快速安装
 | `GET /` | 占位说明页（显示当前监听地址与密钥位置） |
 
 ## 4. MSLX 兼容层（默认端口 7891）
+
+### 4.0 子节点链接（面板「节点管理 → 添加节点」）
+
+MSLX 的节点纳管不是普通 REST 登录，而是**主节点与子节点的配对链接**（Protocol V1）。
+本节点扮演「子节点」：
+
+| 步骤 | 谁发起 | 接口 | 说明 |
+| --- | --- | --- | --- |
+| 1 | 主节点 | `GET {节点}/api/node/protocol` | 读协议号，必须是 `protocolVersion: 1` |
+| 2 | 主节点 | `POST {节点}/api/node/accept-link` | 带 `linkKey`、`pairingId`、`masterUrl`、`masterId` |
+| 3 | 子节点（本节点） | `GET {主节点}/api/node/protocol?pairingId=…` | 反向确认主节点认可本次配对（5 秒超时） |
+| 4 | 本节点返回 | `{code:200,message:"链接成功",data:{nodeId,commsKey}}` | 关系落盘 `{data}/compat-mslx-node.json`（0600） |
+| 5 | 本节点 | `POST {主节点}/api/node/report-stats` | 每 2 秒上报 `{cpu,memTotal,memUsed,memUsage,timestamp}`，头 `x-api-key: commsKey`；主节点回 `410` 表示关系撤销 → 自动清除本地链接 |
+
+另有 `POST /api/node/update-link`（主节点同步地址变更）与 `POST /api/node/remove-link`
+（幂等解除）；`GET /api/node/status`（需登录）可查看当前链接状态。
+
+面板填写方式：**节点地址**填 `http://<本机IP>:7891`，**配对密钥**填 `compat.mslx.linkKey`
+（启动日志会打印，也是配置文件里的值），**主节点地址**留空即面板自身地址。
 
 ### 4.1 WebPanel 侧接入方式
 
