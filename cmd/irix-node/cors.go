@@ -33,7 +33,7 @@ import (
 // MCSM 面板走 X-Api-Key；缺任何一个，浏览器预检就会失败——面板随即判定节点离线。
 const corsAllowedHeaders = "Authorization, Content-Type, X-Auth-Token, X-Vault-Token, " +
 	"X-Device-Id, X-Session-Timestamp, X-Session-Seq, X-Session-Proof, " +
-	"X-Node-Id, X-User-Token, X-Api-Key"
+	"X-Node-Id, X-User-Token, X-Api-Key, X-Requested-With, X-SignalR-User-Agent"
 
 // setCorsOrigins 解析额外的跨源来源白名单（-cors-origins / 配置文件 corsOrigins，
 // 逗号分隔，形如 https://panel.example.com，可带端口；大小写不敏感）。

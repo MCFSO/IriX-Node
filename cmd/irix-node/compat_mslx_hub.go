@@ -89,6 +89,12 @@ func (ms *mslxCompat) negotiateHub(w http.ResponseWriter, r *http.Request, hub s
 	}
 	claims, ok := ms.authenticate(r)
 	if !ok {
+		// 面板纳管后是由浏览器带着 x-node-id + 主节点签发的节点令牌直接连接本节点，
+		// 这条路径必须回源主节点核验，否则 SignalR 协商会 401（面板表现为
+		// 「Failed to complete negotiation with the server」）。
+		claims, ok = ms.authorizeNodeRequest(r)
+	}
+	if !ok {
 		mslxFail(w, http.StatusUnauthorized, "未登录或登录已过期，请重新登录")
 		return
 	}

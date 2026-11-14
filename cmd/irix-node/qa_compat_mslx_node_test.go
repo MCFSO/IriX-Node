@@ -815,3 +815,127 @@ func TestExtractZipIntoRejectsTraversal(t *testing.T) {
 		t.Fatal("越界文件不应被写出")
 	}
 }
+
+// TestCompatMSLXInfoAndSettingsShape 面板控制台/设置页读取的实例信息必须字段完整，
+// 且状态码要按 MSLX 语义（0 未启动 / 1 启动中 / 2 运行中 / 3 停止中）。
+// 之前本节点用 3=运行中，面板会把「运行中」显示成「停止中」，表现为启动无效。
+func TestCompatMSLXInfoAndSettingsShape(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	cwd, err := os.MkdirTemp("", "irix-mslx-info-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	if err := os.WriteFile(filepath.Join(cwd, "server.properties"),
+		[]byte("server-port=25570\ndifficulty=hard\nlevel-name=survival\ngamemode=creative\nonline-mode=false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = "java -Xms512M -Xmx2048M -jar server.jar nogui"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	id := d.compatMSLX.idFor(inst.InstanceUuid)
+
+	// 1) 实例详情
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/instance/info?id=%d", base, id), nil)
+	req.Header.Set("x-user-token", token)
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("info 应 200: %d %s", resp.StatusCode, raw)
+	}
+	var info struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("info 解析失败: %s", raw)
+	}
+	// 前端会直接对 java 调 startsWith，必须是非空字符串
+	if v, _ := info.Data["java"].(string); v == "" {
+		t.Fatalf("info.java 必须是非空字符串（前端会 startsWith）: %s", raw)
+	}
+	if v, _ := info.Data["core"].(string); v == "" {
+		t.Fatalf("info.core 必须是非空字符串: %s", raw)
+	}
+	if v, _ := info.Data["maxM"].(float64); v != 2048 {
+		t.Fatalf("应从启动命令解析 maxM=2048，实际 %v", info.Data["maxM"])
+	}
+	mc, _ := info.Data["mcConfig"].(map[string]any)
+	if mc == nil || mc["serverPort"] != "25570" || mc["difficulty"] != "hard" ||
+		mc["gamemode"] != "creative" || mc["levelName"] != "survival" || mc["onlineMode"] != "false" {
+		t.Fatalf("mcConfig 应从 server.properties 解析: %s", raw)
+	}
+
+	// 2) 状态映射：运行中 → 2
+	inst.mu.Lock()
+	inst.Status = StatusRunning
+	inst.mu.Unlock()
+	req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/instance/info?id=%d", base, id), nil)
+	req.Header.Set("x-user-token", token)
+	resp, err = testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	_ = json.Unmarshal(raw, &info)
+	if v, _ := info.Data["status"].(float64); v != 2 {
+		t.Fatalf("运行中必须映射为 MSLX 的 2（否则面板显示停止中）: %s", raw)
+	}
+
+	// 3) 通用设置
+	req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/instance/settings/general/%d", base, id), nil)
+	req.Header.Set("x-user-token", token)
+	resp, err = testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("settings 应 200: %d %s", resp.StatusCode, raw)
+	}
+	var settings struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &settings)
+	for _, field := range []string{"ID", "Name", "Base", "Java", "Core", "MinM", "MaxM", "Args", "StopCommand", "InputEncoding", "OutputEncoding"} {
+		if _, ok := settings.Data[field]; !ok {
+			t.Fatalf("settings 缺少字段 %s（面板设置页会抛异常）: %s", field, raw)
+		}
+	}
+}
+
+// TestCompatMSLXFRPListEmpty 面板控制台会拉 /api/frp/list，501 会弹错误；
+// 本节点没有 FRP 隧道，应返回空列表。
+func TestCompatMSLXFRPListEmpty(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/frp/list", nil)
+	req.Header.Set("x-user-token", token)
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("frp/list 应 200 空列表: %d %s", resp.StatusCode, raw)
+	}
+	var env struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || len(env.Data) != 0 {
+		t.Fatalf("frp/list 应为空数组: %s", raw)
+	}
+}

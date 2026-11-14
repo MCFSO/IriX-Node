@@ -186,7 +186,9 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 		ms.handlePlugins(w, r, segs[1:])
 	case "tasks":
 		ms.handleTasks(w, r)
-	case "docker", "frp", "resource", "admin":
+	case "frp":
+		ms.handleFRP(w, r, segs[1:])
+	case "docker", "resource", "admin":
 		mslxNotImplemented(w, "/api/"+strings.Join(segs, "/"))
 	default:
 		http.NotFound(w, r)
@@ -592,14 +594,38 @@ func (ms *mslxCompat) instanceByID(raw string) (*Instance, uint32, error) {
 }
 
 // mslxStatusText 实例状态文本（MSLX 用 stopped/running/starting…）。
-func mslxStatusText(status int) string {
+// mslxStatus 把本节点实例状态映射为 MSLX 的状态码。
+//
+// MSLX 的语义（IInstanceLifecycleService）：0 未启动 / 1 启动中 / 2 运行中 /
+// 3 停止中 / 4 重启中。本节点是 0 停止 / 1 停止中 / 2 启动中 / 3 运行中，
+// **顺序不同**——不映射的话「运行中(3)」会被面板当成「停止中」，表现为
+// 点启动后一直显示停止中、控制台不推送。
+func mslxStatus(status int) int {
 	switch status {
 	case StatusRunning:
-		return "running"
+		return 2
 	case StatusStarting:
-		return "starting"
+		return 1
 	case StatusStopping:
+		return 3
+	case StatusBusy:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// mslxStatusText 状态文案（与 MSLX 状态码对应）。
+func mslxStatusText(status int) string {
+	switch mslxStatus(status) {
+	case 1:
+		return "starting"
+	case 2:
+		return "running"
+	case 3:
 		return "stopping"
+	case 4:
+		return "restarting"
 	default:
 		return "stopped"
 	}
@@ -673,7 +699,7 @@ func (ms *mslxCompat) handleInstanceList(w http.ResponseWriter, r *http.Request)
 			"java":       "",
 			"core":       "none",
 			"icon":       "custom",
-			"status":     status,
+			"status":     mslxStatus(status),
 			"statusText": mslxStatusText(status),
 			"expireTime": nil,
 			"extra": map[string]any{
@@ -699,24 +725,19 @@ func (ms *mslxCompat) handleInstanceInfo(w http.ResponseWriter, r *http.Request)
 	status := inst.Status
 	started := inst.Started
 	inst.mu.Unlock()
-	mslxOK(w, map[string]any{
-		"id":             id,
-		"name":           cfg.Nickname,
-		"basePath":       cfg.Cwd,
-		"startCommand":   cfg.StartCommand,
-		"stopCommand":    cfg.StopCommand,
-		"status":         status,
-		"statusText":     mslxStatusText(status),
-		"started":        started,
-		"createDatetime": cfg.CreateDatetime,
-		"lastDatetime":   cfg.LastDatetime,
-		"type":           cfg.Type,
-		"extra": map[string]any{
-			"onlinePlayers": 0,
-			"autoStart":     cfg.EventTask.AutoStart,
-			"autoRestart":   cfg.EventTask.AutoRestart,
-		},
-	}, "获取成功")
+	info := ms.mslxServerInfo(inst, id)
+	info["status"] = mslxStatus(status)
+	info["statusText"] = mslxStatusText(status)
+	info["started"] = started
+	info["createDatetime"] = cfg.CreateDatetime
+	info["lastDatetime"] = cfg.LastDatetime
+	info["type"] = cfg.Type
+	info["extra"] = map[string]any{
+		"onlinePlayers": 0,
+		"autoStart":     cfg.EventTask.AutoStart,
+		"autoRestart":   cfg.EventTask.AutoRestart,
+	}
+	mslxOK(w, info, "获取成功")
 }
 
 // handleInstanceAction 实例操作（start/stop/restart/forceExit/agreeEula/backup）。
@@ -800,7 +821,7 @@ func (ms *mslxCompat) handleInstanceSettings(w http.ResponseWriter, r *http.Requ
 		mslxNotImplemented(w, "/api/instance/settings/"+strings.Join(segs, "/"))
 		return
 	}
-	inst, _, err := ms.instanceByID(segs[1])
+	inst, id, err := ms.instanceByID(segs[1])
 	if err != nil {
 		mslxFail(w, http.StatusNotFound, err.Error())
 		return
@@ -809,17 +830,11 @@ func (ms *mslxCompat) handleInstanceSettings(w http.ResponseWriter, r *http.Requ
 	cfg := inst.Config
 	inst.mu.Unlock()
 	if r.Method == http.MethodGet {
-		mslxOK(w, map[string]any{
-			"name":         cfg.Nickname,
-			"startCommand": cfg.StartCommand,
-			"stopCommand":  cfg.StopCommand,
-			"basePath":     cfg.Cwd,
-			"ie":           cfg.IE,
-			"oe":           cfg.OE,
-			"autoStart":    cfg.EventTask.AutoStart,
-			"autoRestart":  cfg.EventTask.AutoRestart,
-			"tags":         cfg.Tag,
-		}, "获取成功")
+		// 面板「实例设置 → 通用」直接读 ServerInfo 全字段（java/core/minM/maxM/args…），
+		// 少一个字段前端就会抛 `res.java.startsWith is not a function` 之类的错误。
+		info := ms.mslxServerInfo(inst, id)
+		info["tags"] = cfg.Tag
+		mslxOK(w, info, "获取成功")
 		return
 	}
 	var in mcConfigInput
