@@ -32,9 +32,11 @@ func (ms *mslxCompat) handlePlugins(w http.ResponseWriter, r *http.Request, segs
 		mslxFail(w, http.StatusNotFound, "本节点没有插件安装任务")
 		return
 	case "action", "install", "upload", "uninstall", "enable", "disable":
+		// 兼容层不提供 .NET 插件宿主（见 docs/compat-daemon.md「范围与边界」）。
+		// 列表接口返回空即可让面板正常工作，写操作明确说明原因。
 		mslxFail(w, http.StatusNotImplemented,
-			"irix-node 不提供 MSLX 插件运行时（插件为 .NET DLL，需其 daemon 进程内加载）；"+
-				"插件列表按空处理："+strings.Join(segs, "/"))
+			"irix-node 兼容层不提供 MSLX 插件运行时（插件是 .NET DLL，需要在其 daemon 进程内加载）；"+
+				"实例管理、文件、控制台等功能不受影响。请求："+strings.Join(segs, "/"))
 		return
 	default:
 		mslxFail(w, http.StatusNotImplemented, "irix-node 未实现该 MSLX 插件接口："+strings.Join(segs, "/"))
