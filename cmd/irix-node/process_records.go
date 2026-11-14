@@ -56,6 +56,14 @@ func (d *Daemon) recordCommandProcess(uuid string, cmd *exec.Cmd, jail string, j
 	if errors.Is(err, sysinfo.ErrProcessIdentityUnsupported) {
 		return processRecord{}, nil
 	}
+	// 进程在记录身份之前就已退出（崩溃循环、启动命令立即结束、拉起的程序秒退）：
+	// /proc/<pid>/stat 已消失或句柄已失效。这不是启动失败——没有孤儿可留，
+	// 也无身份可记录，直接返回空记录交给退出监听处理即可。
+	// 若把它当失败处理，快速崩溃的实例会连「启动」都失败，自动重启防抖
+	// 计数也会错乱（CI 上 TestAutoRestartCrashLoop 就是这样偶发失败的）。
+	if os.IsNotExist(err) {
+		return processRecord{}, nil
+	}
 	if err != nil {
 		return processRecord{}, fmt.Errorf("读取进程身份失败: %w", err)
 	}
