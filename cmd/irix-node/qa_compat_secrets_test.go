@@ -95,9 +95,9 @@ func TestSetupCompatAutoGeneratesSecrets(t *testing.T) {
 	d.setupCompat(&nodeOptions{
 		ConfigPath:        cfgPath,
 		CompatMCSMEnabled: true,
-		CompatMCSMPrefix:  "/mcsm",
+		CompatMCSMPort:    0, // 端口 0 = 由系统分配（测试专用）
 		CompatMSLXEnabled: true,
-		CompatMSLXPrefix:  "/mslx",
+		CompatMSLXPort:    0, // 端口 0 = 由系统分配（测试专用）
 		// 故意不填 Key / Pass / Secret
 	})
 	if d.compatMC == nil || d.compatMSLX == nil {
@@ -153,10 +153,10 @@ func TestSetupCompatAutoGeneratesSecrets(t *testing.T) {
 	d2.setupCompat(&nodeOptions{
 		ConfigPath:        cfgPath,
 		CompatMCSMEnabled: true,
-		CompatMCSMPrefix:  "/mcsm",
+		CompatMCSMPort:    0, // 端口 0 = 由系统分配（测试专用）
 		CompatMCSMKey:     key,
 		CompatMSLXEnabled: true,
-		CompatMSLXPrefix:  "/mslx",
+		CompatMSLXPort:    0, // 端口 0 = 由系统分配（测试专用）
 		CompatMSLXUser:    "admin",
 		CompatMSLXPass:    pass,
 	})

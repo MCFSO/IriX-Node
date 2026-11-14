@@ -19,7 +19,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -35,10 +37,10 @@ import (
 	"irix/node/internal/timesys"
 )
 
-// 兼容层默认挂载前缀。
+// 兼容层默认监听端口（对齐各自 Daemon 的默认端口，面板直接照抄即可）。
 const (
-	defaultMCSMPrefix = "/mcsm"
-	defaultMSLXPrefix = "/mslx"
+	defaultMCSMCompatPort = 24444 // MCSManager daemon 默认端口
+	defaultMSLXCompatPort = 7891  // MSLX daemon 默认端口
 )
 
 // 兼容层视图使用的默认值（对齐 MCSM InstanceConfig 的缺省字段）。
@@ -50,10 +52,12 @@ const (
 
 // mcsmCompat MCSManager Daemon 兼容层状态。
 type mcsmCompat struct {
-	d      *Daemon
-	key    string
-	prefix string
-	allow  []*net.IPNet
+	d     *Daemon
+	key   string
+	bind  string // 监听地址（已解析，host:port 形式见 addr）
+	port  int    // 监听端口（0 = 由系统分配，测试用）
+	addr  string // 实际监听地址（startCompatServers 成功后填入）
+	allow []*net.IPNet
 
 	mu       sync.Mutex
 	sessions map[string]*eioSession   // sid → 会话
@@ -69,9 +73,11 @@ type mcsmCompat struct {
 
 // mslxCompat MSLX Daemon 兼容层状态。
 type mslxCompat struct {
-	d      *Daemon
-	prefix string
-	allow  []*net.IPNet
+	d     *Daemon
+	bind  string
+	port  int
+	addr  string
+	allow []*net.IPNet
 
 	user   string
 	pass   string
@@ -86,6 +92,14 @@ type mslxCompat struct {
 	ids *mslxIDMap // 实例 uuid ↔ 整数 id 映射（持久化于 {data}/compat-mslx-ids.json）
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
+}
+
+// compatListener 一条兼容层独立监听（随节点一起优雅关停）。
+type compatListener struct {
+	name string // 面板名（日志用）
+	srv  *http.Server
+	ln   net.Listener
+	addr string
 }
 
 // compatSecretFile 兼容层自动生成凭据的持久化文件（{data} 下，0600 原子写）。
@@ -290,16 +304,21 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 	}
 
 	if opts.CompatMCSMEnabled {
-		prefix, err := compatPrefix(opts.CompatMCSMPrefix, defaultMCSMPrefix)
-		if err != nil {
-			alog.Printf("警告: MCSManager Daemon 兼容层未启用：%v", err)
-		} else if allow, aerr := parseCompatAllow(opts.CompatMCSMIPs); aerr != nil {
+		if note := deprecatedPrefixNote("compat.mcsm.prefix", opts.CompatMCSMPrefix); note != "" {
+			alog.Printf("提示: %s", note)
+		}
+		if allow, aerr := parseCompatAllow(opts.CompatMCSMIPs); aerr != nil {
 			alog.Printf("警告: MCSManager Daemon 兼容层未启用：%v", aerr)
 		} else {
+			port := opts.CompatMCSMPort
+			if port < 0 {
+				port = defaultMCSMCompatPort
+			}
 			d.compatMC = &mcsmCompat{
 				d:          d,
 				key:        mcKey,
-				prefix:     prefix,
+				bind:       opts.CompatMCSMBind,
+				port:       port,
 				allow:      allow,
 				sessions:   map[string]*eioSession{},
 				missions:   map[string]*mcMission{},
@@ -307,27 +326,31 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 				urlDown:    map[string]*mcURLDown{},
 				lastStatus: map[string]int{},
 			}
-			alog.Printf("MCSManager Daemon 兼容层已启用：%s（面板节点地址 http://<本机>:<端口>%s，密钥 %s）",
-				prefix, prefix, mcKey)
+			alog.Printf("MCSManager Daemon 兼容层已启用（面板「节点」填 地址=<本机IP> 端口=%d，密钥 %s）", port, mcKey)
 		}
 	} else {
 		alog.Printf("MCSManager Daemon 兼容层未启用（compat.mcsm.enabled=false）；如需启用，密钥已就绪：%s", maskSecret(mcKey))
 	}
 
 	if opts.CompatMSLXEnabled {
-		prefix, err := compatPrefix(opts.CompatMSLXPrefix, defaultMSLXPrefix)
-		if err != nil {
-			alog.Printf("警告: MSLX Daemon 兼容层未启用：%v", err)
-		} else if allow, aerr := parseCompatAllow(opts.CompatMSLXIPs); aerr != nil {
+		if note := deprecatedPrefixNote("compat.mslx.prefix", opts.CompatMSLXPrefix); note != "" {
+			alog.Printf("提示: %s", note)
+		}
+		if allow, aerr := parseCompatAllow(opts.CompatMSLXIPs); aerr != nil {
 			alog.Printf("警告: MSLX Daemon 兼容层未启用：%v", aerr)
 		} else {
 			user := strings.TrimSpace(opts.CompatMSLXUser)
 			if user == "" {
 				user = "admin"
 			}
+			port := opts.CompatMSLXPort
+			if port < 0 {
+				port = defaultMSLXCompatPort
+			}
 			d.compatMSLX = &mslxCompat{
 				d:         d,
-				prefix:    prefix,
+				bind:      opts.CompatMSLXBind,
+				port:      port,
 				allow:     allow,
 				user:      user,
 				pass:      mslxPass,
@@ -337,12 +360,135 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 				banned:    map[string]time.Time{},
 			}
 			d.compatMSLX.loadIDMap()
-			alog.Printf("MSLX Daemon 兼容层已启用：%s（WebPanel 后端地址 http://<本机>:<端口>%s，账号 %s，密码 %s）",
-				prefix, prefix, user, mslxPass)
+			alog.Printf("MSLX Daemon 兼容层已启用（WebPanel 后端地址 http://<本机IP>:%d，账号 %s，密码 %s）",
+				port, user, mslxPass)
 		}
 	} else {
 		alog.Printf("MSLX Daemon 兼容层未启用（compat.mslx.enabled=false）；如需启用，账号 admin、密码已就绪：%s", maskSecret(mslxPass))
 	}
+}
+
+// deprecatedPrefixNote 提示「prefix 已废弃」：面板只支持地址+端口，
+// 兼容层改为独立端口监听，残留的 prefix 配置不再生效。
+func deprecatedPrefixNote(field, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return field + " 已废弃（兼容层改为独立端口监听，面板只支持地址+端口），当前值 " +
+		value + " 不生效，可从配置里删除"
+}
+
+// compatListenAddr 组装兼容层监听地址：地址为空时沿用节点 bind。
+func (d *Daemon) compatListenAddr(bind string, port int) string {
+	host := strings.TrimSpace(bind)
+	if host == "" {
+		host = strings.TrimSpace(d.BindHost)
+	}
+	switch host {
+	case "", "localhost":
+		host = "127.0.0.1"
+	case "[::]", "::":
+		host = "::"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// startCompatServers 为已启用的兼容层各自启动一个独立监听端口。
+//
+// 端口占用/监听失败只告警并跳过该层（节点主功能不受影响）；成功后把实际
+// 监听地址记录到层对象上，供启动日志与测试读取。
+func (d *Daemon) startCompatServers() {
+	if d.compatMC != nil {
+		d.startCompatListener("MCSManager", d.compatMC.bind, d.compatMC.port,
+			d.compatMC.handler(),
+			func(addr string) { d.compatMC.addr = addr },
+			func() { d.compatMC = nil })
+	}
+	if d.compatMSLX != nil {
+		d.startCompatListener("MSLX", d.compatMSLX.bind, d.compatMSLX.port,
+			d.compatMSLX.handler(),
+			func(addr string) { d.compatMSLX.addr = addr },
+			func() { d.compatMSLX = nil })
+	}
+}
+
+// startCompatListener 启动单个兼容层监听器（带与主服务一致的中间件保护）。
+func (d *Daemon) startCompatListener(name, bind string, port int, handler http.Handler,
+	setAddr func(string), disable func()) {
+	addr := d.compatListenAddr(bind, port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		alog.Printf("警告: %s 兼容层未启动：监听 %s 失败（%v）；端口可能被占用，可改 compat 块里的 port",
+			name, addr, err)
+		disable()
+		return
+	}
+	// 复用主服务的中间件：时间头 → 在途登记 → 恒开防御 → 审计 → CORS
+	// → 请求体读空闲超时。兼容层上传走直连通道，故不套 /api/ 的 16MiB 上限。
+	var h http.Handler = handler
+	h = d.corsMiddleware(h)
+	h = d.auditMiddleware(h)
+	h = d.defenseMiddleware(h)
+	h = d.trackRequests(h)
+	h = clockDateMiddleware(h)
+	h = idleBodyTimeout(h)
+
+	srv := &http.Server{
+		Addr:              ln.Addr().String(),
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
+	d.compatMu.Lock()
+	d.compatServers = append(d.compatServers, &compatListener{
+		name: name, srv: srv, ln: ln, addr: ln.Addr().String(),
+	})
+	d.compatMu.Unlock()
+	if setAddr != nil {
+		setAddr(ln.Addr().String())
+	}
+	safeGo(name+" 兼容层监听", func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			alog.Printf("警告: %s 兼容层监听退出：%v", name, err)
+		}
+	})
+	alog.Printf("%s 兼容层监听于 %s", name, ln.Addr().String())
+}
+
+// stopCompatServers 关停全部兼容层监听器（可重复调用）。
+func (d *Daemon) stopCompatServers(ctx context.Context) error {
+	d.compatMu.Lock()
+	servers := d.compatServers
+	d.compatServers = nil
+	d.compatMu.Unlock()
+
+	var errs []error
+	for _, item := range servers {
+		if err := item.srv.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, fmt.Errorf("%s 兼容层关停失败: %w", item.name, err))
+			_ = item.srv.Close()
+		}
+		if err := item.ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, fmt.Errorf("%s 兼容层监听器关闭失败: %w", item.name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// compatAddrOf 返回某层实际监听地址（未启动时为空）。
+func (d *Daemon) compatAddrOf(layer string) string {
+	switch layer {
+	case "mcsm":
+		if d.compatMC != nil {
+			return d.compatMC.addr
+		}
+	case "mslx":
+		if d.compatMSLX != nil {
+			return d.compatMSLX.addr
+		}
+	}
+	return ""
 }
 
 // compatKillInstance 强制终止实例（两个兼容层共用同一语义）。
@@ -381,37 +527,6 @@ func (d *Daemon) compatKillInstance(inst *Instance) error {
 	}
 	inst.SetStatus(StatusStopped)
 	return nil
-}
-
-// registerCompat 把已启用的兼容层挂到路由表（由 RegisterRoutes 调用）。
-func (d *Daemon) registerCompat(mux *http.ServeMux) {
-	if d.compatMC != nil {
-		prefix := d.compatMC.prefix
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, d.compatMC.handler()))
-	}
-	if d.compatMSLX != nil {
-		prefix := d.compatMSLX.prefix
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, d.compatMSLX.handler()))
-	}
-}
-
-// compatPrefix 规范化挂载前缀：必须以 / 开头、不能是根、不能带结尾 /。
-func compatPrefix(raw, def string) (string, error) {
-	p := strings.TrimSpace(raw)
-	if p == "" {
-		p = def
-	}
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	p = strings.TrimRight(p, "/")
-	if p == "" || p == "/" {
-		return "", fmt.Errorf("compat 前缀不能是根路径（必须使用子路径，如 %s）", def)
-	}
-	if strings.Contains(p, "//") || strings.ContainsAny(p, " \t\r\n?#") {
-		return "", fmt.Errorf("compat 前缀 %q 非法", p)
-	}
-	return p, nil
 }
 
 // parseCompatAllow 解析允许的面板来源：支持裸 IP 与 CIDR（换行/逗号分隔）。

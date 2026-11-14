@@ -68,7 +68,7 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 | `device_handlers.go` | 设备管理 API：`/api/auth/device/challenge`、`/api/auth/devices*`、管理员设备与策略接口 |
 | `time_system.go` | 时间系统编排：配置合并、安装全局时间源、TLS 证书签发/校验/自动续签、日志时间戳与 HTTP Date 接入 |
 | `time_handlers.go` | 时间系统 API：`GET /api/time`（状态）、`POST /api/time/sync`（立即同步） |
-| `compat.go` | 第三方 Daemon 兼容层：`compat` 配置校验与子路径挂载、来源白名单、MCSM 实例视图字段映射 |
+| `compat.go` | 第三方 Daemon 兼容层：`compat` 配置校验、独立端口监听起停、凭据自动生成、来源白名单、MCSM 实例视图字段映射 |
 | `compat_mcsm_engine.go` | MCSManager 兼容层传输引擎（自有实现）：engine.io v4 轮询 + WebSocket 升级 + socket.io v4 包 |
 | `compat_mcsm.go` | MCSManager 兼容层事件分发：实例/信息/控制台/票据/计划任务事件与状态推送 |
 | `compat_mcsm_file.go` | MCSManager 兼容层文件事件、直连下载/分片上传通道、URL 下载任务 |
@@ -78,16 +78,17 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 
 ## 第三方 Daemon 兼容（`compat` 块）
 
-- `config.json` 的 `compat.mcsm` / `compat.mslx` 独立开关，**可同时开启**，各挂独立子路径
-  （默认 `/mcsm`、`/mslx`）；未启用时不注册任何路由。协议见 `docs/compat-daemon.md`。
+- `config.json` 的 `compat.mcsm` / `compat.mslx` 独立开关，**可同时开启**，各占**独立监听端口**
+  （默认 24444 / 7891；MCSManager 面板只支持地址+端口，不支持子路径）；未启用时不监听任何端口。
+  由 `d.startCompatServers()` 启动、`stopCompatServers` 随节点优雅关停。协议见 `docs/compat-daemon.md`。
 - **许可证边界（硬约束）**：只对齐线上协议与字段语义，**不得复制/翻译/引入**
   MCSManager（Apache-2.0）与 MSLX 的源码；传输层（socket.io、SignalR、JWT）
   必须基于标准库自研，不新增依赖；业务动作复用 `startInstance`/`stopInstance`、
   `tickets`、`safeResolve`、`sysinfo`、`timesys`。
 - 兼容层不接入账户权限体系（MCSM 用节点密钥、MSLX 用 JWT），因此**不调用** `perm()`，
-  也不在 `qa_perms_test.go` 反向扫描清单内（用 `mux.Handle(前缀+"/", ...)` 整体挂载）。
+  也不在 `qa_perms_test.go` 反向扫描清单内（独立 `http.Server` + 独立端口，不在主 mux 上注册）。
 - 文件路径必须走 `safeResolve`/`NormalizePath`，不放宽既有边界检查。
-- 变更兼容层须补 `qa_compat_*_test.go` 用例（含完整中间件链与 SignalR WebSocket 端到端）。
+- 变更兼容层须补 `qa_compat_*_test.go` 用例（含独立端口上的中间件、SignalR WebSocket 端到端）。
 
 ## 锁与并发
 
@@ -178,7 +179,7 @@ go run ./cmd/irix-node -port 12346 -data <目录> -audit-log=false  # 关闭审�
 | `qa_defense_test.go` | DDoS/CC 防御与管理员内网限制：头部规范判定、Via 拦截与累计封禁、UA 并发/频率封禁、IP 限流与环回豁免、人工封禁持久化、防御接口、RFC 1918 来源校验 |
 | `qa_device_test.go` | 设备绑定：Ed25519/P-256 注册与挑战登录、逐请求 HMAC/时间戳/序号防重放、required 策略、设备撤销/最后一台保护/管理员降级、旧库补列迁移、证明性能基准 |
 | `qa_time_test.go` | 时间系统集成：/api/time 状态与手动同步、响应 time 字段/HTTP Date、会话过期跟随节点时间、TLS 证书签发/自动续签/manual 过期拒绝、配置合并 |
-| `qa_compat_mcsm_test.go` | MCSManager 兼容层：engine.io 握手/心跳、socket.io 认证、实例增删启停杀、文件事件、通行证绑定下载、前缀/白名单解析、完整中间件链 |
+| `qa_compat_mcsm_test.go` | MCSManager 兼容层：engine.io 握手/心跳、socket.io 认证、实例增删启停杀、文件事件、通行证绑定下载、未启用不开监听、来源白名单与 UA 封禁（独立端口中间件）、两层端口隔离 |
 | `qa_compat_mslx_test.go` | MSLX 兼容层：JWT 登录与伪造拒绝、实例列表/动作、文件全套操作、Hub 协商、501/404、两层同时开启 |
 | `qa_compat_mslx_ws_test.go` | MSLX SignalR WebSocket 端到端：握手、JoinGroup、ReceiveLog 推送、SendCommand 应答、系统监视 |
 | `qa_perf_test.go` | 性能测试：万实例加载、大目录列表、大日志截取 |

@@ -104,7 +104,7 @@ func (mc *mcsmCompat) handler() http.Handler {
 			mc.handleCompatUpload(w, r)
 		case p == "/" || p == "":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = io.WriteString(w, mcsmIndexHTML(mc.prefix))
+			_, _ = io.WriteString(w, mcsmIndexHTML(mc.addr))
 		default:
 			http.NotFound(w, r)
 		}
@@ -112,11 +112,14 @@ func (mc *mcsmCompat) handler() http.Handler {
 }
 
 // mcsmIndexHTML 兼容层首页（占位说明，面板不会读取内容）。
-func mcsmIndexHTML(prefix string) string {
+func mcsmIndexHTML(addr string) string {
+	if addr == "" {
+		addr = "127.0.0.1:" + strconv.Itoa(defaultMCSMCompatPort)
+	}
 	return "<!doctype html><meta charset=\"utf-8\"><title>IriX Node</title>" +
 		"<h3>IriX Node — MCSManager Daemon 兼容层</h3>" +
-		"<p>该地址供 MCSManager 面板按「节点」连接使用：</p><ul>" +
-		"<li>节点地址：<code>http://&lt;本机&gt;:&lt;端口&gt;" + prefix + "</code></li>" +
+		"<p>该端口供 MCSManager 面板按「节点」连接使用：</p><ul>" +
+		"<li>节点地址：<code>" + addr + "</code>（面板分「地址」与「端口」两栏填写）</li>" +
 		"<li>节点密钥：<code>config.json</code> 中 <code>compat.mcsm.key</code></li>" +
 		"</ul>"
 }

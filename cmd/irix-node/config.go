@@ -81,38 +81,46 @@ type DefenseConfig struct {
 }
 
 // MCSMCompatConfig 配置文件 compat.mcsm 块：MCSManager Daemon 协议兼容。
-// 开启后本节点在 prefix 子路径下同时提供：
-//   - socket.io（engine.io v4）事件通道（MCSManager 面板按「节点」连接时使用）；
+//
+// 开启后本节点在**独立端口**（默认 24444）上提供 MCSManager 面板所需的
+// 全部接口——面板的节点配置只有「地址 + 端口」两个输入框，不支持路径前缀，
+// 因此这里必须是独立监听端口而不是子路径：
+//   - socket.io（engine.io v4）事件通道；
 //   - /download/<票据>/<文件>、/upload/<票据> 直连传输通道与首页占位页。
 //
 // 认证沿用 MCSM 的「节点密钥」模型：面板节点配置里的 apiKey 必须与 key 一致。
-// 该密钥等价于节点最高权限，请使用长随机串，且不要与账户密码复用。
+// 该密钥等价于节点最高权限，留空会自动随机生成（见 compat.go）。
 type MCSMCompatConfig struct {
 	Enabled       *bool    `json:"enabled"`       // 是否开启（默认 false，需显式开启）
-	Prefix        string   `json:"prefix"`        // 挂载前缀（默认 /mcsm；面板节点 URL 需带上此前缀）
-	Key           string   `json:"key"`           // 面板配对密钥（等价节点最高权限，必填）
+	Bind          string   `json:"bind"`          // 监听地址（空 = 沿用节点 bind，如 0.0.0.0）
+	Port          *int     `json:"port"`          // 监听端口（默认 24444，与 MCSManager daemon 一致）
+	Key           string   `json:"key"`           // 面板配对密钥（留空 = 自动生成）
 	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
+	Prefix        string   `json:"prefix"`        // 已废弃：面板不支持前缀，填了只会在启动日志提示
 }
 
 // MSLXCompatConfig 配置文件 compat.mslx 块：MSLX Daemon 协议兼容。
-// 开启后本节点在 prefix 子路径下提供 MSLX 的 REST 接口（/api/...）与
+//
+// 开启后在独立端口（默认 7891）上提供 MSLX 的 REST 接口（/api/...）与
 // SignalR 控制台/系统监视通道（/api/hubs/...），供 MSLX WebPanel 连接。
 // 认证使用 JWT（HS256，「x-user-token」头 / access_token 查询参数）：
 // 账号取自 username/password，签名密钥取自 jwtSecret
-// （空 = 首次启动随机生成并写入 {data}/compat-mslx-secret，重启后保持）。
+// （空 = 首次启动随机生成并持久化到 {data}/compat-secrets.json）。
 type MSLXCompatConfig struct {
 	Enabled       *bool    `json:"enabled"`       // 是否开启（默认 false，需显式开启）
-	Prefix        string   `json:"prefix"`        // 挂载前缀（默认 /mslx）
+	Bind          string   `json:"bind"`          // 监听地址（空 = 沿用节点 bind）
+	Port          *int     `json:"port"`          // 监听端口（默认 7891）
 	Username      string   `json:"username"`      // 登录用户名（默认 admin）
-	Password      string   `json:"password"`      // 登录密码（必填，建议长随机串）
-	JWTSecret     string   `json:"jwtSecret"`     // JWT 签名密钥（空 = 自动生成并持久化）
+	Password      string   `json:"password"`      // 登录密码（留空 = 自动生成）
+	JWTSecret     string   `json:"jwtSecret"`     // JWT 签名密钥（留空 = 自动生成并持久化）
 	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
+	Prefix        string   `json:"prefix"`        // 已废弃：现为独立端口监听，填了只会在启动日志提示
 }
 
 // CompatConfig 配置文件 compat 块：第三方 Daemon 协议兼容（两个开关可同时开启）。
-// 两层各自挂在独立子路径下，互不干扰，也不与节点自身 API 冲突。
+// 两层各占用独立监听端口，互不干扰，也不与节点自身 API（默认 12346）冲突。
 // 底层处理逻辑全部为本节点自有代码：只对齐线上协议与字段语义，不引入其源码
-// （避免 MCSManager 的 Apache-2.0 与 MSLX 的许可证与本项目产生许可证冲突）。
+// （避免 MCSManager 与 MSLX 的许可证与本项目产生冲突）。
 type CompatConfig struct {
 	MCSM *MCSMCompatConfig `json:"mcsm"` // MCSManager Daemon 兼容（nil = 未配置）
 	MSLX *MSLXCompatConfig `json:"mslx"` // MSLX Daemon 兼容（nil = 未配置）
@@ -362,18 +370,23 @@ type nodeOptions struct {
 	TimeBootWaitMillis     int
 	TimeTLSRequireTrusted  bool
 	TimeStateFile          string
-	// 第三方 Daemon 协议兼容（compat 块；两层可同时开启）
+	// 第三方 Daemon 协议兼容（compat 块；两层可同时开启，各占独立端口）
 	ConfigPath        string // 配置文件实际路径（兼容层自动生成凭据后回写用；不参与合并）
 	CompatMCSMEnabled bool   // MCSManager Daemon 兼容开关
-	CompatMCSMPrefix  string // 挂载前缀（默认 /mcsm）
-	CompatMCSMKey     string // 面板配对密钥
+	CompatMCSMBind    string // MCSM 兼容层监听地址（空 = 沿用节点 bind）
+	CompatMCSMPort    int    // MCSM 兼容层监听端口（0 = 默认 24444）
+	CompatMCSMKey     string // 面板配对密钥（空 = 自动生成）
 	CompatMCSMIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
 	CompatMSLXEnabled bool   // MSLX Daemon 兼容开关
-	CompatMSLXPrefix  string // 挂载前缀（默认 /mslx）
+	CompatMSLXBind    string // MSLX 兼容层监听地址（空 = 沿用节点 bind）
+	CompatMSLXPort    int    // MSLX 兼容层监听端口（0 = 默认 7891）
 	CompatMSLXUser    string // 登录用户名
-	CompatMSLXPass    string // 登录密码
+	CompatMSLXPass    string // 登录密码（空 = 自动生成）
 	CompatMSLXSecret  string // JWT 签名密钥（空 = 自动生成）
 	CompatMSLXIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
+	// 以下两项仅为「已废弃配置」的启动提示（兼容层已改为独立端口，不再用前缀）
+	CompatMCSMPrefix string
+	CompatMSLXPrefix string
 }
 
 // applyConfig 应用配置文件：仅覆盖未被命令行显式设置的项。
@@ -590,8 +603,14 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 			if mc.Enabled != nil {
 				o.CompatMCSMEnabled = *mc.Enabled
 			}
-			if mc.Prefix != "" {
-				o.CompatMCSMPrefix = mc.Prefix
+			if mc.Bind != "" {
+				o.CompatMCSMBind = mc.Bind
+			}
+			if mc.Port != nil {
+				// 显式 0 = 由系统分配端口（测试/特殊部署可用）；未写则用默认端口
+				o.CompatMCSMPort = *mc.Port
+			} else {
+				o.CompatMCSMPort = defaultMCSMCompatPort
 			}
 			if mc.Key != "" {
 				o.CompatMCSMKey = mc.Key
@@ -599,13 +618,19 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 			if len(mc.AllowPanelIPs) > 0 {
 				o.CompatMCSMIPs = strings.Join(mc.AllowPanelIPs, "\n")
 			}
+			o.CompatMCSMPrefix = mc.Prefix // 仅用于弃用提示
 		}
 		if mx := cfg.Compat.MSLX; mx != nil {
 			if mx.Enabled != nil {
 				o.CompatMSLXEnabled = *mx.Enabled
 			}
-			if mx.Prefix != "" {
-				o.CompatMSLXPrefix = mx.Prefix
+			if mx.Bind != "" {
+				o.CompatMSLXBind = mx.Bind
+			}
+			if mx.Port != nil {
+				o.CompatMSLXPort = *mx.Port
+			} else {
+				o.CompatMSLXPort = defaultMSLXCompatPort
 			}
 			if mx.Username != "" {
 				o.CompatMSLXUser = mx.Username
@@ -619,6 +644,7 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 			if len(mx.AllowPanelIPs) > 0 {
 				o.CompatMSLXIPs = strings.Join(mx.AllowPanelIPs, "\n")
 			}
+			o.CompatMSLXPrefix = mx.Prefix // 仅用于弃用提示
 		}
 	}
 }

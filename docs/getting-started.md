@@ -95,14 +95,18 @@ Daemon 使用；`mcsm`（MCSManager 面板）与 `mslx`（MSLX WebPanel）两个
 ```json
 {
   "compat": {
-    "mcsm": { "enabled": true, "prefix": "/mcsm" },
-    "mslx": { "enabled": true, "prefix": "/mslx", "username": "admin" }
+    "mcsm": { "enabled": true, "port": 24444 },
+    "mslx": { "enabled": true, "port": 7891, "username": "admin" }
   }
 }
 ```
 
+两层各占**独立监听端口**（MCSM 默认 `24444`、MSLX 默认 `7891`，与各自 Daemon 的默认
+端口一致）——MCSManager 面板的「节点」只有地址和端口两栏，不支持路径前缀。`bind`
+留空则沿用节点 `bind`。
+
 `key` / `password` / `jwtSecret` **留空即可**：首次启动会随机生成、写入
 `{data}/compat-secrets.json` 并回写到配置文件里（即使 `enabled=false` 也会先备好），
-启动日志会打印可直接使用的地址与凭据，面板照抄即可。兼容层凭据等价于节点最高
+启动日志会打印可直接使用的端口与凭据，面板照抄即可。兼容层凭据等价于节点最高
 权限（建实例、下发命令、读写实例文件），公网暴露时请配合 `allowPanelIps` 限制来源。
 协议范围、面板填写方式与不支持清单见[第三方 Daemon 协议兼容](compat-daemon.md)。

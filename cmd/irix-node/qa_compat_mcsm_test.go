@@ -5,9 +5,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,20 +20,33 @@ import (
 // mcsmTestKey 测试用节点密钥。
 const mcsmTestKey = "qa-mcsm-node-key-0000000000"
 
-// setupTestMCSM 在测试守护进程上启用 MCSM 兼容层并返回服务器地址。
+// setupTestMCSM 在测试守护进程上启用 MCSM 兼容层（独立端口，0 = 系统分配），
+// 返回该端口的基址（如 http://127.0.0.1:54321）。
 func setupTestMCSM(t *testing.T, d *Daemon) string {
 	t.Helper()
-	d.setupCompat(&nodeOptions{
+	return startTestCompat(t, d, &nodeOptions{
 		CompatMCSMEnabled: true,
-		CompatMCSMPrefix:  "/mcsm",
+		CompatMCSMPort:    0, // 端口 0 = 由系统分配（测试专用）
 		CompatMCSMKey:     mcsmTestKey,
-	})
-	if d.compatMC == nil {
-		t.Fatalf("MCSM 兼容层未启用（检查 setupCompat 配置校验）")
+	}, "mcsm")
+}
+
+// startTestCompat 应用兼容层配置并启动监听，返回指定层的基址。
+func startTestCompat(t *testing.T, d *Daemon, opts *nodeOptions, layer string) string {
+	t.Helper()
+	d.setupCompat(opts)
+	if d.compatMC == nil && d.compatMSLX == nil {
+		t.Fatalf("兼容层未启用（检查 setupCompat 配置校验）")
 	}
-	srv := newTestServer(t, d)
-	t.Cleanup(srv.Close)
-	return srv.URL + "/mcsm"
+	d.startCompatServers()
+	t.Cleanup(func() {
+		_ = d.stopCompatServers(context.Background())
+	})
+	addr := d.compatAddrOf(layer)
+	if addr == "" {
+		t.Fatalf("%s 兼容层没有监听地址（端口占用或未启用？）", layer)
+	}
+	return "http://" + addr
 }
 
 // eioClient 引擎层（engine.io v4）测试客户端，只走 HTTP 轮询传输。
@@ -490,84 +503,161 @@ func TestCompatMCSMFileOpsAndTickets(t *testing.T) {
 	}
 }
 
-// TestCompatMCSMNotEnabled 未启用时不注册任何兼容路由。
+// TestCompatMCSMNotEnabled 未启用时既不注册主路由，也不开监听端口。
 func TestCompatMCSMNotEnabled(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	srv := newTestServer(t, d)
 	defer srv.Close()
-	resp, err := testClient.Get(srv.URL + "/mcsm/")
+	// 主服务（节点自身 API 端口）上不再挂兼容层路径
+	resp, err := testClient.Get(srv.URL + "/socket.io/?EIO=4&transport=polling")
 	if err != nil {
 		t.Fatalf("请求失败: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("未启用兼容层时应 404，实际 %d", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("未启用兼容层时主端口不应提供 socket.io，实际 %d", resp.StatusCode)
+	}
+	// 也不应启动任何兼容层监听
+	d.startCompatServers()
+	if addr := d.compatAddrOf("mcsm"); addr != "" {
+		t.Fatalf("未启用时不应监听兼容层端口，实际 %s", addr)
+	}
+	if len(d.compatServers) != 0 {
+		t.Fatalf("未启用时不应登记监听器，实际 %d 个", len(d.compatServers))
 	}
 }
 
-// TestCompatThroughFullMiddlewareChain 完整中间件链（防御/审计/CORS/body 限额）
-// 下的兼容层可用性：确认这些中间件不会截断或拒绝兼容层流量。
-func TestCompatThroughFullMiddlewareChain(t *testing.T) {
+// TestCompatListenersUseMiddleware 兼容层独立端口走与主服务一致的中间件：
+//   - allowPanelIps 不在白名单 → 403（来源限制在监听入口生效）；
+//   - 防御的静态 UA 封禁 → 非 200（防御中间件确实挂在兼容层上）。
+func TestCompatListenersUseMiddleware(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	// 只允许一个不可能命中的网段 → 环回来源会被拒
+	base := startTestCompat(t, d, &nodeOptions{
+		CompatMCSMEnabled: true,
+		CompatMCSMPort:    0,
+		CompatMCSMKey:     mcsmTestKey,
+		CompatMCSMIPs:     "10.99.0.0/16",
+	}, "mcsm")
+
+	resp, err := testClient.Get(base + "/socket.io/?EIO=4&transport=polling")
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("来源不在白名单时应 403，实际 %d（%s）", resp.StatusCode, body)
+	}
+
+	// 放开来源限制，但把该 User-Agent 静态封禁
+	d2, _ := newTestDaemon(t)
+	d2.defense.applyOptions(defenseOptions{BlockedUserAgents: []string{"compat-blocked/1.0"}})
+	base2 := startTestCompat(t, d2, &nodeOptions{
+		CompatMCSMEnabled: true,
+		CompatMCSMPort:    0,
+		CompatMCSMKey:     mcsmTestKey,
+	}, "mcsm")
+	req, _ := http.NewRequest(http.MethodGet, base2+"/socket.io/?EIO=4&transport=polling", nil)
+	req.Header.Set("User-Agent", "compat-blocked/1.0")
+	resp2, err := testClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode == http.StatusOK {
+		t.Fatal("被静态封禁的 User-Agent 不应拿到 200（防御中间件未生效）")
+	}
+}
+
+// TestCompatBothLayersOnOwnPorts 两层同时开启：各自独立端口，互不影响。
+func TestCompatBothLayersOnOwnPorts(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.setupCompat(&nodeOptions{
 		CompatMCSMEnabled: true,
-		CompatMCSMPrefix:  "/mcsm",
+		CompatMCSMPort:    0,
 		CompatMCSMKey:     mcsmTestKey,
 		CompatMSLXEnabled: true,
-		CompatMSLXPrefix:  "/mslx",
+		CompatMSLXPort:    0,
 		CompatMSLXUser:    "admin",
 		CompatMSLXPass:    mslxTestPass,
 	})
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if d.compatMC == nil || d.compatMSLX == nil {
+		t.Fatal("两层应可同时启用")
+	}
+	d.startCompatServers()
+	t.Cleanup(func() { _ = d.stopCompatServers(context.Background()) })
+
+	mcAddr := d.compatAddrOf("mcsm")
+	msAddr := d.compatAddrOf("mslx")
+	if mcAddr == "" || msAddr == "" {
+		t.Fatalf("两层都应监听：mcsm=%q mslx=%q", mcAddr, msAddr)
+	}
+	if mcAddr == msAddr {
+		t.Fatalf("两层必须使用不同端口：%s", mcAddr)
+	}
+
+	// MCSM 端口上只有 socket.io / 直连通道，没有 /api/
+	resp, err := testClient.Get("http://" + mcAddr + "/api/ping")
 	if err != nil {
-		t.Fatalf("监听失败: %v", err)
+		t.Fatalf("请求失败: %v", err)
 	}
-	srv := d.newHTTPServer(ln.Addr().String())
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	base := "http://" + ln.Addr().String()
-
-	// MCSM：握手 + 认证（走完整中间件）
-	c := newEIOClient(t, base+"/mcsm/socket.io/")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("MCSM 端口不应提供 MSLX 的 /api/，实际 %d", resp.StatusCode)
+	}
+	// MSLX 端口上只有 /api/，没有 socket.io
+	resp2, err := testClient.Get("http://" + msAddr + "/socket.io/?EIO=4&transport=polling")
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("MSLX 端口不应提供 socket.io，实际 %d", resp2.StatusCode)
+	}
+	// 两个端口都活着
+	c := newEIOClient(t, "http://"+mcAddr+"/socket.io/")
 	c.connect()
-	if status, data := c.requestRaw("auth", "mw1", mcsmTestKey); status != 200 {
-		t.Fatalf("完整中间件链下认证失败: %d %s", status, data)
+	if status, data := c.requestRaw("auth", "pp1", mcsmTestKey); status != 200 {
+		t.Fatalf("MCSM 端口认证失败: %d %s", status, data)
 	}
-	// 业务事件（含 POST 请求体解析）
-	if status, data := c.requestRaw("instance/overview", "mw2", map[string]any{}); status != 200 {
-		t.Fatalf("完整中间件链下实例概览失败: %d %s", status, data)
-	}
-
-	// MSLX：登录（POST + JSON body）
 	body, _ := json.Marshal(map[string]any{"username": "admin", "password": mslxTestPass})
-	status, resp := mslxDo(t, http.MethodPost, base+"/mslx/api/auth/login", "", body)
+	status, respLogin := mslxDo(t, http.MethodPost, "http://"+msAddr+"/api/auth/login", "", body)
 	if status != http.StatusOK {
-		t.Fatalf("完整中间件链下 MSLX 登录失败: %d %s", status, resp)
-	}
-	var env mslxEnvelope
-	if err := json.Unmarshal(resp, &env); err != nil || env.Code != 200 {
-		t.Fatalf("完整中间件链下登录响应异常: %s", resp)
+		t.Fatalf("MSLX 端口登录失败: %d %s", status, respLogin)
 	}
 }
 
-// TestCompatPrefixAndAllowParsing 前缀与来源白名单解析规则。
-func TestCompatPrefixAndAllowParsing(t *testing.T) {
-	if p, err := compatPrefix("", defaultMCSMPrefix); err != nil || p != "/mcsm" {
-		t.Fatalf("默认前缀解析异常: %q %v", p, err)
-	}
-	if p, err := compatPrefix("mcsm2/", defaultMCSMPrefix); err != nil || p != "/mcsm2" {
-		t.Fatalf("前缀规范化异常: %q %v", p, err)
-	}
-	for _, bad := range []string{"/", "//x", "/a b", "/a?b"} {
-		if _, err := compatPrefix(bad, defaultMCSMPrefix); err == nil {
-			t.Fatalf("非法前缀 %q 应被拒绝", bad)
-		}
-	}
+// TestCompatAllowParsing 来源白名单解析规则。
+func TestCompatAllowParsing(t *testing.T) {
 	nets, err := parseCompatAllow("127.0.0.1\n10.0.0.0/8")
 	if err != nil || len(nets) != 2 {
 		t.Fatalf("来源白名单解析异常: %v %v", nets, err)
 	}
 	if _, err := parseCompatAllow("not-an-ip"); err == nil {
 		t.Fatal("非法来源条目应报错")
+	}
+	if nets, err := parseCompatAllow("  "); err != nil || nets != nil {
+		t.Fatalf("空白配置应视为不限制: %v %v", nets, err)
+	}
+}
+
+// TestCompatListenAddr 监听地址组装：空 bind 沿用节点 bind，端口原样拼接。
+func TestCompatListenAddr(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	d.BindHost = "0.0.0.0"
+	if got := d.compatListenAddr("", defaultMCSMCompatPort); got != "0.0.0.0:24444" {
+		t.Fatalf("空 bind 应沿用节点 bind: %q", got)
+	}
+	if got := d.compatListenAddr("192.168.1.9", defaultMSLXCompatPort); got != "192.168.1.9:7891" {
+		t.Fatalf("bind 覆盖异常: %q", got)
+	}
+	d.BindHost = "::"
+	if got := d.compatListenAddr("", defaultMCSMCompatPort); got != "[::]:24444" {
+		t.Fatalf("IPv6 监听地址拼接异常: %q", got)
+	}
+	d.BindHost = ""
+	if got := d.compatListenAddr("", defaultMCSMCompatPort); got != "127.0.0.1:24444" {
+		t.Fatalf("空 bind 且节点未设置时应回落环回: %q", got)
 	}
 }

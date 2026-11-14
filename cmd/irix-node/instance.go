@@ -226,9 +226,9 @@ func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	// DDoS/CC 防御状态与人工封禁（防御恒开，见 defense.go）
 	d.registerDefenseRoutes(mux)
 
-	// 第三方 Daemon 协议兼容层（config.json 的 compat 块，见 compat.go）：
-	// 未启用时为 nil，不注册任何路由。
-	d.registerCompat(mux)
+	// 第三方 Daemon 协议兼容层（config.json 的 compat 块，见 compat.go）
+	// 不在本路由表上挂载：面板只支持「地址 + 端口」，两层各自在独立端口监听
+	// （main 里调用 d.startCompatServers()）。
 }
 
 // auth 包装器：校验账户会话，并按端点权限开关放行。

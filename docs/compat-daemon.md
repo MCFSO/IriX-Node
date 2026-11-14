@@ -3,13 +3,16 @@
 本节点可以作为**现成第三方面板的 Daemon** 使用：面板不需要任何改造，只要把
 "节点地址"指向本节点开启的兼容子路径，即可用同一套面板管理本节点上的实例。
 
-目前提供两层，**可以同时开启**，各自挂在独立子路径下，互不影响，也不与节点
-自身 API（`/api/...`）冲突：
+目前提供两层，**可以同时开启**，各自占用**独立监听端口**，互不影响，也不与节点
+自身 API 端口（默认 12346）冲突：
 
-| 兼容层 | 对应面板 | 挂载前缀（默认） | 协议形态 |
+| 兼容层 | 对应面板 | 默认端口 | 协议形态 |
 | --- | --- | --- | --- |
-| `compat.mcsm` | MCSManager 面板（按"节点"接入） | `/mcsm` | socket.io v4（engine.io v4）+ 直连文件通道 |
-| `compat.mslx` | MSLX WebPanel | `/mslx` | REST `/api/...`（JWT）+ SignalR 控制台 |
+| `compat.mcsm` | MCSManager 面板（按"节点"接入） | `24444` | socket.io v4（engine.io v4）+ 直连文件通道 |
+| `compat.mslx` | MSLX WebPanel | `7891` | REST `/api/...`（JWT）+ SignalR 控制台 |
+
+> 为什么必须是独立端口：MCSManager 面板的「节点」配置只有**地址**和**端口**两栏，
+> 没有路径前缀输入框，所以兼容层不能挂在子路径下。
 
 ## 1. 许可与实现边界（重要）
 
@@ -31,13 +34,15 @@
   "compat": {
     "mcsm": {
       "enabled": true,
-      "prefix": "/mcsm",
+      "bind": "",
+      "port": 24444,
       "key": "",
       "allowPanelIps": ["127.0.0.1", "192.168.0.0/16"]
     },
     "mslx": {
       "enabled": true,
-      "prefix": "/mslx",
+      "bind": "",
+      "port": 7891,
       "username": "admin",
       "password": "",
       "jwtSecret": "",
@@ -52,11 +57,13 @@
 | 字段 | 说明 |
 | --- | --- |
 | `mcsm.enabled` / `mslx.enabled` | 两个开关**互相独立**，可同时为 `true`；默认 `false`（需显式开启） |
-| `prefix` | 挂载子路径。必须带前导 `/`，不能是根路径 `/`，不能含空格/`?`/`#`；默认 `/mcsm`、`/mslx` |
+| `port` | 该兼容层的**独立监听端口**。默认 `24444`（MCSM）/ `7891`（MSLX）；写 `0` = 由系统分配空闲端口；端口被占用时该层只告警不启动，不影响节点主功能 |
+| `bind` | 该兼容层的监听地址。留空 = 沿用节点 `bind`（节点绑 `0.0.0.0` 时兼容层也对外）；只给本机面板用可填 `127.0.0.1` |
 | `mcsm.key` | 面板"节点密钥"（等价 MCSManager 的 apiKey）。**留空即自动生成**（见 §2.1） |
 | `mslx.username` / `mslx.password` | WebPanel 登录账号；密码**留空即自动生成**（见 §2.1） |
 | `mslx.jwtSecret` | JWT 签名密钥；留空即自动生成，写入 `{data}/compat-secrets.json` |
 | `allowPanelIps` | 允许的面板来源（裸 IP 或 CIDR，数组）；留空 = 不限制来源 |
+| `prefix` | **已废弃**：面板不支持路径前缀，兼容层已改为独立端口；填了只在启动日志提示，不生效 |
 
 ### 2.1 凭据自动生成（无需手填）
 
@@ -73,8 +80,8 @@
 
 ```
 兼容层凭据：已自动生成 compat.mcsm.key（面板节点密钥）
-MCSManager Daemon 兼容层已启用：/mcsm（面板节点地址 http://<本机>:<端口>/mcsm，密钥 <key>）
-MSLX Daemon 兼容层已启用：/mslx（WebPanel 后端地址 http://<本机>:<端口>/mslx，账号 admin，密码 <pass>）
+MCSManager Daemon 兼容层已启用（面板「节点」填 地址=<本机IP> 端口=24444，密钥 <key>）
+MSLX Daemon 兼容层已启用（WebPanel 后端地址 http://<本机IP>:7891，账号 admin，密码 <pass>）
 ```
 
 优先级：**配置文件里显式填写的值 > `{data}/compat-secrets.json` > 现场随机生成**。
@@ -84,12 +91,12 @@ MSLX Daemon 兼容层已启用：/mslx（WebPanel 后端地址 http://<本机>:<
 启动日志会明确打印启用状态与面板应填写的地址：
 
 ```
-MCSManager Daemon 兼容层已启用：/mcsm（面板节点地址 http://<本机>:<端口>/mcsm，密钥见配置）
-MSLX Daemon 兼容层已启用：/mslx（WebPanel 后端地址 http://<本机>:<端口>/mslx，账号 admin）
+MCSManager Daemon 兼容层监听于 0.0.0.0:24444
+MSLX 兼容层监听于 0.0.0.0:7891
 ```
 
-配置不完整（前缀非法、来源白名单条目非法）时只打印告警并**跳过该层**，不影响节点
-主功能启动。凭据缺失**不再**导致跳过——那是自动生成的。
+监听端口被占用、来源白名单条目非法时只打印告警并**跳过该层**，不影响节点主功能
+启动。凭据缺失**不再**导致跳过——那是自动生成的。
 
 ### 安全须知
 
@@ -98,25 +105,24 @@ MSLX Daemon 兼容层已启用：/mslx（WebPanel 后端地址 http://<本机>:<
 
 - 务必使用长随机串，且不要与账户密码 / 其他服务复用；
 - 公网暴露时建议同时设置 `allowPanelIps`（只放行面板出口 IP）；
-- 建议开启 TLS（`tls.mode = auto|manual`）；兼容层与节点自身 API 共享同一监听端口，
-  因此 TLS 对两者同时生效；
+- 兼容层端口默认是明文 HTTP；经公网暴露时建议前面套 TLS 反向代理（面板地址填
+  `https`/`wss` 对应的域名即可），或只监听内网地址（`bind` 填内网 IP）；
 - 兼容层流量同样经过节点的审计日志与 DDoS/CC 防御中间件（环回来源豁免限频）。
 
-## 3. MCSManager 兼容层（`/mcsm`）
+## 3. MCSManager 兼容层（默认端口 24444）
 
 ### 3.1 面板侧接入方式
 
-MCSManager 面板 →「节点」→「新建节点」：
+MCSManager 面板 →「节点」→「新建节点」（面板只有地址、端口、密钥三栏）：
 
 | 字段 | 填写 |
 | --- | --- |
-| 地址 | `http://<本机IP>:<端口>`（若面板与节点同机可用 `127.0.0.1`） |
-| 端口 | 节点监听端口（默认 12346） |
-| 前缀 | `/mcsm`（必须与 `compat.mcsm.prefix` 一致） |
-| 密钥 | `compat.mcsm.key` 的值 |
+| 地址 | `<本机IP>`（例如 `192.168.1.5`；面板与节点同机可填 `127.0.0.1`） |
+| 端口 | `24444`（与 `compat.mcsm.port` 一致） |
+| 密钥 | `compat.mcsm.key` 的值（启动日志里也会打印） |
 
-面板随后会：连接 `<前缀>/socket.io` → 发 `auth` 事件校验密钥 → 拉 `info/overview`
-与 `instance/*`。
+面板随后会：连接 `ws://<地址>:<端口>/socket.io` → 发 `auth` 事件校验密钥 →
+拉 `info/overview` 与 `instance/*`。
 
 ### 3.2 传输层
 
@@ -164,17 +170,17 @@ Java 运行时下载/删除、远程自更新、MCSM 计划任务、快速安装
 
 | 路由 | 说明 |
 | --- | --- |
-| `GET <前缀>/download/<通行证>/<文件名>` | 直连下载（通行证只允许下载注册时绑定的那个文件） |
-| `POST <前缀>/upload/<通行证>` | 直连上传（multipart，字段名 `file`） |
-| `POST <前缀>/upload-new/<通行证>?filename=&size=` | 分片上传会话（返回 `{data:{id}}`） |
-| `POST <前缀>/upload-piece/<id>?offset=` | 写入分片，覆盖完整后自动落盘（`unzip=true` 时解压） |
-| `GET <前缀>/` | 占位说明页 |
+| `GET /download/<通行证>/<文件名>` | 直连下载（通行证只允许下载注册时绑定的那个文件） |
+| `POST /upload/<通行证>` | 直连上传（multipart，字段名 `file`） |
+| `POST /upload-new/<通行证>?filename=&size=` | 分片上传会话（返回 `{data:{id}}`） |
+| `POST /upload-piece/<id>?offset=` | 写入分片，覆盖完整后自动落盘（`unzip=true` 时解压） |
+| `GET /` | 占位说明页（显示当前监听地址与密钥位置） |
 
-## 4. MSLX 兼容层（`/mslx`）
+## 4. MSLX 兼容层（默认端口 7891）
 
 ### 4.1 WebPanel 侧接入方式
 
-WebPanel 后端地址填 `http://<本机IP>:<端口>/mslx`，用 `compat.mslx.username` /
+WebPanel 后端地址填 `http://<本机IP>:7891`（与 `compat.mslx.port` 一致），用 `compat.mslx.username` /
 `compat.mslx.password` 登录。登录响应：
 
 ```json
@@ -251,7 +257,7 @@ MSLX 用递增整数表示实例。映射持久化在 `{data}/compat-mslx-ids.js
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `qa_compat_mcsm_test.go` | engine.io 握手/心跳、socket.io 连接、密钥认证与拒绝、实例增删启停杀、文件事件与越界拒绝、直连下载通行证绑定、未启用时 404、前缀/白名单解析、**完整中间件链**下的可用性 |
+| `qa_compat_mcsm_test.go` | engine.io 握手/心跳、socket.io 连接、密钥认证与拒绝、实例增删启停杀、文件事件与越界拒绝、直连下载通行证绑定、未启用时不开监听、来源白名单与 UA 封禁（独立端口上的中间件生效）、两层端口隔离、监听地址组装 |
 | `qa_compat_mslx_test.go` | 登录/JWT（含伪造令牌与 `access_token` 传参）、实例列表/详情/动作、文件全套操作、Hub 协商、未实现接口 501、未启用 404、**两层同时开启** |
 | `qa_compat_mslx_ws_test.go` | SignalR WebSocket 端到端：握手、`JoinGroup`、`ReceiveLog` 实时推送、`SendCommand` 应答、系统监视推送 |
 
@@ -265,9 +271,9 @@ go test ./cmd/irix-node -run TestCompat -count=1
 
 | 现象 | 排查 |
 | --- | --- |
-| 面板连不上 / 握手失败 | 确认 `prefix` 与面板填写的"前缀"完全一致（含前导 `/`）；确认端口与 `bind` 可访问 |
+| 面板连不上 / 握手失败 | 确认面板端口填的是 `compat.mcsm.port`（默认 24444）而不是节点主端口 12346；确认 `bind` 可被面板访问、防火墙放行该端口 |
 | 面板提示密钥错误 | 启动日志会打印 `来源 … 密钥错误，认证失败`；当前实际密钥见启动日志或 `{data}/compat-secrets.json` |
-| 兼容层未启用 | 启动日志会有 `警告: … 兼容层未启用：<原因>`（只可能是 `prefix` 非法或 `allowPanelIps` 条目非法；凭据缺失会自动生成） |
+| 兼容层未启用 / 未监听 | 启动日志会有 `警告: … 兼容层未启动：监听 <addr> 失败（…）；端口可能被占用`——改 `port` 或释放端口即可；`allowPanelIps` 条目非法也会跳过该层 |
 | 想换密钥/密码 | 把配置里对应字段置为 `""` 并删除 `{data}/compat-secrets.json`，重启后自动生成新值；或直接填自己的值 |
 | 401 / 403 | MSLX 侧 token 过期（1 天）需重新登录；`allowPanelIps` 不包含面板出口 IP；登录失败过多进入封禁期 |
 | 面板功能点击报"未实现" | 该功能在本文档第 3.3 / 4.3 节的"明确不支持"清单内，属预期行为 |

@@ -250,18 +250,21 @@ func TestApplyConfigCompat(t *testing.T) {
 		t.Fatalf("默认应关闭两层兼容: %+v", o)
 	}
 
-	// 两层同时开启 + 各字段生效
+	// 两层同时开启 + 各字段生效（独立端口监听，面板只填地址+端口）
+	portA, portB := 24445, 7892
 	o = baseOptions()
 	o.applyConfig(&Config{Compat: &CompatConfig{
 		MCSM: &MCSMCompatConfig{
 			Enabled:       &on,
-			Prefix:        "/panel-mcsm",
+			Bind:          "0.0.0.0",
+			Port:          &portA,
 			Key:           "k-123",
 			AllowPanelIPs: []string{"127.0.0.1", "10.0.0.0/8"},
 		},
 		MSLX: &MSLXCompatConfig{
 			Enabled:       &on,
-			Prefix:        "/panel-mslx",
+			Bind:          "192.168.1.5",
+			Port:          &portB,
 			Username:      "root",
 			Password:      "p-123",
 			JWTSecret:     "s-1234567890abcdef",
@@ -271,13 +274,14 @@ func TestApplyConfigCompat(t *testing.T) {
 	if !o.CompatMCSMEnabled || !o.CompatMSLXEnabled {
 		t.Fatalf("两层应可同时开启: %+v", o)
 	}
-	if o.CompatMCSMPrefix != "/panel-mcsm" || o.CompatMCSMKey != "k-123" {
+	if o.CompatMCSMPort != portA || o.CompatMCSMBind != "0.0.0.0" || o.CompatMCSMKey != "k-123" {
 		t.Fatalf("MCSM 配置未生效: %+v", o)
 	}
 	if o.CompatMCSMIPs != "127.0.0.1\n10.0.0.0/8" {
 		t.Fatalf("MCSM 来源白名单未生效: %q", o.CompatMCSMIPs)
 	}
-	if o.CompatMSLXPrefix != "/panel-mslx" || o.CompatMSLXUser != "root" ||
+	if o.CompatMSLXPort != portB || o.CompatMSLXBind != "192.168.1.5" ||
+		o.CompatMSLXUser != "root" ||
 		o.CompatMSLXPass != "p-123" || o.CompatMSLXSecret != "s-1234567890abcdef" {
 		t.Fatalf("MSLX 配置未生效: %+v", o)
 	}

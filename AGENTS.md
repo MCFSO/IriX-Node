@@ -65,7 +65,7 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 | `device_handlers.go` | 设备管理 API：挑战、设备注册/列表/撤销、管理员设备与策略接口 |
 | `time_system.go` | 时间系统启动编排：配置合并、全局时间源安装、TLS 证书签发/校验/续签、日志与 HTTP Date 接入 |
 | `time_handlers.go` | 时间系统 API：`GET /api/time`、`POST /api/time/sync` |
-| `compat.go` | 第三方 Daemon 协议兼容层的注册与共享件：`compat` 配置校验、子路径挂载、来源白名单、MCSM 实例视图字段映射 |
+| `compat.go` | 第三方 Daemon 协议兼容层的注册与共享件：`compat` 配置校验、**独立端口监听起停**（`startCompatServers`/`stopCompatServers`）、凭据自动生成、来源白名单、MCSM 实例视图字段映射 |
 | `compat_mcsm_engine.go` | MCSManager 兼容层传输引擎（自有实现）：engine.io v4 轮询 + WebSocket 升级 + socket.io v4 包 |
 | `compat_mcsm.go` | MCSManager 兼容层事件分发与实例/信息/控制台/票据/计划任务事件、实例状态推送 |
 | `compat_mcsm_file.go` | MCSManager 兼容层文件事件与直连下载/分片上传通道、URL 下载任务 |
@@ -109,16 +109,17 @@ go run ./cmd/irix-node -bind 0.0.0.0 -port 23333  # 监听全部网卡（局域�
 ## 第三方 Daemon 兼容（`compat` 块）
 
 - `config.json` 的 `compat.mcsm` / `compat.mslx` 各自独立开关，**可同时开启**，
-  分别挂载在独立子路径（默认 `/mcsm`、`/mslx`，见 `compatPrefix`），
-  未启用（nil）时不注册任何路由。协议细节见 `docs/compat-daemon.md`。
+  各占**独立监听端口**（默认 24444 / 7891；MCSManager 面板只支持地址+端口，
+  不支持子路径），由 `d.startCompatServers()` 启动、随节点优雅关停
+  （`app_runtime.go`）。未启用（nil）时不监听任何端口。协议见 `docs/compat-daemon.md`。
 - **许可证边界（硬约束）**：兼容层只能对齐线上协议与字段语义，
   **不得复制、翻译或引入** MCSManager（Apache-2.0）与 MSLX 的源码；
   传输层（engine.io/socket.io、SignalR JSON 协议、JWT）必须基于标准库自行实现，
   不新增依赖。业务动作一律复用本节点既有能力（`startInstance`/`stopInstance`、
   `tickets`、`safeResolve`、`sysinfo`、`timesys`）。
 - 兼容层不走节点账户权限体系（MCSM 用节点密钥、MSLX 用 JWT），因此
-  **不要**为其路由调用 `perm()`；兼容层文件也不在 `qa_perms_test.go` 的
-  反向扫描清单内（用 `mux.Handle(前缀+"/", ...)` 整体挂载）。
+  **不要**为其路由调用 `perm()`；兼容层不在节点主 mux 上注册路由（独立
+  `http.Server` + 独立端口），故也不在 `qa_perms_test.go` 的扫描清单内。
 - 文件路径必须走 `safeResolve`/`NormalizePath`，不得放宽节点既有边界检查。
 - 兼容层流量仍经过审计与防御中间件；新增能力时须补 `qa_compat_*_test.go` 用例。
 

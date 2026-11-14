@@ -521,6 +521,9 @@ func runNode() error {
 	}
 
 	srv := d.newHTTPServer(addr)
+	// 第三方 Daemon 协议兼容层：各占独立端口（面板只支持地址+端口输入）。
+	// 端口占用等失败只告警并跳过该层，不影响节点主功能。
+	d.startCompatServers()
 
 	d.auditLogf("IriX Node Daemon 已启动 (version %s, go %s)", Version, runtime.Version())
 	if cfgLoaded {

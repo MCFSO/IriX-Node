@@ -91,11 +91,15 @@ func (ms *mslxCompat) handler() http.Handler {
 		p := r.URL.Path
 		if !strings.HasPrefix(p, "/api/") {
 			if p == "/" || p == "" {
+				addr := ms.addr
+				if addr == "" {
+					addr = "127.0.0.1:" + strconv.Itoa(defaultMSLXCompatPort)
+				}
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = io.WriteString(w, "<!doctype html><meta charset=\"utf-8\"><title>IriX Node</title>"+
 					"<h3>IriX Node — MSLX Daemon 兼容层</h3>"+
-					"<p>面板后端地址：<code>http://&lt;本机&gt;:&lt;端口&gt;"+ms.prefix+"</code>；"+
-					"账号见 <code>config.json</code> 的 <code>compat.mslx</code>。</p>")
+					"<p>WebPanel 后端地址：<code>"+addr+"</code>；"+
+					"账号与密码见 <code>config.json</code> 的 <code>compat.mslx</code>。</p>")
 				return
 			}
 			http.NotFound(w, r)
@@ -819,7 +823,7 @@ func (ms *mslxCompat) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"language":    "zh_cn",
 			"dataPath":    d.DataDir,
 			"readOnly":    true,
-			"compatLayer": ms.prefix,
+			"compatLayer": ms.addr,
 		}, "获取成功")
 		return
 	}

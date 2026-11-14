@@ -109,6 +109,11 @@ func (r *nodeRuntime) shutdown(ctx context.Context) error {
 			r.daemon.httpRequests.seal()
 			r.daemon.processStarts.seal()
 			r.daemon.closeConsoles()
+			// 兼容层独立端口的在途请求同样计入 httpRequests，
+			// 因此必须先关掉监听，再等待请求排空。
+			if err := r.daemon.stopCompatServers(ctx); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if r.server != nil {
 			if err := r.server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {

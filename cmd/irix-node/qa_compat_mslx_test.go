@@ -20,21 +20,15 @@ import (
 // mslxTestPass 测试用登录密码。
 const mslxTestPass = "qa-mslx-pass-000000000000"
 
-// setupTestMSLX 启用 MSLX 兼容层并返回其基址。
+// setupTestMSLX 启用 MSLX 兼容层（独立端口，0 = 系统分配）并返回其基址。
 func setupTestMSLX(t *testing.T, d *Daemon) string {
 	t.Helper()
-	d.setupCompat(&nodeOptions{
+	return startTestCompat(t, d, &nodeOptions{
 		CompatMSLXEnabled: true,
-		CompatMSLXPrefix:  "/mslx",
+		CompatMSLXPort:    0, // 端口 0 = 由系统分配（测试专用）
 		CompatMSLXUser:    "admin",
 		CompatMSLXPass:    mslxTestPass,
-	})
-	if d.compatMSLX == nil {
-		t.Fatalf("MSLX 兼容层未启用（检查 setupCompat 配置校验）")
-	}
-	srv := newTestServer(t, d)
-	t.Cleanup(srv.Close)
-	return srv.URL + "/mslx"
+	}, "mslx")
 }
 
 // mslxDo 发起带可选令牌的请求并返回状态码与响应体。
@@ -398,44 +392,6 @@ func TestCompatMSLXNotEnabled(t *testing.T) {
 	defer srv.Close()
 	if status, _ := mslxDo(t, http.MethodGet, srv.URL+"/mslx/api/ping", "", nil); status != http.StatusNotFound {
 		t.Fatalf("未启用兼容层时应 404，实际 %d", status)
-	}
-}
-
-// TestCompatBothLayersEnabled 两层同时开启互不影响。
-func TestCompatBothLayersEnabled(t *testing.T) {
-	d, _ := newTestDaemon(t)
-	d.setupCompat(&nodeOptions{
-		CompatMCSMEnabled: true,
-		CompatMCSMPrefix:  "/mcsm",
-		CompatMCSMKey:     mcsmTestKey,
-		CompatMSLXEnabled: true,
-		CompatMSLXPrefix:  "/mslx",
-		CompatMSLXUser:    "admin",
-		CompatMSLXPass:    mslxTestPass,
-	})
-	if d.compatMC == nil || d.compatMSLX == nil {
-		t.Fatal("两层应可同时启用")
-	}
-	srv := newTestServer(t, d)
-	defer srv.Close()
-
-	// MCSM 层：engine.io 握手
-	c := newEIOClient(t, srv.URL+"/mcsm/socket.io/")
-	c.connect()
-	if status, _ := c.requestRaw("auth", "b1", mcsmTestKey); status != 200 {
-		t.Fatal("MCSM 层认证失败")
-	}
-
-	// MSLX 层：登录 + 实例列表
-	mslxBase := srv.URL + "/mslx"
-	token := mslxLogin(t, mslxBase)
-	if status, body := mslxDo(t, http.MethodGet, mslxBase+"/api/instance/list", token, nil); status != http.StatusOK {
-		t.Fatalf("MSLX 层实例列表失败: %d（%s）", status, body)
-	}
-
-	// 节点自身 API 不受影响
-	if status, _ := doReq(t, srv.URL+"/api/overview?token="+qaTestToken()); status != http.StatusOK {
-		t.Fatalf("节点自身 API 应不受兼容层影响，实际 %d", status)
 	}
 }
 

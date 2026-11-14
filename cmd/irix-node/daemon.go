@@ -320,9 +320,11 @@ type Daemon struct {
 	tlsNoticeDay      string // 证书到期提示的去重日期（每天最多一次）
 
 	// 第三方 Daemon 协议兼容层（compat 块，见 compat.go）：
-	// 各自挂在独立子路径下，nil 表示该层未启用；两层可同时启用。
-	compatMC   *mcsmCompat // MCSManager Daemon 兼容
-	compatMSLX *mslxCompat // MSLX Daemon 兼容
+	// 各自在独立端口监听，nil 表示该层未启用；两层可同时启用。
+	compatMC      *mcsmCompat       // MCSManager Daemon 兼容
+	compatMSLX    *mslxCompat       // MSLX Daemon 兼容
+	compatMu      sync.Mutex        // 保护 compatServers
+	compatServers []*compatListener // 已启动的兼容层监听器（随节点优雅关停）
 }
 
 // NewDaemon 创建守护进程实例。
