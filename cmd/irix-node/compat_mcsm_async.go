@@ -175,11 +175,23 @@ type wsOutbox struct {
 	sig     chan struct{}
 	dropped atomic.Uint64
 	pumping sync.Once
+	join    []byte // 帧之间的分隔符（engine.io 用 \x1e）
+	end     []byte // 合并帧的结尾（SignalR 每条记录以 \x1e 结尾）
 }
 
 // newWSOutbox 创建出站队列（conn 为空时忽略所有写入）。
+//
+// 默认按 engine.io 的方式合并：帧之间用 \x1e 分隔、末尾不加分隔符。
 func newWSOutbox(conn *wsConn) *wsOutbox {
-	return &wsOutbox{conn: conn, sig: make(chan struct{}, 1)}
+	return newWSOutboxFramed(conn, []byte{0x1e}, nil)
+}
+
+// newWSOutboxFramed 创建自定义分帧方式的出站队列。
+//
+// SignalR JSON 协议要求「每条记录以 0x1e 结尾」，因此用 join=nil、end=0x1e
+// 才能把多条记录合并进同一个 WS 文本帧而不产生空记录。
+func newWSOutboxFramed(conn *wsConn, join, end []byte) *wsOutbox {
+	return &wsOutbox{conn: conn, sig: make(chan struct{}, 1), join: join, end: end}
 }
 
 // push 入队一帧（永不阻塞）。队列满时丢弃最旧帧。
@@ -237,18 +249,17 @@ func (o *wsOutbox) pump() {
 			continue
 		}
 		var err error
-		if len(frames) == 1 {
-			err = o.conn.writeText(string(frames[0]))
-		} else {
-			var buf bytes.Buffer
-			for i, f := range frames {
-				if i > 0 {
-					buf.WriteByte('\x1e')
-				}
-				buf.Write(f)
+		var buf bytes.Buffer
+		for i, f := range frames {
+			if i > 0 && len(o.join) > 0 {
+				buf.Write(o.join)
 			}
-			err = o.conn.writeText(buf.String())
+			buf.Write(f)
 		}
+		if len(o.end) > 0 {
+			buf.Write(o.end)
+		}
+		err = o.conn.writeText(buf.String())
 		if err != nil {
 			// 写失败说明连接已坏：关闭队列，由会话心跳/读循环负责收尾
 			o.close()

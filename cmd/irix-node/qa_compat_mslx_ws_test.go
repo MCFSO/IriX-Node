@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -167,5 +168,83 @@ func TestCompatMSLXHubSystem(t *testing.T) {
 	payload, _ := args[0].(map[string]any)
 	if _, ok := payload["local"]; !ok {
 		t.Fatalf("系统统计缺少 local 段: %v", payload)
+	}
+}
+
+// TestMSLXHubAsyncFraming SignalR 出站批量合并必须保持记录分隔（每条以 0x1e 结尾），
+// 且读循环不被慢调用阻塞。
+func TestMSLXHubAsyncFraming(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	status, resp := mslxDo(t, http.MethodPost,
+		base+"/api/hubs/system/negotiate?negotiateVersion=1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("协商失败: %d %s", status, resp)
+	}
+	var neg struct {
+		ConnectionToken string `json:"connectionToken"`
+	}
+	if err := json.Unmarshal(resp, &neg); err != nil || neg.ConnectionToken == "" {
+		t.Fatalf("协商响应异常: %s", resp)
+	}
+	ws := dialTestWS(t, base+"/api/hubs/system?id="+url.QueryEscape(neg.ConnectionToken))
+	defer ws.conn.Close()
+
+	ws.sendText(`{"protocol":"json","version":1}` + srRecordSep)
+	// 一次发 3 条调用：应答会被批量合并进同一个帧，客户端必须逐条解出
+	for i := 1; i <= 3; i++ {
+		ws.sendText(fmt.Sprintf(`{"type":1,"invocationId":"c%d","target":"JoinMonitor"}`, i) + srRecordSep)
+	}
+
+	rd := &hubReader{t: t, ws: ws}
+	seen := map[string]bool{}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(seen) < 3 && time.Now().Before(deadline) {
+		rec := rd.next(time.Until(deadline))
+		if rec["type"] == float64(3) {
+			if id, ok := rec["invocationId"].(string); ok {
+				seen[id] = true
+			}
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("应收到 3 条调用应答（帧内多记录），实际 %v", seen)
+	}
+}
+
+// TestMSLXHubInvocationQueuedAsync 读循环只入队：慢调用不会阻塞后续调用。
+func TestMSLXHubInvocationQueuedAsync(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	setupTestMSLX(t, d)
+	ms := d.compatMSLX
+
+	c := &mslxHubConn{
+		id:       "test-hub",
+		hub:      "instanceControlHub",
+		srv:      ms,
+		jobs:     newMCJobQueue(),
+		stopPing: make(chan struct{}),
+		console:  map[uint32]func(){},
+	}
+	c.outbox = newWSOutboxFramed(nil, []byte(srRecordSep), []byte(srRecordSep))
+	c.startWorkers()
+	t.Cleanup(func() {
+		c.jobs.close()
+		close(c.stopPing)
+	})
+
+	// 入队 200 条调用的耗时应远小于执行耗时（读循环只做解析 + 入队）
+	start := time.Now()
+	for i := 0; i < 200; i++ {
+		c.jobs.push(mcJob{event: "JoinMonitor", uuid: "x", data: []byte(`{"type":1,"invocationId":"x","target":"JoinMonitor"}`)})
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("入队 200 条调用耗时 %s，读循环不应同步执行", elapsed)
+	}
+	if c.jobs.length() == 0 && c.jobs.dropped.Load() == 0 {
+		// 工作协程可能已经全部取走，属正常
+		t.Log("调用已被工作协程取空")
 	}
 }

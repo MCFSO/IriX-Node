@@ -185,6 +185,11 @@ type mslxCompat struct {
 	uploads mslxUploadRegistry
 	// cron 面板「定时任务」表（持久化于 {data}/compat-mslx-tasks.json）
 	cron mslxCronStore
+	// hubConns 活跃 SignalR 连接（系统监视共享采样广播）
+	hubMu       sync.Mutex
+	hubConns    map[string]*mslxHubConn
+	samplerOnce sync.Once
+	samplerStop chan struct{}
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
 }

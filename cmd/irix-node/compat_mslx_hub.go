@@ -50,6 +50,11 @@ type mslxHubConn struct {
 	console    map[uint32]func() // 实例 id → 取消订阅
 	monitoring bool
 	stopPing   chan struct{}
+
+	// 异步基础设施：出站批量写 + 调用队列
+	outbox *wsOutbox   // SignalR 记录批量合并写（join=nil、end=0x1e）
+	jobs   *mcJobQueue // 调用队列（读循环只解析，不执行）
+	sendMu sync.Mutex  // 串行化「把记录放进 outbox」的 marshal+push
 }
 
 // SignalR JSON 消息（本层用到的字段）。
@@ -170,8 +175,18 @@ func (ms *mslxCompat) connectHub(w http.ResponseWriter, r *http.Request, hub str
 		ws:       conn,
 		console:  map[uint32]func(){},
 		stopPing: make(chan struct{}),
+		jobs:     newMCJobQueue(),
+		// SignalR：多条记录合并进一个帧，**每条记录都以 0x1e 结尾**
+		// （join 与 end 都是分隔符——只给 end 会把两条记录粘在一起）
+		outbox: newWSOutboxFramed(conn, []byte(srRecordSep), []byte(srRecordSep)),
 	}
+	hc.outbox.start()
+	hc.startWorkers()
+	ms.registerHubConn(hc)
 	defer func() {
+		ms.unregisterHubConn(hc)
+		hc.outbox.close()
+		hc.jobs.close()
 		hc.shutdown()
 		_ = conn.writeClose(1000, "")
 		_ = conn.Close()
@@ -179,13 +194,30 @@ func (ms *mslxCompat) connectHub(w http.ResponseWriter, r *http.Request, hub str
 	hc.run()
 }
 
-// send 发送一条 SignalR 消息。
+// send 发送一条 SignalR 消息（异步：交给出站队列批量合并写）。
+//
+// 以前是每条记录一次 writeText：监视推送（3 秒一批）、控制台输出（30ms 一批）
+// 与调用应答叠加时 syscall 数量随消息数线性增长，慢客户端还会把业务协程堵住。
+// 现在同一时刻的多条记录合并成一个 WS 文本帧（SignalR 允许帧内以 0x1e 分隔
+// 多条记录，outbox 的 end 就是 0x1e）。
 func (c *mslxHubConn) send(msg srMessage) {
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	_ = c.ws.writeText(string(body) + srRecordSep)
+	c.sendRaw(body)
+}
+
+// sendRaw 把已序列化的记录放进出站队列（保持调用顺序）。
+func (c *mslxHubConn) sendRaw(body []byte) {
+	if c.outbox != nil {
+		c.outbox.push(body)
+		return
+	}
+	// 握手阶段（outbox 尚未创建）走同步写
+	if c.ws != nil {
+		_ = c.ws.writeText(string(body) + srRecordSep)
+	}
 }
 
 // sendInvocation 服务端 → 客户端调用。
@@ -229,7 +261,7 @@ func (c *mslxHubConn) run() {
 			return
 		}
 		// 空对象表示握手成功
-		_ = c.ws.writeText("{}" + srRecordSep)
+		c.sendRaw([]byte("{}"))
 		break
 	}
 	go c.pingLoop()
@@ -255,8 +287,10 @@ func (c *mslxHubConn) run() {
 				continue
 			}
 			switch msg.Type {
-			case 1: // 调用
-				c.handleInvocation(msg)
+			case 1: // 调用：入队后由工作协程执行（保序）
+				if body, err := json.Marshal(msg); err == nil {
+					c.jobs.push(mcJob{event: msg.Target, uuid: msg.InvocationID, data: body})
+				}
 			case 6: // ping
 				c.send(srMessage{Type: 6})
 			case 7: // close
@@ -264,6 +298,92 @@ func (c *mslxHubConn) run() {
 			}
 		}
 	}
+}
+
+// registerHubConn 登记活跃连接（供系统监视共享采样广播）。
+func (ms *mslxCompat) registerHubConn(c *mslxHubConn) {
+	ms.hubMu.Lock()
+	if ms.hubConns == nil {
+		ms.hubConns = map[string]*mslxHubConn{}
+	}
+	ms.hubConns[c.id] = c
+	ms.hubMu.Unlock()
+}
+
+// unregisterHubConn 注销连接。
+func (ms *mslxCompat) unregisterHubConn(c *mslxHubConn) {
+	ms.hubMu.Lock()
+	delete(ms.hubConns, c.id)
+	ms.hubMu.Unlock()
+}
+
+// startSystemSampler 启动全局采样循环（惰性，只启动一次）。
+//
+// 原实现是「每个连接一个 3 秒 ticker，各自调一次 sysinfo」：面板开多个标签页或
+// 多个浏览器时，同一台机器被重复采样 N 次。现在只采一次，广播给所有在监视的
+// 连接，采集成本与连接数解耦。
+func (ms *mslxCompat) startSystemSampler() {
+	ms.samplerOnce.Do(func() {
+		safeGo("MSLX 兼容层系统监视采样", func() {
+			t := time.NewTicker(3 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ms.samplerStop:
+					return
+				case <-t.C:
+				}
+				ms.hubMu.Lock()
+				conns := make([]*mslxHubConn, 0, len(ms.hubConns))
+				for _, c := range ms.hubConns {
+					conns = append(conns, c)
+				}
+				ms.hubMu.Unlock()
+				if len(conns) == 0 {
+					continue
+				}
+				// 一次采样，全部连接共享
+				var payload map[string]any
+				for _, c := range conns {
+					c.mu.Lock()
+					want := c.monitoring && !c.closed
+					c.mu.Unlock()
+					if !want {
+						continue
+					}
+					if payload == nil {
+						payload = map[string]any{
+							"local":  c.systemStats(),
+							"slaves": map[string]any{},
+						}
+					}
+					c.sendInvocation("ReceiveSystemStats", payload)
+				}
+			}
+		})
+	})
+}
+
+// startWorkers 启动调用处理协程：读循环只解析，业务按连接保序执行。
+func (c *mslxHubConn) startWorkers() {
+	target := c
+	safeGo("MSLX 兼容层 SignalR 调用处理", func() {
+		for {
+			select {
+			case <-c.jobs.sig:
+			case <-c.stopPing:
+				return
+			}
+			for _, job := range c.jobs.popBatch(mcJobBatch) {
+				var msg srMessage
+				if err := json.Unmarshal(job.data, &msg); err != nil {
+					alog.Printf("MSLX 兼容层：SignalR 调用反序列化失败: %v", err)
+					continue
+				}
+				target.handleInvocation(msg)
+			}
+		}
+	})
 }
 
 // pingLoop 周期性下发心跳。
@@ -595,28 +715,13 @@ func (c *mslxHubConn) startMonitor() {
 	}
 	c.monitoring = true
 	c.mu.Unlock()
-	safeGo("MSLX 兼容层系统监视", func() {
-		defer recoverLog("MSLX 兼容层系统监视")
-		t := time.NewTicker(3 * time.Second)
-		defer t.Stop()
-		for {
-			c.mu.Lock()
-			stop := c.closed || !c.monitoring
-			c.mu.Unlock()
-			if stop {
-				return
-			}
-			c.sendInvocation("ReceiveSystemStats", map[string]any{
-				"local":  c.systemStats(),
-				"slaves": map[string]any{},
-			})
-			select {
-			case <-c.stopPing:
-				return
-			case <-t.C:
-			}
-		}
+	// 采样与广播由全局采样器负责（多连接只采一次）；
+	// 加入时先推一份，面板不用等第一个 3 秒周期。
+	c.sendInvocation("ReceiveSystemStats", map[string]any{
+		"local":  c.systemStats(),
+		"slaves": map[string]any{},
 	})
+	c.srv.startSystemSampler()
 }
 
 // stopMonitor 停止系统监视推送。
