@@ -183,6 +183,8 @@ type mslxCompat struct {
 	tasks mslxTaskRegistry
 	// uploads 面板分片上传会话（创建实例时上传核心/整合包）
 	uploads mslxUploadRegistry
+	// cron 面板「定时任务」表（持久化于 {data}/compat-mslx-tasks.json）
+	cron mslxCronStore
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
 }
@@ -528,6 +530,9 @@ func (d *Daemon) startCompatServers() {
 	if d.compatMSLX != nil {
 		// 子节点状态上报（每 2 秒；仅在存在链接关系时真正发送）
 		d.compatMSLX.startNodeReporter()
+		// 定时任务：加载任务表并启动分钟级调度（面板「定时任务」）
+		d.compatMSLX.loadCronTasks()
+		d.compatMSLX.startCronScheduler()
 		d.startCompatListener("MSLX", d.compatMSLX.bind, d.compatMSLX.port,
 			d.compatMSLX.handler(),
 			func(addr string) { d.compatMSLX.addr = addr },
@@ -581,6 +586,11 @@ func (d *Daemon) startCompatListener(name, bind string, port int, handler http.H
 
 // stopCompatServers 关停全部兼容层监听器（可重复调用）。
 func (d *Daemon) stopCompatServers(ctx context.Context) error {
+	// 先停调度循环，避免关停过程中还去碰实例
+	if d.compatMSLX != nil {
+		d.compatMSLX.stopCronScheduler()
+	}
+
 	d.compatMu.Lock()
 	servers := d.compatServers
 	d.compatServers = nil

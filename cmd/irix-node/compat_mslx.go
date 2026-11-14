@@ -665,7 +665,9 @@ func (ms *mslxCompat) handleInstance(w http.ResponseWriter, r *http.Request, seg
 		ms.handleInstanceDelete(w, r)
 	case "cancelCreation":
 		ms.handleInstanceCancelCreation(w, r)
-	case "tasks", "players", "export":
+	case "tasks":
+		ms.handleCronTasks(w, r, segs[1:])
+	case "players", "export":
 		mslxNotImplemented(w, "/api/instance/"+strings.Join(segs, "/"))
 	default:
 		http.NotFound(w, r)
