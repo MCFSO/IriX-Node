@@ -452,12 +452,12 @@ func (s *eioSession) close() {
 	cleanups := s.cleanups
 	s.cleanups = nil
 	s.mu.Unlock()
-	// 通知心跳循环退出（close 只执行一次，重复 close(chan) 会 panic）
+	// 通知心跳与事件处理协程退出。
+	// closedCh 在会话构造时创建、整个生命周期不再替换，因此 close(chan) 只会
+	// 由本函数执行一次（s.closed 已保证互斥），读取方持有本地副本即可，
+	// 不需要（也不能）再回写该字段——回写会与无锁读取方构成数据竞争。
 	if closedCh != nil {
 		close(closedCh)
-		s.mu.Lock()
-		s.closedCh = nil
-		s.mu.Unlock()
 	}
 
 	for _, fn := range cleanups {
@@ -595,12 +595,17 @@ type mcJob struct {
 // 循环里异步监听）的行为一致。队列满时退化为同步执行，保证请求不被丢。
 func (s *eioSession) enqueue(job mcJob) {
 	s.jobsOnce.Do(func() {
+		// 关闭信号在启动时取一次本地副本：closedCh 生命周期内不变，
+		// 循环里绝不直接读 s.closedCh（那是与 close() 的数据竞争）。
+		s.mu.Lock()
+		closedCh := s.closedCh
+		s.mu.Unlock()
 		safeGo("MCSM 兼容层事件处理", func() {
 			for {
 				select {
 				case job := <-s.jobs:
 					s.dispatch(job.event, job.uuid, job.data)
-				case <-s.closedCh:
+				case <-closedCh:
 					// 会话关闭后处理完已入队的少量事件再退出
 					for {
 						select {
