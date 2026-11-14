@@ -28,9 +28,10 @@ import (
 
 // engine.io 会话参数（与 socket.io v4 默认值一致）。
 const (
-	eioPollHold    = 25 * time.Second // 轮询 GET 最长挂起时间
-	eioMaxPayload  = 8 << 20          // 单次轮询 POST 载荷上限
-	eioMaxSessions = 256              // 同时在线会话上限（防资源耗尽）
+	eioPollHold     = 25 * time.Second       // 轮询 GET 最长挂起时间
+	eioMaxPayload   = 8 << 20                // 单次轮询 POST 载荷上限
+	eioMaxSessions  = 256                    // 同时在线会话上限（防资源耗尽）
+	eioPollFallback = 300 * time.Millisecond // 轮询等待兜底（避免漏唤醒长等）
 )
 
 // engine.io 心跳默认参数。
@@ -61,8 +62,11 @@ type eioSession struct {
 	closedCh   chan struct{}       // 关闭时 close（心跳循环退出信号）
 	heartbeat  bool                // WebSocket 心跳循环是否已启动
 	authed     bool                // 是否已通过节点密钥认证
-	jobs       chan mcJob          // 事件队列（串行处理，避免阻塞读循环）
-	jobsOnce   sync.Once           // 事件处理循环只启动一次
+	jobs       *mcJobQueue         // 有序通道：有状态事件（auth、instance/*、stream/*）
+	fast       *mcJobQueue         // 并发通道：只读/幂等事件（file/list、info/*）
+	jobsOnce   sync.Once           // 有序通道工作协程只启动一次
+	fastOnce   sync.Once           // 并发通道工作协程只启动一次
+	outbox     *wsOutbox           // WebSocket 批量出站队列（每连接一个写协程）
 	lastPong   time.Time           // 最近一次收到 pong 的时间
 	sioSid     string              // socket.io 层的 sid
 	cleanups   []func()            // 会话关闭时执行（取消输出订阅等）
@@ -83,7 +87,8 @@ func (mc *mcsmCompat) newEIOSession() (*eioSession, error) {
 		d:        mc.d,
 		created:  timesys.Now(),
 		notify:   make(chan struct{}, 1),
-		jobs:     make(chan mcJob, 256),
+		jobs:     newMCJobQueue(),
+		fast:     newMCJobQueueWake(mcFastLaneWorkers),
 		closedCh: make(chan struct{}),
 		lastPong: timesys.Now(),
 		forwards: map[string]struct{}{},
@@ -237,10 +242,13 @@ func (mc *mcsmCompat) websocketTransport(w http.ResponseWriter, r *http.Request,
 			_ = conn.Close()
 			return
 		}
+		outbox := newWSOutbox(conn)
 		s.mu.Lock()
 		s.ws = conn
+		s.outbox = outbox
 		s.upgraded = true
 		s.mu.Unlock()
+		outbox.start()
 		handshake := map[string]any{
 			"sid":          s.sid,
 			"upgrades":     []string{},
@@ -257,9 +265,12 @@ func (mc *mcsmCompat) websocketTransport(w http.ResponseWriter, r *http.Request,
 			_ = conn.Close()
 			return
 		}
+		outbox := newWSOutbox(conn)
 		s.mu.Lock()
 		s.ws = conn
+		s.outbox = outbox
 		s.mu.Unlock()
+		outbox.start()
 	}
 	defer func() {
 		s.closeFromTransport(conn)
@@ -301,14 +312,18 @@ func (mc *mcsmCompat) wsReadLoop(s *eioSession, conn *wsConn) {
 				continue
 			}
 			if pkt == "5" {
+				// 升级完成：挂上批量出站队列，之前的轮询积压一次性灌进去
+				outbox := newWSOutbox(conn)
 				s.mu.Lock()
 				s.upgraded = true
 				s.ws = conn
+				s.outbox = outbox
 				pending := s.pending
 				s.pending = nil
 				s.mu.Unlock()
+				outbox.start()
 				for _, p := range pending {
-					_ = conn.writeText(p)
+					outbox.push([]byte(p))
 				}
 				// 升级成 WebSocket 后改由服务端心跳维持连接
 				s.startWSHeartbeat()
@@ -408,7 +423,13 @@ func (s *eioSession) send(pkt string) {
 		}
 		return
 	}
+	outbox := s.outbox
 	s.mu.Unlock()
+	if outbox != nil {
+		// 交给写协程批量合并（一帧一次 write → 一批一次 write）
+		outbox.push([]byte(pkt))
+		return
+	}
 	_ = ws.writeText(pkt)
 }
 
@@ -416,6 +437,8 @@ func (s *eioSession) send(pkt string) {
 func (s *eioSession) drainPolling(hold time.Duration) []string {
 	deadline := time.NewTimer(hold)
 	defer deadline.Stop()
+	fallback := time.NewTimer(eioPollFallback)
+	defer fallback.Stop()
 	for {
 		s.mu.Lock()
 		if len(s.pending) > 0 {
@@ -432,6 +455,10 @@ func (s *eioSession) drainPolling(hold time.Duration) []string {
 		select {
 		case <-s.notify:
 			// 有新包，回到循环顶部取走
+		case <-fallback.C:
+			// 兜底轮询：notify 只有 1 个槽位，多个并发 GET 时可能有等待者
+			// 漏掉唤醒信号，300ms 兜底既不空等 25s 也不增加可见延迟。
+			fallback.Reset(eioPollFallback)
 		case <-deadline.C:
 			// 挂起超时：下发 ping 维持连接（客户端回 pong）
 			return []string{"2"}
@@ -449,6 +476,7 @@ func (s *eioSession) close() {
 	s.closed = true
 	closedCh := s.closedCh
 	ws := s.ws
+	outbox := s.outbox // 与升级路径同样持锁读取，避免数据竞争
 	cleanups := s.cleanups
 	s.cleanups = nil
 	s.mu.Unlock()
@@ -459,11 +487,20 @@ func (s *eioSession) close() {
 	if closedCh != nil {
 		close(closedCh)
 	}
+	if s.jobs != nil {
+		s.jobs.close()
+	}
+	if s.fast != nil {
+		s.fast.close()
+	}
 
 	for _, fn := range cleanups {
 		if fn != nil {
 			fn()
 		}
+	}
+	if outbox != nil {
+		outbox.close()
 	}
 	if ws != nil {
 		_ = ws.writeClose(1000, "")
@@ -587,13 +624,51 @@ type mcJob struct {
 	data  json.RawMessage
 }
 
-// enqueue 把事件交给会话的串行工作协程处理。
+// enqueue 把事件分发到两条通道。
 //
-// 读循环只负责解析与心跳，不执行业务：否则一个慢操作（大目录 file/list、
-// 压缩、下载任务）会把同一会话的 ping/pong 和后续请求一起堵住，面板侧表现
-// 为「请求超时 + Daemon exception detected」。这与 MCSM daemon（Node 事件
-// 循环里异步监听）的行为一致。队列满时退化为同步执行，保证请求不被丢。
+//   - 有状态事件（auth、instance/action、instance/new、stream/* …）进**有序通道**，
+//     由单个工作协程按到达顺序串行执行，认证门禁与顺序语义不变；
+//   - 只读/幂等事件（file/list、file/edit、info/* …）进**并发通道**，由 4 个工作
+//     协程并发执行——慢的文件操作不会挡住同一会话里的后续请求与状态推送。
+//
+// 两条通道的写入都**永不阻塞、永不内联执行**：原实现在队列满时同步 dispatch，
+// 一个慢事件就能把 HTTP 读循环拖死；现在队满只丢最旧任务并计数。
 func (s *eioSession) enqueue(job mcJob) {
+	if isConcurrentEvent(job.event) {
+		s.fastOnce.Do(func() {
+			s.mu.Lock()
+			closedCh := s.closedCh
+			s.mu.Unlock()
+			for i := 0; i < mcFastLaneWorkers; i++ {
+				safeGo("MCSM 兼容层并发事件", func() {
+					for {
+						select {
+						case <-s.fast.sig:
+						case <-closedCh:
+							for {
+								j, ok := s.fast.popOne()
+								if !ok {
+									return
+								}
+								s.dispatch(j.event, j.uuid, j.data)
+							}
+						}
+						// 一次只取一个：多个协程才能真正并行
+						for {
+							j, ok := s.fast.popOne()
+							if !ok {
+								break
+							}
+							s.dispatch(j.event, j.uuid, j.data)
+						}
+					}
+				})
+			}
+		})
+		s.fast.push(job)
+		return
+	}
+
 	s.jobsOnce.Do(func() {
 		// 关闭信号在启动时取一次本地副本：closedCh 生命周期内不变，
 		// 循环里绝不直接读 s.closedCh（那是与 close() 的数据竞争）。
@@ -603,28 +678,21 @@ func (s *eioSession) enqueue(job mcJob) {
 		safeGo("MCSM 兼容层事件处理", func() {
 			for {
 				select {
-				case job := <-s.jobs:
-					s.dispatch(job.event, job.uuid, job.data)
+				case <-s.jobs.sig:
 				case <-closedCh:
-					// 会话关闭后处理完已入队的少量事件再退出
-					for {
-						select {
-						case job := <-s.jobs:
-							s.dispatch(job.event, job.uuid, job.data)
-						default:
-							return
-						}
+					// 关闭后把剩余事件处理完再退出
+					for _, j := range s.jobs.popBatch(mcJobBatch) {
+						s.dispatch(j.event, j.uuid, j.data)
 					}
+					return
+				}
+				for _, j := range s.jobs.popBatch(mcJobBatch) {
+					s.dispatch(j.event, j.uuid, j.data)
 				}
 			}
 		})
 	})
-	select {
-	case s.jobs <- job:
-	default:
-		// 队列已满（极端情况）：同步执行，宁可让这个会话慢，也不丢请求
-		s.dispatch(job.event, job.uuid, job.data)
-	}
+	s.jobs.push(job)
 }
 
 // emitPacket 组装并发送一个事件包 {"uuid","status","event","data"}。
