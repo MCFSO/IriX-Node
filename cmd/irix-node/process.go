@@ -139,6 +139,21 @@ type stdinPipe struct {
 	pipe io.WriteCloser
 }
 
+// WriteRaw 原样写入标准输入（不加换行）。
+//
+// 终端模拟（MCSM 的 stream/write、MSLX 的 SendPtyInput）需要原样转发按键：
+// Ctrl+C = 0x03、方向键 = ESC 序列等。若按行写入会把控制字符变成「命令文本」，
+// 服务端只会把它当成一行普通输入。
+func (s *stdinPipe) WriteRaw(data string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pipe == nil {
+		return fmt.Errorf("进程标准输入不可用")
+	}
+	_, err := io.WriteString(s.pipe, data)
+	return err
+}
+
 // WriteLine 向进程写入一行命令。
 func (s *stdinPipe) WriteLine(line string) error {
 	s.mu.Lock()
@@ -513,6 +528,14 @@ func (p *Process) WriteCommand(cmd string) error {
 		return fmt.Errorf("进程标准输入不可用")
 	}
 	return p.Stdin.WriteLine(cmd)
+}
+
+// WriteRaw 原样写入进程标准输入（不加换行），供终端按键转发使用。
+func (p *Process) WriteRaw(data string) error {
+	if p.Stdin == nil {
+		return fmt.Errorf("进程标准输入不可用")
+	}
+	return p.Stdin.WriteRaw(data)
 }
 
 // Stop 优雅停止：先发送停止命令，等待超时后强制终止。

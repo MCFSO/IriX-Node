@@ -312,6 +312,19 @@ func (ms *mslxCompat) handleNodeRemoveLink(w http.ResponseWriter, r *http.Reques
 	mslxOK(w, true, "已清理链接")
 }
 
+// noteStatusProbe 记录面板探活（每个节点标识每分钟最多一条），
+// 便于运维确认「面板到底有没有打到本节点」。
+func (ms *mslxCompat) noteStatusProbe(nodeID string) {
+	ms.probeMu.Lock()
+	defer ms.probeMu.Unlock()
+	now := timesys.Now()
+	if ms.probeAt.IsZero() || now.Sub(ms.probeAt) > time.Minute || ms.probeNode != nodeID {
+		ms.probeAt = now
+		ms.probeNode = nodeID
+		alog.Printf("MSLX 兼容层：面板探活命中（x-node-id=%s）", nodeID)
+	}
+}
+
 // handleNodeStatus 本节点在 MSLX 侧的链接状态（面板/运维排查用，需登录）。
 func (ms *mslxCompat) handleNodeStatus(w http.ResponseWriter, r *http.Request) {
 	link := ms.currentNodeLink()
@@ -574,7 +587,8 @@ func verifyNodeTokenAtMaster(link *mslxNodeLink, token string) (*mslxClaims, boo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", link.CommsKey)
-	client := &http.Client{Timeout: 5 * time.Second}
+	// 1.5 秒上限：面板对节点接口普遍是 3 秒超时，回源核验不能把调用方拖死。
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, false

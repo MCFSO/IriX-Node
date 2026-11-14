@@ -460,33 +460,62 @@ func (c *mslxHubConn) subscribeConsole(id uint32) {
 	if inst == nil {
 		return
 	}
-	inst.mu.Lock()
-	proc := inst.Proc
-	inst.mu.Unlock()
-	if proc == nil {
-		c.mu.Lock()
-		c.console[id] = func() {}
-		c.mu.Unlock()
-		return
-	}
-	ch, cancel := proc.Subscribe()
+	// 与 MCSM 兼容层一致：控制台先打开、实例后启动时也要能自动接上实时输出。
+	// （面板不会因为实例状态变化重新 JoinPtyGroup，所以这里必须守着等进程出现。）
+	stop := make(chan struct{})
 	c.mu.Lock()
-	c.console[id] = cancel
+	c.console[id] = func() {
+		select {
+		case <-stop:
+		default:
+			close(stop)
+		}
+	}
 	c.mu.Unlock()
 	safeGo("MSLX 兼容层控制台推送", func() {
 		defer recoverLog("MSLX 兼容层控制台推送")
-		// 与 MCSM 兼容层一致：按 30ms 窗口合并输出，避免高输出速率把面板冲垮
-		mcPumpOutput(ch, func(text string) { c.sendInvocation("ReceiveLog", text) })
-	})
-	safeGo("MSLX 兼容层控制台回落", func() {
-		defer recoverLog("MSLX 兼容层控制台回落")
-		<-proc.done
-		c.unsubscribeConsole(id)
-		c.sendInvocation("ReceiveStatus", map[string]any{
-			"id":     id,
-			"status": StatusStopped,
-			"text":   "stopped",
-		})
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			inst.mu.Lock()
+			proc := inst.Proc
+			inst.mu.Unlock()
+			if proc == nil || !proc.IsRunning() {
+				select {
+				case <-stop:
+					return
+				case <-time.After(mcOutputForwardPoll):
+				}
+				continue
+			}
+			ch, cancel := proc.Subscribe()
+			procStop := make(chan struct{})
+			procDone := proc.done
+			go func() {
+				defer recoverLog("MSLX 兼容层控制台回落")
+				select {
+				case <-procDone:
+				case <-stop:
+				}
+				close(procStop)
+			}()
+			// 与 MCSM 兼容层一致：按 30ms 窗口合并输出，避免高输出速率把面板冲垮
+			mcPumpOutputSelect(ch, procStop, func(text string) { c.sendInvocation("ReceiveLog", text) })
+			cancel()
+			select {
+			case <-stop:
+				return
+			case <-procDone:
+			}
+			c.sendInvocation("ReceiveStatus", map[string]any{
+				"id":     id,
+				"status": StatusStopped,
+				"text":   "stopped",
+			})
+		}
 	})
 }
 

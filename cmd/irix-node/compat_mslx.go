@@ -433,6 +433,9 @@ func (ms *mslxCompat) handleUser(w http.ResponseWriter, r *http.Request, segs []
 // 避免把兼容层端口变成信息泄露面。
 func (ms *mslxCompat) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d := ms.d
+	if nodeID := strings.TrimSpace(r.Header.Get("x-node-id")); nodeID != "" {
+		ms.noteStatusProbe(nodeID)
+	}
 	link := ms.currentNodeLink()
 	pub := map[string]any{
 		"version":         Version,
@@ -445,15 +448,10 @@ func (ms *mslxCompat) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if link != nil {
 		pub["nodeId"] = link.NodeID
 	}
-	authorized := false
-	if _, ok := ms.authenticate(r); ok {
-		authorized = true
-	} else if _, ok := ms.authorizeNodeRequest(r); ok {
-		// 主节点代理请求（带节点令牌）：主节点自己也会用该接口做节点同步，
-		// 通过核验后同样返回完整信息。
-		authorized = true
-	}
-	if !authorized {
+	// 注意：这里**只**认本节点账户令牌，绝不做回源主节点的核验。
+	// 面板的探活是 3 秒超时，若在主节点不可达时回源（5 秒），探活就会超时，
+	// 节点随即被判离线——这正是「链接成功但一直显示离线」的又一陷阱。
+	if _, ok := ms.authenticate(r); !ok {
 		mslxOK(w, pub, "获取成功")
 		return
 	}

@@ -173,6 +173,10 @@ type mslxCompat struct {
 	node      mslxNodeState
 	// nodeVerify 主节点签发令牌的核对缓存（key = 令牌，30 秒）
 	nodeVerify mslxNodeVerifyCache
+	// 面板探活诊断（每个节点标识每分钟最多记一条日志）
+	probeMu   sync.Mutex
+	probeAt   time.Time
+	probeNode string
 
 	ids *mslxIDMap // 实例 uuid ↔ 整数 id 映射（持久化于 {data}/compat-mslx-ids.json）
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
@@ -471,6 +475,8 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 			}
 			alog.Printf("MSLX Daemon 兼容层已启用（WebPanel 后端地址 http://<本机IP>:%d，账号 %s，密码 %s）",
 				port, user, mslxPass)
+			alog.Printf("MSLX 兼容层：节点探活 /api/status 已开放（匿名仅返回公开信息），配对密钥 %s",
+				maskSecret(mslxLinkKey))
 		}
 	} else {
 		alog.Printf("MSLX Daemon 兼容层未启用（compat.mslx.enabled=false）；如需启用，账号 admin、密码已就绪：%s", maskSecret(mslxPass))

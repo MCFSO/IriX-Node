@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"irix/node/internal/sysinfo"
@@ -595,30 +596,62 @@ func (mc *mcsmCompat) forwardOutput(inst *Instance, s *eioSession) {
 	s.forwards[inst.InstanceUuid] = struct{}{}
 	s.mu.Unlock()
 
-	inst.mu.Lock()
-	proc := inst.Proc
-	inst.mu.Unlock()
-	if proc == nil {
-		return // 实例未运行：启动后由面板重新订阅，或下次 forward 生效
-	}
-	ch, cancel := proc.Subscribe()
-	s.addCleanup(cancel)
+	// 停止信号：面板取消转发（instance/forward=false）或会话关闭时触发。
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
+	s.addCleanup(closeStop)
+
 	safeGo("MCSM 兼容层输出转发", func() {
 		defer recoverLog("MCSM 兼容层输出转发")
-		mcPumpOutput(ch, func(text string) {
-			s.push("instance/stdout", map[string]any{
-				"instanceUuid": inst.InstanceUuid,
-				"text":         text,
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			inst.mu.Lock()
+			proc := inst.Proc
+			inst.mu.Unlock()
+			if proc == nil || !proc.IsRunning() {
+				// 实例未运行：**守在这里等它启动**。
+				// 面板在控制台已打开时不会重新 stream/auth，若此处直接返回，
+				// 用户从面板启动实例后就再也收不到实时输出，只能退出控制台
+				// 再进一次（重新 auth）才看得到内容——正是线上反馈的现象。
+				select {
+				case <-stop:
+					return
+				case <-time.After(mcOutputForwardPoll):
+				}
+				continue
+			}
+			ch, cancel := proc.Subscribe()
+			procDone := proc.done
+			// 进程退出或会话关闭都结束本轮推送
+			procStop := make(chan struct{})
+			go func() {
+				defer recoverLog("MCSM 兼容层输出转发回收")
+				select {
+				case <-procDone:
+				case <-stop:
+				}
+				close(procStop)
+			}()
+			mcPumpOutputSelect(ch, procStop, func(text string) {
+				s.push("instance/stdout", map[string]any{
+					"instanceUuid": inst.InstanceUuid,
+					"text":         text,
+				})
 			})
-		})
+			cancel()
+			select {
+			case <-stop:
+				return
+			case <-procDone:
+				// 进程退出：若实例自动重启，下一轮循环会重新订阅新进程
+			}
+		}
 	})
-	// 进程退出后订阅通道不会关闭：靠会话关闭或实例重启时取消。
-	go func() {
-		defer recoverLog("MCSM 兼容层输出转发回收")
-		<-proc.done
-		cancel()
-		s.stopForward(inst.InstanceUuid)
-	}()
 }
 
 // mcOutputFrameMax 单帧输出上限（字节）。
@@ -635,10 +668,21 @@ const mcOutputFrameMax = 16 << 10
 // 低输出时的延迟最坏只有 30ms。
 const mcOutputFlushInterval = 30 * time.Millisecond
 
+// mcOutputForwardPoll 控制台待启动时的轮询间隔（仅在有控制台订阅时生效）。
+const mcOutputForwardPoll = 250 * time.Millisecond
+
 // mcPumpOutput 把订阅通道里的输出行按窗口合并后交给 pushFn 推送。
 //
 // 保证：不丢行、顺序不变、单帧不超过 mcOutputFrameMax 字节、通道关闭时冲刷剩余内容。
 func mcPumpOutput(ch <-chan string, pushFn func(text string)) {
+	mcPumpOutputSelect(ch, nil, pushFn)
+}
+
+// mcPumpOutputSelect 同 mcPumpOutput，但可用 stop 提前结束（nil 表示只看通道关闭）。
+//
+// 进程退出时订阅通道不会关闭（Subscribe 只登记/注销订阅者），因此控制台转发
+// 需要 stop 通道来收尾并冲刷剩余内容。
+func mcPumpOutputSelect(ch <-chan string, stop <-chan struct{}, pushFn func(text string)) {
 	var b strings.Builder
 	flush := func() {
 		if b.Len() == 0 {
@@ -663,6 +707,9 @@ func mcPumpOutput(ch <-chan string, pushFn func(text string)) {
 			}
 		case <-t.C:
 			flush()
+		case <-stop:
+			flush()
+			return
 		}
 	}
 }
@@ -943,8 +990,10 @@ func mcEventStreamWrite(mc *mcsmCompat, s *eioSession, data json.RawMessage) (an
 	if proc == nil || !proc.IsRunning() {
 		return nil, errors.New("实例未在运行")
 	}
-	// 本节点不提供 PTY，按行写入标准输入
-	return true, proc.WriteCommand(strings.TrimRight(req.Input, "\r\n"))
+	// 与 MCSM daemon 的 process.write(buf) 一致：**原样**写入标准输入，
+	// 不加换行。Ctrl+C(0x03)、方向键(ESC 序列) 等控制字符必须原样转发，
+	// 按行写入会被服务端当成一行普通命令（用户反馈「^C 被当成命令」）。
+	return true, proc.WriteRaw(req.Input)
 }
 
 // mcEventStreamResize 终端尺寸调整：本节点非 PTY，直接成功。
