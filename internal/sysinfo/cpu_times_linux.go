@@ -46,3 +46,24 @@ func sysCPUTimes() (busy, idle uint64, ok bool) {
 	}
 	return 0, 0, false
 }
+
+// cpuJiffies 读取 /proc/stat 首行 cpu 的各态 jiffies 总和。
+//
+// 供 ProcTicksPerSec（process_stats_linux.go）实测校准 USER_HZ 使用，
+// 语义与 CPU 使用率采样无关，故单独保留。
+func cpuJiffies() float64 {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	line := strings.Fields(string(data))
+	if len(line) < 5 || line[0] != "cpu" {
+		return 0
+	}
+	var total uint64
+	for _, v := range line[1:] {
+		n, _ := strconv.ParseUint(v, 10, 64)
+		total += n
+	}
+	return float64(total)
+}
