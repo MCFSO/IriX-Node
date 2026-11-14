@@ -661,3 +661,86 @@ func TestCompatListenAddr(t *testing.T) {
 		t.Fatalf("空 bind 且节点未设置时应回落环回: %q", got)
 	}
 }
+
+// TestCompatMCSMOverviewChartAndVersion 节点概览必须给出与 MCSM 完全同形的
+// 系统曲线（200 个 {cpu,mem} 整数百分比）与可配置的上报版本号。
+func TestCompatMCSMOverviewChartAndVersion(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMCSM(t, d)
+	c := newEIOClient(t, base+"/socket.io/")
+	c.connect()
+	if status, data := c.requestRaw("auth", "cv1", mcsmTestKey); status != 200 {
+		t.Fatalf("认证失败: %d %s", status, data)
+	}
+	status, data := c.requestRaw("info/overview", "cv2", map[string]any{})
+	if status != 200 {
+		t.Fatalf("info/overview 失败: %d %s", status, data)
+	}
+	var overview struct {
+		Version     string `json:"version"`
+		CPUMemChart []struct {
+			CPU *int `json:"cpu"`
+			Mem *int `json:"mem"`
+		} `json:"cpuMemChart"`
+		System map[string]any `json:"system"`
+		Config map[string]any `json:"config"`
+	}
+	if err := json.Unmarshal(data, &overview); err != nil {
+		t.Fatalf("概览解析失败: %v（%s）", err, data)
+	}
+	// 面板 NodeOverview 画 200 格曲线，缺字段会直接空白
+	if len(overview.CPUMemChart) != mcChartSize {
+		t.Fatalf("cpuMemChart 应为 %d 个采样点，实际 %d", mcChartSize, len(overview.CPUMemChart))
+	}
+	for i, point := range overview.CPUMemChart {
+		if point.CPU == nil || point.Mem == nil {
+			t.Fatalf("第 %d 个采样点缺少 cpu/mem 字段（面板据此画图）", i)
+		}
+		if *point.CPU < 0 || *point.CPU > 100 || *point.Mem < 0 || *point.Mem > 100 {
+			t.Fatalf("第 %d 个采样点百分比越界: cpu=%d mem=%d", i, *point.CPU, *point.Mem)
+		}
+	}
+	// 面板还要读 system.cpuUsage / memUsage 与 config 段
+	for _, key := range []string{"cpuUsage", "memUsage", "totalmem", "freemem", "uptime"} {
+		if _, ok := overview.System[key]; !ok {
+			t.Fatalf("system 段缺少 %s（面板节点卡片依赖）", key)
+		}
+	}
+	for _, key := range []string{"port", "language", "outputBufferSize"} {
+		if _, ok := overview.Config[key]; !ok {
+			t.Fatalf("config 段缺少 %s", key)
+		}
+	}
+	if overview.Version != Version {
+		t.Fatalf("默认上报版本应为本节点 Version=%q，实际 %q", Version, overview.Version)
+	}
+
+	// 版本可覆盖：面板按主次版本号比较，配成面板期望值即显示为最新
+	d2, _ := newTestDaemon(t)
+	base2 := startTestCompat(t, d2, &nodeOptions{
+		CompatMCSMEnabled: true,
+		CompatMCSMPort:    0,
+		CompatMCSMKey:     mcsmTestKey,
+		CompatMCSMVersion: "4.5.0",
+	}, "mcsm")
+	c2 := newEIOClient(t, base2+"/socket.io/")
+	c2.connect()
+	if status, _ := c2.requestRaw("auth", "cv3", mcsmTestKey); status != 200 {
+		t.Fatal("认证失败")
+	}
+	_, data2 := c2.requestRaw("info/overview", "cv4", map[string]any{})
+	var ov2 struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data2, &ov2); err != nil {
+		t.Fatalf("概览解析失败: %v", err)
+	}
+	if ov2.Version != "4.5.0" {
+		t.Fatalf("compat.mcsm.version 应覆盖上报版本，实际 %q", ov2.Version)
+	}
+	// upgrade/info 也用同一版本
+	_, up := c2.requestRaw("upgrade/info", "cv5", map[string]any{})
+	if !strings.Contains(string(up), "4.5.0") {
+		t.Fatalf("upgrade/info 应使用覆盖后的版本: %s", up)
+	}
+}

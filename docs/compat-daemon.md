@@ -63,6 +63,7 @@
 | `mslx.username` / `mslx.password` | WebPanel 登录账号；密码**留空即自动生成**（见 §2.1） |
 | `mslx.jwtSecret` | JWT 签名密钥；留空即自动生成，写入 `{data}/compat-secrets.json` |
 | `allowPanelIps` | 允许的面板来源（裸 IP 或 CIDR，数组）；留空 = 不限制来源 |
+| `mcsm.version` | 上报给面板的节点版本号。留空 = 本节点版本；面板用 `hasVersionUpdate()` 比较**主次版本号**，与面板自带 daemon 版本不一致就把节点标红「有更新」——想显示为最新就填面板所带的 daemon 版本（如 `4.5.0`） |
 | `prefix` | **已废弃**：面板不支持路径前缀，兼容层已改为独立端口；填了只在启动日志提示，不生效 |
 
 ### 2.1 凭据自动生成（无需手填）
@@ -127,8 +128,14 @@ MCSManager 面板 →「节点」→「新建节点」（面板只有地址、�
 ### 3.2 传输层
 
 - **engine.io v4**：HTTP 轮询（`GET` 长轮询取包 / `POST` 送包，`\x1e` 分隔多包）
-  + WebSocket 升级（`2probe`/`3probe`/`5` 握手序列）；服务端每 25s 下发 `2`（ping），
-  客户端回 `3`（pong）；20s 未回 pong 视为断线。
+  + WebSocket 升级（`2probe`/`3probe`/`5` 握手序列）。心跳由**服务端**负责：
+  每 25s 下发 `2`（ping），客户端回 `3`（pong）；超过 `pingInterval+pingTimeout`
+  没有任何 pong 即断开。纯 WebSocket 建连（`transports:["websocket"]`，面板的
+  控制台流就是这种）同样走上这条心跳，不会出现「每 45s 断一次」的反复重连。
+- **请求信封**：`{uuid, data}`，daemon 只处理其中的 `data`；但面板的
+  **控制台流事件**（`stream/auth`、`stream/input`、`stream/write`、`stream/resize`、
+  `stream/detail`）只发 `{data: {...}}`（没有 uuid 字段）。服务端按「有没有 `data` 键」
+  拆包，两种形状都能正确取到内层载荷。
 - **socket.io v4**：`0` 连接（服务端回 `40{"sid":...}`）、`1` 断开、`2` 事件、`3` 应答。
 - 并发会话上限 256；轮询待发队列有界（满则丢包，绝不拖慢节点）。
 
@@ -139,7 +146,7 @@ MCSManager 面板 →「节点」→「新建节点」（面板只有地址、�
 | 事件 | 说明 |
 | --- | --- |
 | `auth` | 节点密钥校验（载荷为裸字符串），成功后会话才可访问业务事件 |
-| `info/overview` | 节点概览（版本、实例数、主机指标、配置块） |
+| `info/overview` | 节点概览（版本、实例数、主机指标、`cpuMemChart` 系统曲线、配置块）。`cpuMemChart` 与 MCSM `VisualDataSubsystem` 同形：200 个 `{cpu,mem}` 整数百分比，每 3 秒一个采样点 |
 | `info/setting` | 面板下发节点设置，本节点接受但忽略（无对应开关） |
 | `instance/select` | 分页 + 关键字/状态/标签过滤的实例列表 |
 | `instance/overview` / `instance/section` | 全部 / 指定 uuid 集合的实例概览 |

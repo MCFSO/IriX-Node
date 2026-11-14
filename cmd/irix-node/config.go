@@ -96,6 +96,7 @@ type MCSMCompatConfig struct {
 	Port          *int     `json:"port"`          // 监听端口（默认 24444，与 MCSManager daemon 一致）
 	Key           string   `json:"key"`           // 面板配对密钥（留空 = 自动生成）
 	AllowPanelIPs []string `json:"allowPanelIps"` // 允许的面板来源 IP/CIDR（空 = 不限制来源）
+	Version       string   `json:"version"`       // 上报给面板的版本号（空 = 本节点 Version）；面板按主次版本号比较，配成面板期望值可消除「有更新」提示
 	Prefix        string   `json:"prefix"`        // 已废弃：面板不支持前缀，填了只会在启动日志提示
 }
 
@@ -377,6 +378,7 @@ type nodeOptions struct {
 	CompatMCSMPort    int    // MCSM 兼容层监听端口（0 = 默认 24444）
 	CompatMCSMKey     string // 面板配对密钥（空 = 自动生成）
 	CompatMCSMIPs     string // 允许的面板来源（换行分隔，保持 nodeOptions 可比较）
+	CompatMCSMVersion string // 上报给面板的版本号（空 = 本节点 Version）
 	CompatMSLXEnabled bool   // MSLX Daemon 兼容开关
 	CompatMSLXBind    string // MSLX 兼容层监听地址（空 = 沿用节点 bind）
 	CompatMSLXPort    int    // MSLX 兼容层监听端口（0 = 默认 7891）
@@ -617,6 +619,9 @@ func (o *nodeOptions) applyConfig(cfg *Config, setFlags map[string]bool) {
 			}
 			if len(mc.AllowPanelIPs) > 0 {
 				o.CompatMCSMIPs = strings.Join(mc.AllowPanelIPs, "\n")
+			}
+			if v := strings.TrimSpace(mc.Version); v != "" {
+				o.CompatMCSMVersion = v
 			}
 			o.CompatMCSMPrefix = mc.Prefix // 仅用于弃用提示
 		}

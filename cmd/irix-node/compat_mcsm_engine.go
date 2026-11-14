@@ -28,11 +28,19 @@ import (
 
 // engine.io 会话参数（与 socket.io v4 默认值一致）。
 const (
-	eioPingIntervalMS = 25000
-	eioPingTimeoutMS  = 20000
-	eioPollHold       = 25 * time.Second // 轮询 GET 最长挂起时间
-	eioMaxPayload     = 8 << 20          // 单次轮询 POST 载荷上限
-	eioMaxSessions    = 256              // 同时在线会话上限（防资源耗尽）
+	eioPollHold    = 25 * time.Second // 轮询 GET 最长挂起时间
+	eioMaxPayload  = 8 << 20          // 单次轮询 POST 载荷上限
+	eioMaxSessions = 256              // 同时在线会话上限（防资源耗尽）
+)
+
+// engine.io 心跳参数。
+//
+// 声明为 var 而非 const：WebSocket 传输必须由服务端按时下发 ping（"2"），
+// 否则 socket.io-client 会在 pingInterval+pingTimeout 后主动断开并重连
+// （表现为每 45s 断一次）。测试需要压低这些值以覆盖心跳与超时分支。
+var (
+	eioPingInterval = 25 * time.Second // 服务端下发 ping 的间隔
+	eioPingTimeout  = 20 * time.Second // 等待 pong 的宽限
 )
 
 // eioSession 一个 engine.io 会话（先轮询，可升级为 WebSocket）。
@@ -48,6 +56,8 @@ type eioSession struct {
 	pending    []string      // 等待轮询取走的包
 	notify     chan struct{} // 有新包可取的唤醒信号
 	closed     bool
+	closedCh   chan struct{}       // 关闭时 close（心跳循环退出信号）
+	heartbeat  bool                // WebSocket 心跳循环是否已启动
 	authed     bool                // 是否已通过节点密钥认证
 	lastPong   time.Time           // 最近一次收到 pong 的时间
 	sioSid     string              // socket.io 层的 sid
@@ -69,6 +79,7 @@ func (mc *mcsmCompat) newEIOSession() (*eioSession, error) {
 		d:        mc.d,
 		created:  timesys.Now(),
 		notify:   make(chan struct{}, 1),
+		closedCh: make(chan struct{}),
 		lastPong: timesys.Now(),
 		forwards: map[string]struct{}{},
 	}
@@ -160,8 +171,8 @@ func (mc *mcsmCompat) pollingOpen(w http.ResponseWriter, r *http.Request) {
 	handshake := map[string]any{
 		"sid":          s.sid,
 		"upgrades":     []string{"websocket"},
-		"pingInterval": eioPingIntervalMS,
-		"pingTimeout":  eioPingTimeoutMS,
+		"pingInterval": int(eioPingInterval / time.Millisecond),
+		"pingTimeout":  int(eioPingTimeout / time.Millisecond),
 		"maxPayload":   eioMaxPayload,
 	}
 	body, _ := json.Marshal(handshake)
@@ -228,8 +239,8 @@ func (mc *mcsmCompat) websocketTransport(w http.ResponseWriter, r *http.Request,
 		handshake := map[string]any{
 			"sid":          s.sid,
 			"upgrades":     []string{},
-			"pingInterval": eioPingIntervalMS,
-			"pingTimeout":  eioPingTimeoutMS,
+			"pingInterval": int(eioPingInterval / time.Millisecond),
+			"pingTimeout":  int(eioPingTimeout / time.Millisecond),
 			"maxPayload":   eioMaxPayload,
 		}
 		body, _ := json.Marshal(handshake)
@@ -249,6 +260,8 @@ func (mc *mcsmCompat) websocketTransport(w http.ResponseWriter, r *http.Request,
 		s.closeFromTransport(conn)
 		_ = conn.Close()
 	}()
+	// WebSocket 传输由服务端负责心跳（否则客户端 45s 后判定断线并重连）
+	s.startWSHeartbeat()
 	mc.wsReadLoop(s, conn)
 }
 
@@ -282,12 +295,15 @@ func (mc *mcsmCompat) wsReadLoop(s *eioSession, conn *wsConn) {
 			if pkt == "5" {
 				s.mu.Lock()
 				s.upgraded = true
+				s.ws = conn
 				pending := s.pending
 				s.pending = nil
 				s.mu.Unlock()
 				for _, p := range pending {
 					_ = conn.writeText(p)
 				}
+				// 升级成 WebSocket 后改由服务端心跳维持连接
+				s.startWSHeartbeat()
 				continue
 			}
 			s.handleEnginePacket(pkt)
@@ -317,6 +333,49 @@ func (s *eioSession) touch() {
 	s.mu.Lock()
 	s.lastPong = timesys.Now()
 	s.mu.Unlock()
+}
+
+// startWSHeartbeat 启动 WebSocket 传输的服务端心跳。
+//
+// engine.io v4 由**服务端**定时下发 ping（"2"），客户端回 pong（"3"）。
+// 没有这个循环时，socket.io-client 会在 pingInterval+pingTimeout 后判定
+// 连接已死并主动断开重连（实测每 45 秒断一次，控制台流随之反复中断）。
+// 同一会话只启动一次；会话关闭时循环自动退出。
+func (s *eioSession) startWSHeartbeat() {
+	s.mu.Lock()
+	if s.heartbeat || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.heartbeat = true
+	s.lastPong = timesys.Now()
+	closedCh := s.closedCh
+	s.mu.Unlock()
+
+	safeGo("engine.io 心跳", func() {
+		t := time.NewTicker(eioPingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-closedCh:
+				return
+			case <-t.C:
+			}
+			s.mu.Lock()
+			closed := s.closed
+			idle := timesys.Now().Sub(s.lastPong)
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+			// 超过 pingInterval+pingTimeout 没有任何 pong：判定对端失联
+			if idle > eioPingInterval+eioPingTimeout {
+				s.close()
+				return
+			}
+			s.send("2")
+		}
+	})
 }
 
 // send 发送一个 engine.io 包：已升级走 WebSocket，否则进轮询队列。
@@ -379,10 +438,18 @@ func (s *eioSession) close() {
 		return
 	}
 	s.closed = true
+	closedCh := s.closedCh
 	ws := s.ws
 	cleanups := s.cleanups
 	s.cleanups = nil
 	s.mu.Unlock()
+	// 通知心跳循环退出（close 只执行一次，重复 close(chan) 会 panic）
+	if closedCh != nil {
+		close(closedCh)
+		s.mu.Lock()
+		s.closedCh = nil
+		s.mu.Unlock()
+	}
 
 	for _, fn := range cleanups {
 		if fn != nil {
@@ -483,14 +550,20 @@ func (s *eioSession) handleSocketEvent(rest string) {
 		data = arr[1]
 	}
 	uuid := ""
-	// 请求包形如 {uuid, data}，响应须带回同一个 uuid。
+	// 请求包恒为 {uuid, data} 信封，daemon 只处理其中的 data。
+	// 注意：面板的**控制台流**（stream/auth、stream/input、stream/write、
+	// stream/resize、stream/detail）只发 {data: {...}}，没有 uuid 字段——
+	// 因此这里按「有没有 data 键」拆包，而不是按「有没有 uuid」拆包，
+	// 否则流事件会把整个信封当成载荷，password/command 全都取不到。
 	if len(data) > 0 {
 		var head struct {
-			UUID string          `json:"uuid"`
+			UUID *string         `json:"uuid"`
 			Data json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(data, &head); err == nil && head.UUID != "" {
-			uuid = head.UUID
+		if err := json.Unmarshal(data, &head); err == nil && head.Data != nil {
+			if head.UUID != nil {
+				uuid = *head.UUID
+			}
 			data = head.Data
 		}
 	}

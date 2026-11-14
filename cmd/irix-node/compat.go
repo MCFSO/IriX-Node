@@ -33,6 +33,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"math"
+
 	"irix/node/internal/sysinfo"
 	"irix/node/internal/timesys"
 )
@@ -58,6 +60,9 @@ type mcsmCompat struct {
 	port  int    // 监听端口（0 = 由系统分配，测试用）
 	addr  string // 实际监听地址（startCompatServers 成功后填入）
 	allow []*net.IPNet
+	// version 上报给面板的版本号（空 = 用本节点 Version）；
+	// 面板按主次版本号比较，配成面板期望值可消除「有更新」红字。
+	version string
 
 	mu       sync.Mutex
 	sessions map[string]*eioSession   // sid → 会话
@@ -69,6 +74,74 @@ type mcsmCompat struct {
 	watchOnce  sync.Once      // 状态监视只启动一次
 	stateMu    sync.Mutex     // 状态快照互斥
 	lastStatus map[string]int // 上一轮实例状态（uuid → status）
+
+	// 系统曲线（对齐 MCSM VisualDataSubsystem）：200 格环形队列，
+	// 每 3 秒推入 {cpu, mem} 的整数百分比；面板节点卡片画 10 分钟曲线。
+	chartMu   sync.Mutex
+	chart     []mcChartPoint
+	chartOnce sync.Once
+}
+
+// mcChartPoint 系统曲线上的一个采样点（字段名与 MCSM 完全一致）。
+type mcChartPoint struct {
+	CPU int `json:"cpu"` // 0-100
+	Mem int `json:"mem"` // 0-100
+}
+
+// mcChartSize 曲线保留的采样点数（MCSM 固定 200 格）。
+const mcChartSize = 200
+
+// mcChartInterval 采样间隔（MCSM 固定 3 秒）。
+const mcChartInterval = 3 * time.Second
+
+// ensureChart 初始化曲线队列并启动采样循环（惰性，只启动一次）。
+func (mc *mcsmCompat) ensureChart() {
+	mc.chartOnce.Do(func() {
+		mc.chartMu.Lock()
+		mc.chart = make([]mcChartPoint, mcChartSize) // 与 MCSM 一致：初始全 0
+		mc.chartMu.Unlock()
+		safeGo("MCSM 兼容层系统曲线", func() {
+			// 先采一次，避免刚启动时 CPU 恒为 0
+			_ = sysinfo.CachedSysCPUUsage()
+			t := time.NewTicker(mcChartInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-mc.d.workers.ctx.Done():
+					return
+				case <-t.C:
+				}
+				mc.pushChart()
+			}
+		})
+	})
+}
+
+// pushChart 采样一次并推入曲线（满则丢弃最旧，与 MCSM LineQueue 一致）。
+func (mc *mcsmCompat) pushChart() {
+	_, _, memUsage := sysinfo.MemSnapshot()
+	point := mcChartPoint{
+		CPU: int(math.Round(sysinfo.CachedSysCPUUsage() * 100)),
+		Mem: int(math.Round(memUsage * 100)),
+	}
+	mc.chartMu.Lock()
+	if len(mc.chart) == 0 {
+		mc.chart = make([]mcChartPoint, mcChartSize)
+	}
+	mc.chart = append(mc.chart[1:], point)
+	mc.chartMu.Unlock()
+}
+
+// chartSnapshot 返回曲线快照（复制，避免与采样循环竞态）。
+func (mc *mcsmCompat) chartSnapshot() []mcChartPoint {
+	mc.chartMu.Lock()
+	defer mc.chartMu.Unlock()
+	if len(mc.chart) == 0 {
+		return make([]mcChartPoint, mcChartSize)
+	}
+	out := make([]mcChartPoint, len(mc.chart))
+	copy(out, mc.chart)
+	return out
 }
 
 // mslxCompat MSLX Daemon 兼容层状态。
@@ -319,6 +392,7 @@ func (d *Daemon) setupCompat(opts *nodeOptions) {
 				key:        mcKey,
 				bind:       opts.CompatMCSMBind,
 				port:       port,
+				version:    strings.TrimSpace(opts.CompatMCSMVersion),
 				allow:      allow,
 				sessions:   map[string]*eioSession{},
 				missions:   map[string]*mcMission{},
@@ -399,6 +473,8 @@ func (d *Daemon) compatListenAddr(bind string, port int) string {
 // 监听地址记录到层对象上，供启动日志与测试读取。
 func (d *Daemon) startCompatServers() {
 	if d.compatMC != nil {
+		// 系统曲线从启动就开采样（与 MCSM daemon 一致），面板一进来就有历史
+		d.compatMC.ensureChart()
 		d.startCompatListener("MCSManager", d.compatMC.bind, d.compatMC.port,
 			d.compatMC.handler(),
 			func(addr string) { d.compatMC.addr = addr },
@@ -489,6 +565,19 @@ func (d *Daemon) compatAddrOf(layer string) string {
 		}
 	}
 	return ""
+}
+
+// reportVersion 返回上报给 MCSManager 面板的版本号。
+//
+// 面板的节点卡片用 hasVersionUpdate(panel.specifiedDaemonVersion, node.version)
+// 比较**主次版本号**：不一致就显示红色「有更新」。本节点版本号（如 1.5.0）与
+// MCSManager daemon 的版本号必然不同，因此这里允许用 compat.mcsm.version
+// 覆盖成面板期望的值（例如 4.5.0），让卡片显示为绿色。
+func (mc *mcsmCompat) reportVersion() string {
+	if mc != nil && mc.version != "" {
+		return mc.version
+	}
+	return Version
 }
 
 // compatKillInstance 强制终止实例（两个兼容层共用同一语义）。

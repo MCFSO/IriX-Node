@@ -119,12 +119,13 @@
   },
   "_comment_compat": "compat: 第三方 Daemon 协议兼容（可选，默认全关）。开启后本节点可被现成的第三方控制面板当作它们自己的 Daemon 使用：mcsm = MCSManager 面板按「节点」连接（socket.io 事件通道 + 直连文件通道）；mslx = MSLX WebPanel 连接（REST /api/... + SignalR 控制台）。两者可同时开启，各自占用**独立端口**（MCSManager 面板只支持填地址+端口，不支持路径前缀），互不影响，也不与节点自身 API 端口冲突。底层处理逻辑全部为本节点自有代码（只对齐线协议与字段，不引入其源码，避免许可证冲突）。注意：兼容层凭据等价于节点最高权限（建实例、下发命令、读写实例文件），务必配合 allowPanelIps 限制来源。",
   "compat": {
-    "_comment_mcsm": "mcsm: MCSManager Daemon 兼容，默认监听 24444（与 MCSManager daemon 默认端口一致）。面板「新建节点」里：地址填 <本机IP>、端口填 24444（或这里的 port）、密钥填 key。bind 留空 = 沿用节点 bind（节点绑 0.0.0.0 时兼容层也绑 0.0.0.0）；port 写 0 = 由系统分配空闲端口。allowPanelIps 支持裸 IP 与 CIDR（空 = 不限制来源）。key 留空没有关系：首次启动会自动随机生成并写回这里（同时持久化到 {data}/compat-secrets.json），所以即使 enabled=false 也已经有一把密钥等着用。",
+    "_comment_mcsm": "mcsm: MCSManager Daemon 兼容，默认监听 24444（与 MCSManager daemon 默认端口一致）。面板「新建节点」里：地址填 <本机IP>、端口填 24444（或这里的 port）、密钥填 key。bind 留空 = 沿用节点 bind（节点绑 0.0.0.0 时兼容层也绑 0.0.0.0）；port 写 0 = 由系统分配空闲端口。allowPanelIps 支持裸 IP 与 CIDR（空 = 不限制来源）。key 留空没有关系：首次启动会自动随机生成并写回这里（同时持久化到 {data}/compat-secrets.json），所以即使 enabled=false 也已经有一把密钥等着用。version 为上报给面板的版本号（留空 = 本节点版本）；面板按「主次版本号」比较节点是否最新，想让它显示绿色就把这里填成面板所带的 MCSManager daemon 版本（如 4.5.0）。",
     "mcsm": {
       "enabled": false,
       "bind": "",
       "port": 24444,
       "key": "",
+      "version": "",
       "allowPanelIps": []
     },
     "_comment_mslx": "mslx: MSLX Daemon 兼容，默认监听 7891。WebPanel 后端地址填 http://<本机IP>:7891（或这里的 port），用 username/password 登录（JWT 24 小时有效）。password 与 jwtSecret 留空同样会自动生成：password 写回这里、jwtSecret 写入 {data}/compat-secrets.json（重启后已签发的 token 仍有效）；实例在兼容层的整数 id 持久化于 {data}/compat-mslx-ids.json。",

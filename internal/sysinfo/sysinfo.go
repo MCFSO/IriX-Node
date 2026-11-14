@@ -44,22 +44,23 @@ func MemUsage() float64 {
 	return float64(total-free) / float64(total)
 }
 
-// CPUUsage CPU 使用率（Linux/Android 下采样 500ms 的近似值，其他平台返回 0）。
+// CPUUsage CPU 使用率（采样 500ms 的近似值；平台不支持时返回 0）。
 func CPUUsage() float64 {
-	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
-		return 0
-	}
-	prev := cpuJiffies()
-	if prev == 0 {
+	prevBusy, prevIdle, ok := sysCPUTimes()
+	if !ok {
 		return 0
 	}
 	time.Sleep(500 * time.Millisecond)
-	curr := cpuJiffies()
-	if curr < prev {
+	busy, idle, ok := sysCPUTimes()
+	if !ok || busy < prevBusy || idle < prevIdle {
 		return 0
 	}
-	idle := 500.0 * float64(runtime.NumCPU())
-	return (curr - prev) / (curr - prev + idle)
+	dBusy := busy - prevBusy
+	dIdle := idle - prevIdle
+	if dBusy+dIdle == 0 {
+		return 0
+	}
+	return float64(dBusy) / float64(dBusy+dIdle)
 }
 
 // ---------------------------------------------------------------------------
@@ -76,26 +77,32 @@ var sysCPUCache = struct {
 var sysCPUOnce sync.Once
 
 // startSysCPULoop 后台采样系统 CPU 使用率：周期读取 /proc/stat 两次取差值，
-// 间隔约 1 秒（比单次 500ms 略宽，但不再阻塞 HTTP 请求线程）。Android 与
-// Linux 同为 /proc/stat；其余平台无 /proc/stat，循环直接置 0 并退出
-// （overview 回退到 0）。
+// 间隔约 1 秒（比单次 500ms 略宽，但不再阻塞 HTTP 请求线程）。
+// 采样接口按平台实现（Linux/Android 读 /proc/stat，Windows 用
+// GetSystemTimes），其余平台 ok=false 时不启动循环（overview 回退到 0）。
 func startSysCPULoop() {
-	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+	const interval = 1 * time.Second
+	prevBusy, prevIdle, ok := sysCPUTimes()
+	if !ok {
 		return
 	}
-	const interval = 1 * time.Second
 	for {
-		prev := cpuJiffies()
 		time.Sleep(interval)
-		curr := cpuJiffies()
-		if curr < prev {
+		busy, idle, ok := sysCPUTimes()
+		if !ok {
+			return
+		}
+		if busy < prevBusy || idle < prevIdle {
+			prevBusy, prevIdle = busy, idle
 			continue
 		}
-		// /proc/stat 第一行 cpu 为各态 jiffies 总和；空闲近似为采样间隔×核数，
-		// busy = (curr-prev) - idle，usage = busy/(curr-prev)。
-		busy := curr - prev
-		idle := interval.Seconds() * float64(runtime.NumCPU())
-		usage := busy / (busy + idle)
+		dBusy := busy - prevBusy
+		dIdle := idle - prevIdle
+		prevBusy, prevIdle = busy, idle
+		if dBusy+dIdle == 0 {
+			continue
+		}
+		usage := float64(dBusy) / float64(dBusy+dIdle)
 		if usage > 1 {
 			usage = 1
 		}
@@ -113,24 +120,6 @@ func CachedSysCPUUsage() float64 {
 	sysCPUCache.mu.Lock()
 	defer sysCPUCache.mu.Unlock()
 	return sysCPUCache.usage
-}
-
-// cpuJiffies 读取 /proc/stat 的 CPU 忙碌 jiffies。
-func cpuJiffies() float64 {
-	data, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return 0
-	}
-	line := strings.Fields(string(data))
-	if len(line) < 5 || line[0] != "cpu" {
-		return 0
-	}
-	var total uint64
-	for _, v := range line[1:] {
-		n, _ := strconv.ParseUint(v, 10, 64)
-		total += n
-	}
-	return float64(total)
 }
 
 // diskInfo 返回路径所在文件系统的 (总容量, 已用, 使用率 0-1)。

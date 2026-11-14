@@ -161,10 +161,11 @@ func subtleEqual(a, b string) bool {
 // mcEventInfoOverview 节点概览（面板「节点信息」页）。
 func mcEventInfoOverview(mc *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
 	d := mc.d
+	mc.ensureChart()
 	instances := d.mcAllInstanceDetails()
 	running := d.CountRunning()
 	return map[string]any{
-		"version": Version,
+		"version": mc.reportVersion(),
 		"process": map[string]any{
 			"cpu":    0,
 			"memory": sysinfo.ProcessAllocCached(),
@@ -174,8 +175,10 @@ func mcEventInfoOverview(mc *mcsmCompat, _ *eioSession, _ json.RawMessage) (any,
 			"running": running,
 			"total":   len(instances),
 		},
-		"system":      mcSystemView(d),
-		"cpuMemChart": []any{},
+		"system": mcSystemView(d),
+		// 与 MCSM VisualDataSubsystem.getSystemChartArray() 完全同形：
+		// 200 个 {cpu, mem} 整数百分比，3 秒一个采样点。
+		"cpuMemChart": mc.chartSnapshot(),
 		"config": map[string]any{
 			"language":                    "zh_cn",
 			"uploadSpeedRate":             0,
@@ -914,11 +917,12 @@ func mcEventJavaUnsupported(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (an
 }
 
 // mcEventUpgradeInfo 版本信息：本节点不支持远程自更新。
-func mcEventUpgradeInfo(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
+func mcEventUpgradeInfo(mc *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
+	v := mc.reportVersion()
 	return map[string]any{
-		"currentVersion":  Version,
-		"onlineVersion":   Version,
-		"latestVersion":   Version,
+		"currentVersion":  v,
+		"onlineVersion":   v,
+		"latestVersion":   v,
 		"updateAvailable": false,
 		"message":         "irix-node 不提供远程自更新",
 	}, nil
