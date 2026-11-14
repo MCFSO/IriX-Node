@@ -181,6 +181,8 @@ type mslxCompat struct {
 	ids *mslxIDMap // 实例 uuid ↔ 整数 id 映射（持久化于 {data}/compat-mslx-ids.json）
 	// tasks 面板任务中心（创建/删除等后台任务，内存保存）
 	tasks mslxTaskRegistry
+	// uploads 面板分片上传会话（创建实例时上传核心/整合包）
+	uploads mslxUploadRegistry
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
 }

@@ -171,6 +171,10 @@ func (ms *mslxCompat) route(w http.ResponseWriter, r *http.Request) {
 	case "instance":
 		ms.handleInstance(w, r, segs[1:])
 	case "files":
+		if len(segs) >= 2 && segs[1] == "upload" {
+			ms.handleUpload(w, r, segs[2:])
+			break
+		}
 		ms.handleFiles(w, r, segs[1:])
 	case "settings":
 		ms.handleSettings(w, r)

@@ -12,6 +12,7 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -659,5 +660,158 @@ func TestCompatMSLXCreateServerAndTasks(t *testing.T) {
 	drs.Body.Close()
 	if drs.StatusCode != http.StatusOK {
 		t.Fatalf("delete 应 200: %d %s", drs.StatusCode, dres)
+	}
+}
+
+// TestCompatMSLXUploadAndCreateFromUpload 面板上传核心的链路：
+// init → chunk（multipart + crc32c）→ status → finish → createServer(coreFileKey)，
+// 核心必须真的落到实例目录里。
+func TestCompatMSLXUploadAndCreateFromUpload(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	// 1) init
+	req, _ := http.NewRequest(http.MethodPost, base+"/api/files/upload/init", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-token", token)
+	resp, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var initEnv struct {
+		Data struct {
+			UploadID string `json:"uploadId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &initEnv); err != nil || initEnv.Data.UploadID == "" {
+		t.Fatalf("init 应返回 uploadId: %s", raw)
+	}
+	uploadID := initEnv.Data.UploadID
+
+	// 2) 上传两个分片（含 crc32c）
+	coreBytes := []byte("FAKE-JAR-CONTENT-0123456789")
+	half := len(coreBytes) / 2
+	chunks := [][]byte{coreBytes[:half], coreBytes[half:]}
+	for i, chunk := range chunks {
+		var body strings.Builder
+		boundary := "----irixTestBoundary"
+		body.WriteString("--" + boundary + "\r\nContent-Disposition: form-data; name=\"index\"\r\n\r\n")
+		body.WriteString(fmt.Sprint(i))
+		body.WriteString("\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"part\"\r\n\r\n")
+		body.Write(chunk)
+		body.WriteString("\r\n--" + boundary + "--\r\n")
+		req, _ := http.NewRequest(http.MethodPost, base+"/api/files/upload/chunk/"+uploadID, strings.NewReader(body.String()))
+		req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+		req.Header.Set("x-user-token", token)
+		cr, err := testClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		craw, _ := io.ReadAll(cr.Body)
+		cr.Body.Close()
+		if cr.StatusCode != http.StatusOK {
+			t.Fatalf("分片 %d 上传失败: %d %s", i, cr.StatusCode, craw)
+		}
+	}
+
+	// 3) status 应看到 2 个分片
+	req, _ = http.NewRequest(http.MethodGet, base+"/api/files/upload/status/"+uploadID, nil)
+	req.Header.Set("x-user-token", token)
+	sr, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sraw, _ := io.ReadAll(sr.Body)
+	sr.Body.Close()
+	var stEnv struct {
+		Data struct {
+			Received []int `json:"receivedChunks"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(sraw, &stEnv)
+	if len(stEnv.Data.Received) != 2 {
+		t.Fatalf("status 应显示 2 个分片: %s", sraw)
+	}
+
+	// 4) finish
+	finishBody := fmt.Sprintf(`{"totalChunks":2,"totalSize":%d}`, len(coreBytes))
+	req, _ = http.NewRequest(http.MethodPost, base+"/api/files/upload/finish/"+uploadID, strings.NewReader(finishBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-token", token)
+	fr, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fraw, _ := io.ReadAll(fr.Body)
+	fr.Body.Close()
+	if fr.StatusCode != http.StatusOK {
+		t.Fatalf("finish 失败: %d %s", fr.StatusCode, fraw)
+	}
+
+	// 5) createServer 用 coreFileKey
+	root, _ := os.MkdirTemp("", "irix-mslx-upcreate-")
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	cwd := filepath.Join(root, "srv")
+	body := fmt.Sprintf(`{"name":"上传建服","core":"server.jar","path":%q,"coreFileKey":%q,"minM":256,"maxM":512,"ignoreEula":true}`, cwd, uploadID)
+	req, _ = http.NewRequest(http.MethodPost, base+"/api/instance/createServer", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-token", token)
+	cr, err := testClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	craw, _ := io.ReadAll(cr.Body)
+	cr.Body.Close()
+	if cr.StatusCode != http.StatusOK {
+		t.Fatalf("createServer(coreFileKey) 失败: %d %s", cr.StatusCode, craw)
+	}
+
+	// 6) 核心文件必须落盘且内容正确
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		if got, err := os.ReadFile(filepath.Join(cwd, "server.jar")); err == nil {
+			if string(got) != string(coreBytes) {
+				t.Fatalf("核心内容不符: %q", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("上传的核心应被写入实例目录")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestExtractZipIntoRejectsTraversal 整合包解压必须防目录穿越。
+func TestExtractZipIntoRejectsTraversal(t *testing.T) {
+	root, _ := os.MkdirTemp("", "irix-zip-")
+	defer os.RemoveAll(root)
+	archive := filepath.Join(root, "bad.zip")
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("../escape.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	dest := filepath.Join(root, "out")
+	_ = os.MkdirAll(dest, 0o755)
+	if err := extractZipInto(archive, dest); err == nil {
+		t.Fatal("含 ../ 的压缩包必须被拒绝")
+	}
+	if _, err := os.Stat(filepath.Join(root, "escape.txt")); err == nil {
+		t.Fatal("越界文件不应被写出")
 	}
 }

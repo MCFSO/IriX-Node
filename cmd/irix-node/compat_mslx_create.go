@@ -125,11 +125,16 @@ type mslxCreateRequest struct {
 	PackageURL       string `json:"packageUrl"`
 	PackageFileKey   string `json:"packageFileKey"`
 	PackageLocalPath string `json:"packageLocalPath"`
+	PackageSha256    string `json:"packageSha256"`
 	MinM             int    `json:"minM"`
 	MaxM             int    `json:"maxM"`
 	Args             string `json:"args"`
 	IgnoreEula       bool   `json:"ignoreEula"`
 	Mcdr             bool   `json:"mcdr"`
+	McdrPython       string `json:"mcdrPython"`
+	McdrHandler      string `json:"mcdrHandler"`
+	McdrInstall      bool   `json:"mcdrInstall"`
+	McdrPipMirror    string `json:"mcdrPipMirror"`
 }
 
 // handleInstanceCreate 创建实例（面板「创建服务端」）。
@@ -145,16 +150,6 @@ func (ms *mslxCompat) handleInstanceCreate(w http.ResponseWriter, r *http.Reques
 	}
 	if strings.TrimSpace(req.Name) == "" {
 		mslxFail(w, http.StatusBadRequest, "服务器名称不能为空")
-		return
-	}
-	if req.CoreFileKey != "" || req.PackageFileKey != "" {
-		mslxFail(w, http.StatusNotImplemented,
-			"irix-node 不支持 MSLX 的临时上传会话（coreFileKey/packageFileKey）："+
-				"请改用核心下载地址（coreUrl），或先用节点文件管理上传文件再指定路径")
-		return
-	}
-	if req.Mcdr {
-		mslxFail(w, http.StatusNotImplemented, "irix-node 暂不支持 MCDReforged 模式（请用普通 JAR 模式）")
 		return
 	}
 
@@ -188,6 +183,13 @@ func (ms *mslxCompat) handleInstanceCreate(w http.ResponseWriter, r *http.Reques
 		parts = append(parts, "-jar", core, "nogui")
 	}
 	startCommand := strings.Join(parts, " ")
+	if req.Mcdr {
+		python := strings.TrimSpace(req.McdrPython)
+		if python == "" {
+			python = "python"
+		}
+		startCommand = python + " -m mcdreforged"
+	}
 
 	inst := NewInstance(newUUID(), InstanceConfig{
 		Nickname:     req.Name,
@@ -219,7 +221,7 @@ func (ms *mslxCompat) handleInstanceCreate(w http.ResponseWriter, r *http.Reques
 
 	// 后续准备（目录/核心/eula）放到后台，避免面板请求超时（面板任务上限 120s）
 	safeGo("MSLX 兼容层创建实例", func() {
-		if err := ms.prepareCreatedInstance(&req, cwd); err != nil {
+		if err := ms.prepareCreatedInstance(inst, &req, cwd); err != nil {
 			alog.Printf("MSLX 兼容层：创建实例 %s 未完成：%v", req.Name, err)
 			ms.tasks.update(task.ID, 3, 100, err.Error())
 			return
@@ -230,26 +232,75 @@ func (ms *mslxCompat) handleInstanceCreate(w http.ResponseWriter, r *http.Reques
 	mslxOK(w, map[string]any{"serverId": id}, "创建任务已提交")
 }
 
-// prepareCreatedInstance 下载核心、写 eula.txt 等收尾工作。
-func (ms *mslxCompat) prepareCreatedInstance(req *mslxCreateRequest, cwd string) error {
-	// 1) 核心：给了下载地址就下，并按需校验 sha256
-	if url := strings.TrimSpace(req.CoreURL); url != "" {
-		name := strings.TrimSpace(req.Core)
-		if name == "" {
-			name = filepath.Base(strings.SplitN(url, "?", 2)[0])
+// prepareCreatedInstance 准备实例：核心（上传/下载）、整合包解压、MCDR 部署、eula。
+func (ms *mslxCompat) prepareCreatedInstance(inst *Instance, req *mslxCreateRequest, cwd string) error {
+	// 1) 核心：优先用面板上传的临时文件，其次按下载地址取
+	coreName := strings.TrimSpace(req.Core)
+	if coreName == "" {
+		coreName = "server.jar"
+	}
+	coreName = filepath.Base(coreName)
+	dest := filepath.Join(cwd, coreName)
+	switch {
+	case strings.TrimSpace(req.CoreFileKey) != "":
+		src := ms.uploadFilePath(strings.TrimSpace(req.CoreFileKey))
+		if src == "" {
+			return fmt.Errorf("上传的核心文件不可用：%w", errUploadNotFound)
 		}
-		if name == "" || name == "." || name == "/" {
-			return errors.New("无法从下载地址推断核心文件名，请填写 core")
+		if err := copyFileTo(src, dest); err != nil {
+			return fmt.Errorf("保存上传的核心失败: %w", err)
 		}
-		dest := filepath.Join(cwd, filepath.Base(name))
-		if err := ms.downloadCoreTo(url, dest, req.CoreSha256); err != nil {
+	case strings.TrimSpace(req.CoreURL) != "":
+		if err := ms.downloadCoreTo(strings.TrimSpace(req.CoreURL), dest, req.CoreSha256); err != nil {
 			return fmt.Errorf("下载核心失败: %w", err)
 		}
 	}
-	// 2) 整合包：暂不支持，明确告知而不是静默跳过
-	if strings.TrimSpace(req.PackageURL) != "" || strings.TrimSpace(req.PackageLocalPath) != "" {
-		return errors.New("irix-node 暂不支持整合包（packageUrl/packageLocalPath）部署：" +
-			"请先用文件管理上传并解压，再创建实例")
+	// 2) 整合包：上传的压缩包 / 本地路径 / 下载地址，统一取到本地再解压
+	archive := ""
+	switch {
+	case strings.TrimSpace(req.PackageFileKey) != "":
+		if p := ms.uploadFilePath(strings.TrimSpace(req.PackageFileKey)); p != "" {
+			archive = p
+		} else {
+			return fmt.Errorf("上传的整合包不可用：%w", errUploadNotFound)
+		}
+	case strings.TrimSpace(req.PackageLocalPath) != "":
+		local := strings.TrimSpace(req.PackageLocalPath)
+		lower := strings.ToLower(local)
+		if !strings.HasSuffix(lower, ".zip") && !strings.HasSuffix(lower, ".mrpack") {
+			return errors.New("本机整合包路径必须是 .zip 或 .mrpack")
+		}
+		if _, err := os.Stat(local); err != nil {
+			return fmt.Errorf("本机整合包路径不可读: %w", err)
+		}
+		archive = local
+	case strings.TrimSpace(req.PackageURL) != "":
+		tmp, err := os.CreateTemp("", "irix-package-*.zip")
+		if err != nil {
+			return err
+		}
+		tmpName := tmp.Name()
+		tmp.Close()
+		defer os.Remove(tmpName)
+		if err := ms.downloadCoreTo(strings.TrimSpace(req.PackageURL), tmpName, req.PackageSha256); err != nil {
+			return fmt.Errorf("下载整合包失败: %w", err)
+		}
+		archive = tmpName
+	}
+	if archive != "" {
+		if err := extractZipInto(archive, cwd); err != nil {
+			return fmt.Errorf("解压整合包失败: %w", err)
+		}
+		// Modrinth 整合包：按 modrinth.index.json 下载文件，并把 overrides 覆盖到根
+		if err := applyModrinthPackage(cwd); err != nil {
+			return err
+		}
+	}
+	// 3) MCDReforged：按需安装、写配置、把启动命令改成 python -m mcdreforged
+	if req.Mcdr {
+		if err := ms.setupMCDR(inst, req, cwd); err != nil {
+			return err
+		}
 	}
 	// 3) eula.txt（除非用户明确忽略）
 	if !req.IgnoreEula {

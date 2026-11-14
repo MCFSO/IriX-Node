@@ -246,7 +246,8 @@ WebPanel 后端地址填 `http://<本机IP>:7891`（与 `compat.mslx.port` 一�
 | `GET /api/ping` | 存活探测（匿名） |
 | `POST /api/auth/login` | 登录签发 JWT（匿名；5 分钟内 10 次失败封禁来源 60 分钟） |
 | `GET /api/user/me`、`POST /api/user/logout` | 当前账号 / 退出（无服务端会话状态） |
-| `POST /api/instance/createServer` | 面板「创建服务端」的内置接口（**不是插件**）。本节点同步建实例 + 后台准备目录/核心/eula，返回 `{serverId}`；`coreUrl` 走节点既有 SSRF 防护下载并可按 sha256 校验；`coreFileKey`/`packageFileKey`（MSLX 临时上传会话）、MCDR、整合包明确报不支持 |
+| `POST /api/files/upload/{init,chunk/{id},status/{id},finish/{id},delete/{id}}` | 面板上传核心/整合包的分片通道：init 发 `uploadId`，chunk 为 multipart（`index`/`file`/可选 `crc32c`，逐片校验），finish 合并到 `{data}/compat-mslx-uploads/{id}.bin` 并按 `totalSize` 校验。**不校验 blake3**（避免引入新依赖），响应里 `blake3: null` |
+| `POST /api/instance/createServer` | 面板「创建服务端」的内置接口（**不是插件**）。本节点同步建实例 + 后台准备目录/核心/eula，返回 `{serverId}`；`coreUrl` 走节点既有 SSRF 防护下载并可按 sha256 校验；`coreFileKey`/`packageFileKey` 取上面分片上传的结果；`packageUrl`/`packageLocalPath` 支持 zip 解压与 Modrinth `.mrpack`（按 `modrinth.index.json` 下载 + 应用 overrides，防目录穿越）；`mcdr=true` 时按需 `pip install mcdreforged`、生成 `config.yml` 并把启动命令改为 `<python> -m mcdreforged` |
 | `POST /api/instance/delete` | 删除实例（运行中拒绝，`deleteFiles` 决定是否删目录） |
 | `GET/POST/DELETE /api/tasks` | 面板任务中心：创建任务以 `state=2 完成` 呈现，供面板停止轮询；支持取消/删除/清空已完成 |
 | `GET /api/plugins/list`（含 `/api/plugins`） | **返回空列表**（200）。MSLX 面板打开「服务端列表」前会先拉它注册插件页面，失败会整页报「目标节点插件加载失败」并挡住实例操作。本节点不提供 .NET 插件运行时，空列表即事实 |
