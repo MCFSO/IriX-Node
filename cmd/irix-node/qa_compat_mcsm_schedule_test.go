@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -207,14 +208,17 @@ func TestMCMScheduleIntervalFires(t *testing.T) {
 	}
 }
 
-// TestMCMScheduleSpecifyTime 指定时间任务（type=3）到点执行一次。
-func TestMCMScheduleSpecifyTime(t *testing.T) {
+// TestMCMScheduleSpecifyTimeCron 指定时间任务（type=3）面板发的其实是 6 段 cron
+// （frontend/hooks/useSchedule.ts：`${s} ${m} ${h} ${dd} ${mm} *`），到点执行一次。
+func TestMCMScheduleSpecifyTimeCron(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	base := setupTestMCSM(t, d)
 
 	cwd, _ := os.MkdirTemp("", "irix-sched-at-")
 	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
 	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
 	if err := d.Add(inst); err != nil {
 		t.Fatal(err)
 	}
@@ -224,39 +228,85 @@ func TestMCMScheduleSpecifyTime(t *testing.T) {
 	if status, data := c.requestRaw("auth", "s0", mcsmTestKey); status != 200 {
 		t.Fatalf("认证失败: %d %s", status, data)
 	}
-	past := time.Now().Add(-2 * time.Second).Format("2006-01-02 15:04:05")
-	if status, data := c.requestRaw("schedule/register", "r1", map[string]any{
+
+	// 面板同款：把「现在 + 2 秒」拼成 6 段 cron
+	at := time.Now().Add(2 * time.Second)
+	cronExpr := fmt.Sprintf("%d %d %d %d %d *", at.Second(), at.Minute(), at.Hour(), at.Day(), int(at.Month()))
+	status, data := c.requestRaw("schedule/register", "r1", map[string]any{
 		"instanceUuid": inst.InstanceUuid,
 		"name":         "at-once",
-		"count":        -1,
-		"time":         past,
+		"count":        1,
+		"time":         cronExpr,
 		"type":         3,
 		"actions":      []map[string]any{{"type": "start", "payload": ""}},
-	}); status != 200 {
-		t.Fatalf("注册指定时间任务失败: %d %s", status, data)
+	})
+	if status != 200 {
+		t.Fatalf("注册指定时间任务失败: %d %s（time=%s）", status, data, cronExpr)
 	}
 
-	d.compatMC.tickSchedules()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// 等到该时刻
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(at) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	// 驱动调度（真实循环也是每秒 tick）
+	for i := 0; i < 5; i++ {
+		d.compatMC.tickSchedules()
+		time.Sleep(400 * time.Millisecond)
 		inst.mu.Lock()
 		status := inst.Status
 		inst.mu.Unlock()
 		if status != StatusStopped {
-			break // 已开始启动（start 动作生效）
+			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("指定时间任务未执行 start 动作")
-		}
-		time.Sleep(150 * time.Millisecond)
+	}
+	inst.mu.Lock()
+	st := inst.Status
+	inst.mu.Unlock()
+	if st == StatusStopped {
+		t.Fatal("指定时间任务未触发 start 动作")
 	}
 	t.Cleanup(func() { stopTestProc(t, inst) })
 
-	// 指定时间任务只跑一次：任务应被移除
+	// count=1 → 任务应被移除
 	var list []map[string]any
 	_, raw := c.requestRaw("schedule/list", "l1", map[string]any{"instanceUuid": inst.InstanceUuid})
 	_ = json.Unmarshal(raw, &list)
 	if len(list) != 0 {
 		t.Fatalf("指定时间任务执行后应移除: %s", raw)
+	}
+	if time.Now().After(deadline) {
+		t.Log("（本次执行接近超时边界，已通过）")
+	}
+}
+
+// TestMCMScheduleSpecifyRejectsGarbage 非法时间必须报错，且错误信息要能看懂。
+func TestMCMScheduleSpecifyRejectsGarbage(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMCSM(t, d)
+	cwd, _ := os.MkdirTemp("", "irix-sched-bad-")
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	inst := sampleInst(1, cwd)
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	c := newEIOClient(t, base+"/socket.io/")
+	c.connect()
+	if status, data := c.requestRaw("auth", "s0", mcsmTestKey); status != 200 {
+		t.Fatalf("认证失败: %d %s", status, data)
+	}
+	status, data := c.requestRaw("schedule/register", "r1", map[string]any{
+		"instanceUuid": inst.InstanceUuid,
+		"name":         "bad-time",
+		"count":        1,
+		"time":         "明天下午",
+		"type":         3,
+		"actions":      []map[string]any{{"type": "stop", "payload": ""}},
+	})
+	if status != 500 {
+		t.Fatalf("非法时间应被拒绝，实际 %d %s", status, data)
+	}
+	if !strings.Contains(string(data), "无法解析时间") {
+		t.Fatalf("错误信息应说明无法解析时间: %s", data)
 	}
 }

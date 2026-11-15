@@ -206,8 +206,15 @@ func (mc *mcsmCompat) registerSchedule(task *mcScheduleTask) error {
 			return fmt.Errorf("无效的 cron 表达式: %v", err)
 		}
 	case mcScheduleTypeSpecify:
-		if _, err := parseScheduleTime(task.Time); err != nil {
-			return err
+		// 面板对「Specific Time Task」也是拼 6 段 cron（`秒 分 时 日 月 周`），
+		// 见 frontend/hooks/useSchedule.ts 的 createTaskTypeSpecify：
+		//   time = `${s} ${m} ${h} ${dd} ${mm} *`
+		// 命中一次即可（count 默认 1，执行后自动删除）。
+		// 同时兼容「2006-01-02 15:04:05」这种绝对时间写法（历史/手工调用）。
+		if _, err := parseCronSpec(task.Time); err != nil {
+			if _, terr := parseScheduleTime(task.Time); terr != nil {
+				return fmt.Errorf("无法解析时间 %q：既不是 6 段 cron（秒 分 时 日 月 周），也不是 2006-01-02 15:04:05 格式", task.Time)
+			}
 		}
 	default:
 		return fmt.Errorf("不支持的任务类型 %d（1=间隔 / 2=cron / 3=指定时间）", task.Type)
@@ -347,11 +354,18 @@ func scheduleDue(t *mcScheduleTask, now time.Time, last int64) bool {
 		}
 		return spec.match(now)
 	case mcScheduleTypeSpecify:
+		// 面板给的是 6 段 cron：命中即触发（同一秒只触发一次）
+		if spec, err := parseCronSpec(t.Time); err == nil {
+			if last == now.Unix() {
+				return false
+			}
+			return spec.match(now)
+		}
+		// 兼容绝对时间写法
 		at, err := parseScheduleTime(t.Time)
 		if err != nil {
 			return false
 		}
-		// 到点即触发一次；lastFired 已记录过就不再触发
 		return last == 0 && !now.Before(at) && now.Sub(at) < 24*time.Hour
 	}
 	return false
