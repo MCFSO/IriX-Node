@@ -203,6 +203,10 @@ type mslxCompat struct {
 	// streamMu/streams 控制台输出流（按实例，带游标与断档检测）
 	streamMu sync.Mutex
 	streams  map[string]*mslxConsoleStream
+	// 实例状态监视（控制台通知行 + 资源上报）
+	monitorOnce sync.Once
+	monitorMu   sync.Mutex
+	lastRun     map[string]bool
 }
 
 // compatListener 一条兼容层独立监听（随节点一起优雅关停）。
@@ -551,6 +555,8 @@ func (d *Daemon) startCompatServers() {
 		// 定时任务：加载任务表并启动分钟级调度（面板「定时任务」）
 		d.compatMSLX.loadCronTasks()
 		d.compatMSLX.startCronScheduler()
+		// 实例监视：控制台通知行（面板据此刷新状态）+ ReceiveStatus 资源上报
+		d.compatMSLX.startInstanceMonitor()
 		d.startCompatListener("MSLX", d.compatMSLX.bind, d.compatMSLX.port,
 			d.compatMSLX.handler(),
 			func(addr string) { d.compatMSLX.addr = addr },

@@ -199,12 +199,19 @@ func TestMCMScheduleIntervalFires(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// count=1 → 执行后任务应被删除
-	var list []map[string]any
-	_, raw := c.requestRaw("schedule/list", "l1", map[string]any{"instanceUuid": inst.InstanceUuid})
-	_ = json.Unmarshal(raw, &list)
-	if len(list) != 0 {
-		t.Fatalf("count=1 的任务执行后应自动删除: %s", raw)
+	// count=1 → 执行后任务应被删除（动作是异步的，强杀要等进程真正退出）
+	deadlineList := time.Now().Add(8 * time.Second)
+	for {
+		var list []map[string]any
+		_, raw := c.requestRaw("schedule/list", "l1", map[string]any{"instanceUuid": inst.InstanceUuid})
+		_ = json.Unmarshal(raw, &list)
+		if len(list) == 0 {
+			break
+		}
+		if time.Now().After(deadlineList) {
+			t.Fatalf("count=1 的任务执行后应自动删除: %s", raw)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

@@ -367,3 +367,85 @@ func TestMSLXConsoleCursorProtocol(t *testing.T) {
 		t.Fatalf("游标连续时不应报 gap: %v", log2)
 	}
 }
+
+// TestMSLXConsoleLifecycleNotice 生命周期变化必须写控制台通知行并推给订阅者。
+//
+// 面板控制台页**不轮询**实例状态：它只在收到 `[MSLX] ... 已启动/已停止` 这类
+// 通知行时才重新拉取实例信息（ServerTerminal 的 onLog 判定 emits('update')）。
+// 不写这类行，就会出现「服务明明在跑，页面显示已停止」。
+func TestMSLXConsoleLifecycleNotice(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	cwd := filepath.Join(worldDir(t), "srv-mslx-notice")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	instID := d.compatMSLX.idFor(inst.InstanceUuid)
+
+	status, resp := mslxDo(t, http.MethodPost,
+		base+"/api/hubs/instanceControlHub/negotiate?negotiateVersion=1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("协商失败: %d %s", status, resp)
+	}
+	var neg struct {
+		ConnectionToken string `json:"connectionToken"`
+	}
+	if err := json.Unmarshal(resp, &neg); err != nil || neg.ConnectionToken == "" {
+		t.Fatalf("协商响应异常: %s", resp)
+	}
+	ws := dialTestWS(t, base+"/api/hubs/instanceControlHub?id="+url.QueryEscape(neg.ConnectionToken))
+	defer ws.conn.Close()
+	rd := &hubReader{t: t, ws: ws}
+	ws.sendText(`{"protocol":"json","version":1}` + srRecordSep)
+	rd.next(5 * time.Second)
+
+	// 启动实例监视（真实环境由 startCompatServers 启动）
+	d.compatMSLX.startInstanceMonitor()
+
+	// 订阅控制台（ResumeConsole），随后启动实例
+	resume, _ := json.Marshal(map[string]any{
+		"type": 1, "invocationId": "r1", "target": "ResumeConsole",
+		"arguments": []any{instID, nil, nil, false, 80, 24},
+	})
+	ws.sendText(string(resume) + srRecordSep)
+
+	// 启动实例（兼容层监视循环应在 ~700ms 内写通知行）
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+
+	// 等一条包含「已启动」的 ReceiveLog
+	deadline := time.Now().Add(10 * time.Second)
+	found := false
+	for time.Now().Before(deadline) {
+		rec := rd.next(time.Until(deadline))
+		if rec["type"] != float64(1) || rec["target"] != "ReceiveLog" {
+			continue
+		}
+		args, _ := rec["arguments"].([]any)
+		if len(args) == 0 {
+			continue
+		}
+		text, _ := args[0].(string)
+		if strings.Contains(text, "已启动") {
+			found = true
+			// 通知行同样必须带游标（否则前端丢弃）
+			if len(args) < 2 {
+				t.Fatalf("通知行必须带 cursor: %v", args)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("启动后应收到 [MSLX] ... 已启动 的控制台通知行（面板靠它刷新状态）")
+	}
+}

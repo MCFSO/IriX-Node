@@ -14,9 +14,13 @@
 package main
 
 import (
+	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"time"
 
+	"irix/node/internal/sysinfo"
 	"irix/node/internal/timesys"
 )
 
@@ -121,5 +125,131 @@ func consoleCursorPayload(c mslxConsoleCursor) map[string]any {
 	return map[string]any{"streamId": c.StreamID, "sequence": c.Sequence}
 }
 
-// 保证 timesys 引用（游标时间语义与节点时间一致时使用）。
-var _ = func() time.Time { return timesys.Now() }
+// ---------------------------------------------------------------------------
+// 实例状态监视（面板状态刷新 + 资源监控）
+// ---------------------------------------------------------------------------
+//
+// 面板控制台页**不会轮询**实例状态：它只在收到形如 `[MSLX] ... 已启动/已停止`
+// 的控制台通知行时才 emits('update') 触发重新拉取实例信息
+// （ServerTerminal.vue 的 onLog 判定）。真实 daemon 在生命周期变化时正是把这些
+// 通知写进控制台记录。我们不写，就会出现「服务明明在跑，页面显示已停止」。
+//
+// 同一条监视循环还负责 `ReceiveStatus(instanceId, cpu, memBytes)`：面板的
+// 「实例概览 → 监控」与顶部 CPU/内存就靠它。
+
+// mslxInstanceSample 资源采样状态（算 CPU% 需要上次的累计 CPU tick）。
+type mslxInstanceSample struct {
+	lastTicks uint64
+	lastAt    time.Time
+}
+
+// startInstanceMonitor 启动实例状态监视（随兼容层启动，只启动一次）。
+func (ms *mslxCompat) startInstanceMonitor() {
+	ms.monitorOnce.Do(func() {
+		ms.monitorMu.Lock()
+		if ms.lastRun == nil {
+			ms.lastRun = map[string]bool{}
+		}
+		ms.monitorMu.Unlock()
+		safeGo("MSLX 兼容层实例监视", func() {
+			defer recoverLog("MSLX 兼容层实例监视")
+			t := time.NewTicker(700 * time.Millisecond)
+			defer t.Stop()
+			lastStatusPush := map[string]time.Time{}
+			samples := map[string]*mslxInstanceSample{}
+			for range t.C {
+				ms.d.mu.Lock()
+				instances := make([]*Instance, len(ms.d.Instances))
+				copy(instances, ms.d.Instances)
+				ms.d.mu.Unlock()
+				for _, inst := range instances {
+					inst.mu.Lock()
+					proc := inst.Proc
+					running := proc != nil && proc.IsRunning()
+					pid := 0
+					if proc != nil && proc.cmd != nil && proc.cmd.Process != nil {
+						pid = proc.cmd.Process.Pid
+					}
+					nickname := inst.Config.Nickname
+					inst.mu.Unlock()
+
+					ms.monitorMu.Lock()
+					prev, seen := ms.lastRun[inst.InstanceUuid]
+					if !seen || prev != running {
+						ms.lastRun[inst.InstanceUuid] = running
+						ms.monitorMu.Unlock()
+						// 生命周期变化：写通知行并推给正在看控制台的连接
+						var text string
+						if running {
+							text = fmt.Sprintf("[MSLX] 服务器进程已启动，PID: %d", pid)
+						} else {
+							text = "[MSLX] 服务器进程已停止"
+						}
+						ms.emitConsoleNotice(inst.InstanceUuid, text)
+						alog.Printf("MSLX 兼容层：实例 %s %s", nickname, strings.TrimPrefix(text, "[MSLX] "))
+						if !running {
+							delete(samples, inst.InstanceUuid)
+						}
+						continue
+					}
+					ms.monitorMu.Unlock()
+
+					if !running || pid <= 0 {
+						continue
+					}
+					// 资源上报：2 秒一次，够面板画曲线又不浪费 CPU
+					now := timesys.Now()
+					if last, ok := lastStatusPush[inst.InstanceUuid]; ok && now.Sub(last) < 2*time.Second {
+						continue
+					}
+					lastStatusPush[inst.InstanceUuid] = now
+					cpu := 0.0
+					if ticks, ok := sysinfo.ProcCPUTicks(pid); ok {
+						s := samples[inst.InstanceUuid]
+						if s != nil && !s.lastAt.IsZero() {
+							dt := now.Sub(s.lastAt).Seconds()
+							if dt > 0 {
+								delta := float64(ticks - s.lastTicks)
+								cpu = delta / sysinfo.ProcTicksPerSec() / dt * 100
+								if cpu < 0 {
+									cpu = 0
+								}
+							}
+						}
+						samples[inst.InstanceUuid] = &mslxInstanceSample{lastTicks: ticks, lastAt: now}
+					}
+					memBytes := sysinfo.ProcMemoryBytes(pid)
+					ms.broadcastConsoleEvent(inst.InstanceUuid, "ReceiveStatus",
+						ms.idFor(inst.InstanceUuid), math.Round(cpu*100)/100, memBytes)
+				}
+			}
+		})
+	})
+}
+
+// emitConsoleNotice 把一条 daemon 通知写进实例控制台流并推给订阅者。
+func (ms *mslxCompat) emitConsoleNotice(uuid, text string) {
+	stream := ms.consoleStreamOf(uuid)
+	payload, cursor := stream.append(text)
+	ms.broadcastConsoleEvent(uuid, "ReceiveLog", payload, consoleCursorPayload(cursor))
+}
+
+// broadcastConsoleEvent 给订阅了该实例控制台的连接推送事件。
+func (ms *mslxCompat) broadcastConsoleEvent(uuid, target string, args ...any) {
+	id := ms.idFor(uuid)
+	ms.hubMu.Lock()
+	conns := make([]*mslxHubConn, 0, len(ms.hubConns))
+	for _, c := range ms.hubConns {
+		conns = append(conns, c)
+	}
+	ms.hubMu.Unlock()
+	for _, c := range conns {
+		c.mu.Lock()
+		_, subscribed := c.console[id]
+		c.mu.Unlock()
+		if !subscribed {
+			continue
+		}
+		c.sendInvocation(target, args...)
+	}
+}
