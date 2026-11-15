@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -207,5 +208,71 @@ func TestMCSMStopRepliesImmediately(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("停止回包耗时 %s，必须异步回包（面板会 Request timeout）", elapsed)
+	}
+}
+
+// TestMCSMFileListIgnoresUndefinedKeyword 面板把所有可选参数序列化成 "undefined"：
+// field/list 的 fileName 恒为 "undefined"，若当成关键字过滤就永远查不到文件
+// （真机上表现为「文件管理里实例目录是空的」）。
+func TestMCSMFileListIgnoresUndefinedKeyword(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMCSM(t, d)
+
+	cwd, err := os.MkdirTemp("", "irix-filelist-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	if err := os.MkdirAll(filepath.Join(cwd, "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, cwd)
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newEIOClient(t, base+"/socket.io/")
+	c.connect()
+	if status, data := c.requestRaw("auth", "a0", mcsmTestKey); status != 200 {
+		t.Fatalf("认证失败: %d %s", status, data)
+	}
+	status, data := c.requestRaw("file/list", "f1", map[string]any{
+		"instanceUuid": inst.InstanceUuid,
+		"target":       "/",
+		"page":         0,
+		"pageSize":     50,
+		"fileName":     "undefined", // 面板真实行为
+	})
+	if status != 200 {
+		t.Fatalf("file/list 失败: %d %s", status, data)
+	}
+	var env struct {
+		Total int `json:"total"`
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("回包解析失败: %s", data)
+	}
+	if env.Total != 1 || len(env.Items) != 1 || env.Items[0].Name != "plugins" {
+		t.Fatalf("关键字 undefined 应被忽略，实际返回: %s", data)
+	}
+}
+
+// TestSanitizeInstanceDirKeepsCJK 实例目录名要保留中文（面板里普遍用中文命名）。
+func TestSanitizeInstanceDirKeepsCJK(t *testing.T) {
+	if got := sanitizeInstanceDir("市场模板服"); got != "市场模板服" {
+		t.Fatalf("中文名应保留，实际 %q", got)
+	}
+	if got := sanitizeInstanceDir("a/b:c*d"); strings.ContainsAny(got, `/\:*?`) {
+		t.Fatalf("非法字符应被替换，实际 %q", got)
+	}
+	if got := sanitizeInstanceDir("   "); got != "server" {
+		t.Fatalf("空名应回退 server，实际 %q", got)
+	}
+	long := strings.Repeat("测", 80)
+	if n := len([]rune(sanitizeInstanceDir(long))); n > 48 {
+		t.Fatalf("目录名应截断到 48 个字符，实际 %d", n)
 	}
 }

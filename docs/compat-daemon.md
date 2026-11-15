@@ -250,6 +250,7 @@ WebPanel 后端地址填 `http://<本机IP>:7891`（与 `compat.mslx.port` 一�
 | `POST /api/instance/createServer` | 面板「创建服务端」的内置接口（**不是插件**）。本节点同步建实例 + 后台准备目录/核心/eula，返回 `{serverId}`；`coreUrl` 走节点既有 SSRF 防护下载并可按 sha256 校验；`coreFileKey`/`packageFileKey` 取上面分片上传的结果；`packageUrl`/`packageLocalPath` 支持 zip 解压与 Modrinth `.mrpack`（按 `modrinth.index.json` 下载 + 应用 overrides，防目录穿越）；`mcdr=true` 时按需 `pip install mcdreforged`、生成 `config.yml` 并把启动命令改为 `<python> -m mcdreforged` |
 | `POST /api/instance/delete` | 删除实例（运行中拒绝，`deleteFiles` 决定是否删目录） |
 | `/api/instance/tasks/{list,list/{id},create,update,delete/{id}}` | 面板「定时任务」：5 段 cron（分 时 日 月 周，支持 `*`/`a`/`a-b`/`*/n`/`a-b/n`/列表/月份与星期英文名，日与周同时限制取「或」）；类型 `command`（发控制台指令）、`start`/`stop`/`restart`、`backup`（实例快照）、`shell`（在实例目录执行命令，Windows 走临时 .bat 避免引号转义）；任务表持久化 `{data}/compat-mslx-tasks.json`，调度循环 20 秒一跳、按分钟去重、`runWhenOffline=false` 时实例未运行则跳过 |
+| `instance/asynchronous`、`instance/query_asynchronous`、`instance/stop_asynchronous`（面板 `/api/protected_instance/asynchronous`） | 面板「服务端模板市场」安装：下载模板包 → 解压到实例目录 → 读包内 `mcsmanager-config.json`（或面板传的 `setupInfo`）→ 建实例；任务状态 0/1/-1，`detail.downloadProgress` 带进度；`install_instance` 在已有实例内解压、`update` 执行实例的 `updateCommand`；下载走节点既有 SSRF 守卫 |
 | `schedule/register`、`schedule/list`、`schedule/delete`（面板 `/api/protected_schedule`） | MCSManager 面板「计划任务」：`type` 1=间隔（`time` 秒，最小 3，`count=-1` 无限）/ 2=cron（**6 段含秒**，同 node-schedule）/ 3=指定时间（面板同样拼 **6 段 cron**：`秒 分 时 日 月 *`，命中一次即执行；手工调用也兼容 `2006-01-02 15:04:05`）；动作 `delay`/`command`/`stop`/`start`/`restart`/`kill`，单个任务最多 10 个动作、同实例最多 8 个任务、同名视为更新；任务表持久化 `{data}/compat-mcsm-schedules.json`，秒级调度，执行后按 `count` 递减并在归零时自动删除 |
 | `GET/POST/DELETE /api/tasks` | 面板任务中心：创建任务以 `state=2 完成` 呈现，供面板停止轮询；支持取消/删除/清空已完成 |
 | `GET /api/plugins/list`（含 `/api/plugins`） | **返回空列表**（200）。MSLX 面板打开「服务端列表」前会先拉它注册插件页面，失败会整页报「目标节点插件加载失败」并挡住实例操作。本节点不提供 .NET 插件运行时，空列表即事实 |
@@ -308,6 +309,10 @@ MCSM 兼容层的传输层全部自己实现，早期的「会话串行队列 + 
 | 任务队列 | 环形缓冲（初始 256，按需翻倍到 8192），入队 O(1)、满则丢最旧并计数，**永不阻塞、永不内联执行** | 单协程入队 ≈28 ns/op，18 协程并发 ≈81 ns/op（改造前并发入队 14.7 µs/op，因为队满要 copy 上千元素） |
 | 通道分离 | **有序通道**：有状态事件（auth、instance/action、instance/new、stream/*），单协程保序；**并发通道**：只读/幂等事件（file/list、file/edit、info/* 等），4 个协程并行、多槽唤醒、逐个出队 | 慢的有状态事件不再挡住只读请求与状态推送 |
 | WS 出站 | 每连接一个写协程 + 有界出站队列（2048 帧），同一批多帧合并成一个 WS 文本帧（engine.io 允许帧内以 `\x1e` 分隔多包）；慢客户端只丢自己的帧 | syscall 从「一包一次」降到「一批一次」，慢客户端不阻塞业务协程 |
+
+> 面板会把「没有值」的可选参数序列化成字符串 `"undefined"`（实测 `file/list` 的
+> `fileName` 恒为 `"undefined"`）。把它当关键字过滤会导致**文件管理里目录永远是空的**，
+> 兼容层对这类值按空处理。
 
 轮询 GET 另加 300 ms 兜底：`notify` 只有 1 个槽位，多等待者可能漏唤醒，
 兜底轮询既不空等 25 s 也不增加可见延迟。

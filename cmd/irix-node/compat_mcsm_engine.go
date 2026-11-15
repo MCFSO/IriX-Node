@@ -337,7 +337,7 @@ func (mc *mcsmCompat) wsReadLoop(s *eioSession, conn *wsConn) {
 				continue
 			}
 			if debugCompatWS {
-				alog.Printf("调试 WS 入站（sid=%s）: %q", s.sid[:8], truncateForLog(pkt, 80))
+				alog.Printf("调试 WS 入站（sid=%s）: %q", s.sid[:8], truncateForLog(pkt, 600))
 			}
 			s.handleEnginePacket(pkt)
 		}

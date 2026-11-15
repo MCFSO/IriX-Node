@@ -366,22 +366,28 @@ func (ms *mslxCompat) downloadCoreTo(rawURL, dest, sha256Hex string) error {
 }
 
 // sanitizeInstanceDir 把实例名转成安全的目录名。
+//
+// 只剔除路径分隔符、Windows 保留字符与控制字符，**保留中文等 Unicode 字符**：
+// 面板里几乎都用中文命名，早先只放行 ASCII 会把「市场模板服」压成「server」，
+// 多个中文实例还会互相撞目录。
 func sanitizeInstanceDir(name string) string {
 	out := strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '-', r == '_', r == '.':
-			return r
-		default:
+		case r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' ||
+			r == '"' || r == '<' || r == '>' || r == '|':
 			return '_'
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
 		}
 	}, strings.TrimSpace(name))
-	out = strings.Trim(out, "._")
+	out = strings.Trim(out, " ._-")
 	if out == "" {
 		out = "server"
 	}
-	if len(out) > 64 {
-		out = out[:64]
+	if len([]rune(out)) > 48 {
+		out = string([]rune(out)[:48])
 	}
 	return out
 }

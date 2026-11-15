@@ -56,7 +56,7 @@ var mcEventHandlers = map[string]mcEventFunc{
 	"instance/process_config/list": mcEventProcessConfigList,
 	"instance/process_config/file": mcEventProcessConfigFile,
 
-	"instance/asynchronous":       mcEventAsyncUnsupported,
+	"instance/asynchronous":       mcEventAsyncStart,
 	"instance/query_asynchronous": mcEventAsyncQuery,
 	"instance/stop_asynchronous":  mcEventAsyncStop,
 
@@ -879,21 +879,6 @@ func mcParseProperties(text string) map[string]any {
 		out[key] = val
 	}
 	return out
-}
-
-// mcEventAsyncUnsupported 复杂异步任务（快速安装/更新）本节点不支持。
-func mcEventAsyncUnsupported(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return nil, errors.New("本节点不支持 MCSManager 的快速安装/更新异步任务")
-}
-
-// mcEventAsyncQuery 异步任务查询：本节点不产生该类任务，返回空列表。
-func mcEventAsyncQuery(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return []any{}, nil
-}
-
-// mcEventAsyncStop 停止异步任务：无任务可停，直接成功。
-func mcEventAsyncStop(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return true, nil
 }
 
 // mcEventPassportRegister 注册一次性通行证（下载/上传/控制台）。

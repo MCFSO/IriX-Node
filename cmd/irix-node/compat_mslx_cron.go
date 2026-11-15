@@ -467,6 +467,11 @@ func (ms *mslxCompat) tickCron() {
 func runShellInDir(dir, command string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	return runShellInDirContext(ctx, dir, command)
+}
+
+// runShellInDirContext 带上下文执行 shell 命令（可取消）。
+func runShellInDirContext(ctx context.Context, dir, command string) error {
 	// Windows 上 `cmd /C "<含引号的整条命令>"` 会被 Go 的参数转义打乱
 	// （内部双引号变成 \" → cmd 解析成功但路径被破坏）。落成临时 .bat 再执行，
 	// 绕开引号转义；执行完即删。

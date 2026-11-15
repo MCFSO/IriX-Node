@@ -91,6 +91,21 @@ MSLX Daemon v1.7.8 主节点（17 项全过）：
 用面板同款 payload 复测：注册 200 → 到点触发 start → count=1 自动删除。
 脚本：`scripts/e2e/mcsm-schedule-cron.mjs`。
 
+## 快速安装（MCSManager 服务端模板市场）
+
+面板市场点 Install → `POST /api/protected_instance/asynchronous?task_name=quick_install`
+→ daemon `instance/asynchronous` → 轮询 `instance/query_asynchronous`。实测
+（真实面板 + 公网模板包）：
+
+```
+✅ 发起安装返回 taskId
+✅ 轮询 status 1（运行中）→ 0（完成），detail.downloadProgress 有进度
+✅ 实例创建成功（cwd 保留中文名）
+✅ 面板文件管理能看到解压出的目录
+```
+
+脚本：`scripts/e2e/mcsm-quick-install.mjs`。
+
 ## 这一轮真机跑出来的 5 个缺陷（都已修 + 补回归用例）
 
 | # | 现象 | 根因 | 修复 |

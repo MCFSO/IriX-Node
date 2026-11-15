@@ -88,6 +88,10 @@ type mcsmCompat struct {
 
 	// schedules 面板「计划任务」表（持久化于 {data}/compat-mcsm-schedules.json）
 	schedules mcScheduleStore
+
+	// asyncMu/asyncTasks 面板「快速安装」等异步任务（内存，完成 10 分钟后清理）
+	asyncMu    sync.Mutex
+	asyncTasks map[string]*mcAsyncTask
 }
 
 // mcChartPoint 系统曲线上的一个采样点（字段名与 MCSM 完全一致）。

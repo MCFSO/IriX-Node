@@ -97,7 +97,13 @@ func mcEventFileList(mc *mcsmCompat, _ *eioSession, data json.RawMessage) (any, 
 	if err != nil {
 		return nil, fmt.Errorf("读取目录失败: %w", err)
 	}
+	// 面板会把「没有值」序列化成字符串 "undefined"/"null"（实测 file/list 请求里
+	// fileName 恒为 "undefined"）。当成关键字过滤就会永远查不到文件，
+	// 这里按空值处理。
 	keyword := strings.ToLower(strings.TrimSpace(req.FileName))
+	if keyword == "undefined" || keyword == "null" {
+		keyword = ""
+	}
 	items := make([]mcFileItem, 0, len(entries))
 	for _, e := range entries {
 		if keyword != "" && !strings.Contains(strings.ToLower(e.Name()), keyword) {
