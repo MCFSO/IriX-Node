@@ -245,10 +245,42 @@ func (ms *mslxCompat) handleNodeAcceptLink(w http.ResponseWriter, r *http.Reques
 	alog.Printf("MSLX 兼容层：已与主节点 %s 建立链接（nodeId=%s）", masterURL, link.NodeID)
 	// 立即上报一次：主节点以「10 秒内有上报」判定节点在线，等 2 秒窗口
 	// 会让面板先闪一下离线。
-	if status, err := ms.reportNodeStats(&http.Client{Timeout: 3 * time.Second}, link); err != nil {
-		alog.Printf("MSLX 兼容层：首次状态上报失败（HTTP %d, %v），将继续每 2 秒重试", status, err)
-	}
+	//
+	// 注意：主节点是在 accept-link **返回之后**才把关系落库，所以这一次上报
+	// 常常会被主节点以 401「无效的通讯密钥」拒绝（实测真实 MSLX 主节点就是这样）。
+	// 这不代表链接失败，短暂退避重试即可；只有连续失败才值得告警。
+	go ms.persistFirstReport(link)
 	mslxOK(w, map[string]any{"nodeId": link.NodeID, "commsKey": link.CommsKey}, "链接成功")
+}
+
+// persistFirstReport 链接建立后的首轮上报：短退避重试，避免主节点尚未落库时的 401 噪音。
+func (ms *mslxCompat) persistFirstReport(link *mslxNodeLink) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	backoff := []time.Duration{300 * time.Millisecond, 700 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second}
+	var lastStatus int
+	var lastErr error
+	for attempt := 0; attempt <= len(backoff); attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoff[attempt-1])
+		}
+		cur := ms.currentNodeLink()
+		if cur == nil || cur.NodeID != link.NodeID {
+			return // 关系已被撤销或替换，交给上报循环处理
+		}
+		status, err := ms.reportNodeStats(client, link)
+		if err == nil {
+			if attempt > 0 {
+				alog.Printf("MSLX 兼容层：首轮状态上报在第 %d 次重试后成功（主节点已落库链接关系）", attempt)
+			}
+			return
+		}
+		lastStatus, lastErr = status, err
+		if status != http.StatusUnauthorized && status != http.StatusNotFound {
+			break // 非「关系尚未落库」的失败不必死等
+		}
+	}
+	alog.Printf("MSLX 兼容层：首轮状态上报未能成功（HTTP %d, %v），交由每 2 秒的上报循环继续重试",
+		lastStatus, lastErr)
 }
 
 // handleNodeUpdateLink 主节点同步地址变更（用 nodeId + commsKey 校验）。

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,9 @@ import (
 
 	"irix/node/internal/timesys"
 )
+
+// debugCompatWS 临时调试开关（排查真实面板 WS 心跳）。
+var debugCompatWS = os.Getenv("IRIX_DEBUG_WS") != ""
 
 // engine.io 会话参数（与 socket.io v4 默认值一致）。
 const (
@@ -59,11 +63,14 @@ type eioSession struct {
 	pending    []string      // 等待轮询取走的包
 	notify     chan struct{} // 有新包可取的唤醒信号
 	closed     bool
-	closedCh   chan struct{}       // 关闭时 close（心跳循环退出信号）
-	heartbeat  bool                // WebSocket 心跳循环是否已启动
-	authed     bool                // 是否已通过节点密钥认证
-	jobs       *mcJobQueue         // 有序通道：有状态事件（auth、instance/*、stream/*）
-	fast       *mcJobQueue         // 并发通道：只读/幂等事件（file/list、info/*）
+	closedCh   chan struct{} // 关闭时 close（心跳循环退出信号）
+	heartbeat  bool          // WebSocket 心跳循环是否已启动
+	authed     bool          // 是否已通过节点密钥认证
+	jobs       *mcJobQueue   // 有序通道：有状态事件（auth、instance/*、stream/*）
+	fast       *mcJobQueue   // 并发通道：只读/幂等事件（file/list、info/*）
+	holdMu     sync.Mutex
+	hold       []mcJob             // 认证完成前暂存的只读事件（auth 成功后放行）
+	holdTimer  *time.Timer         // 暂存超时兜底（未认证会话不能无限挂起）
 	jobsOnce   sync.Once           // 有序通道工作协程只启动一次
 	fastOnce   sync.Once           // 并发通道工作协程只启动一次
 	outbox     *wsOutbox           // WebSocket 批量出站队列（每连接一个写协程）
@@ -329,6 +336,9 @@ func (mc *mcsmCompat) wsReadLoop(s *eioSession, conn *wsConn) {
 				s.startWSHeartbeat()
 				continue
 			}
+			if debugCompatWS {
+				alog.Printf("调试 WS 入站（sid=%s）: %q", s.sid[:8], truncateForLog(pkt, 80))
+			}
 			s.handleEnginePacket(pkt)
 		}
 	}
@@ -396,6 +406,9 @@ func (s *eioSession) startWSHeartbeat() {
 			if idle > interval+timeout {
 				s.close()
 				return
+			}
+			if debugCompatWS {
+				alog.Printf("调试 WS 心跳（sid=%s）：下发 ping，距上次 pong %s", s.sid[:8], idle)
 			}
 			s.send("2")
 		}
@@ -606,7 +619,12 @@ func (s *eioSession) handleSocketEvent(rest string) {
 			UUID *string         `json:"uuid"`
 			Data json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(data, &head); err == nil && head.Data != nil {
+		// 判定条件必须覆盖「只有 uuid、没有 data」的请求：真实面板对
+		// info/overview、instance/overview 等只发 {uuid}（data 为 undefined 被
+		// JSON.stringify 丢掉），若只按 data 键判定就会把 uuid 一起丢掉，
+		// 回包 uuid 变成 null，面板匹配不到 → 6 秒超时并按断线重连
+		// （线上表现为节点页系统信息空白 + 每隔几秒重连一次）。
+		if err := json.Unmarshal(data, &head); err == nil && (head.UUID != nil || head.Data != nil) {
 			if head.UUID != nil {
 				uuid = *head.UUID
 			}
@@ -650,7 +668,7 @@ func (s *eioSession) enqueue(job mcJob) {
 								if !ok {
 									return
 								}
-								s.dispatch(j.event, j.uuid, j.data)
+								s.dispatchFast(j)
 							}
 						}
 						// 一次只取一个：多个协程才能真正并行
@@ -659,7 +677,7 @@ func (s *eioSession) enqueue(job mcJob) {
 							if !ok {
 								break
 							}
-							s.dispatch(j.event, j.uuid, j.data)
+							s.dispatchFast(j)
 						}
 					}
 				})
@@ -669,6 +687,12 @@ func (s *eioSession) enqueue(job mcJob) {
 		return
 	}
 
+	s.ensureOrderedWorker()
+	s.jobs.push(job)
+}
+
+// ensureOrderedWorker 启动有序通道的工作协程（幂等）。
+func (s *eioSession) ensureOrderedWorker() {
 	s.jobsOnce.Do(func() {
 		// 关闭信号在启动时取一次本地副本：closedCh 生命周期内不变，
 		// 循环里绝不直接读 s.closedCh（那是与 close() 的数据竞争）。
@@ -686,13 +710,76 @@ func (s *eioSession) enqueue(job mcJob) {
 					}
 					return
 				}
-				for _, j := range s.jobs.popBatch(mcJobBatch) {
+				batch := s.jobs.popBatch(mcJobBatch)
+				if len(batch) > 0 {
+				}
+				for _, j := range batch {
 					s.dispatch(j.event, j.uuid, j.data)
 				}
 			}
 		})
 	})
-	s.jobs.push(job)
+}
+
+// flushPreAuthJobs 认证成功后放行暂存的只读事件（按到达顺序）。
+//
+// 写成包级函数而不是方法：mcEventHandlers 表在包初始化时就引用了 mcEventAuth，
+// 若它再调用方法会形成初始化循环（Go 直接拒绝编译）。
+func flushPreAuthJobs(s *eioSession) {
+	s.holdMu.Lock()
+	held := s.hold
+	s.hold = nil
+	if s.holdTimer != nil {
+		s.holdTimer.Stop()
+		s.holdTimer = nil
+	}
+	s.holdMu.Unlock()
+	if len(held) == 0 {
+		return
+	}
+	if ensureOrderedWorkerFn != nil {
+		ensureOrderedWorkerFn(s)
+	}
+	for _, j := range held {
+		s.jobs.push(j)
+	}
+}
+
+// ensureOrderedWorkerFn 有序通道工作协程启动器（由 init 绑定，打破包初始化循环：
+// mcEventHandlers → mcEventAuth → flushPreAuthJobs 不能再静态引用 eioSession 方法）。
+var ensureOrderedWorkerFn func(*eioSession)
+
+func init() { ensureOrderedWorkerFn = (*eioSession).ensureOrderedWorker }
+
+// dispatchFast 并发通道的执行入口。
+//
+// 并发通道允许多个只读事件同时跑，但不能绕过认证门禁的先后关系：
+// 真实 MCSManager 面板在收到 auth 回包之前就会连着发 info/overview、
+// instance/overview 等请求，若并发通道抢先执行会被认证门禁拒绝
+// （线上表现为面板节点页“系统信息”空白）。未认证时把任务退回有序通道，
+// 它排在 auth 之后，认证完成后自然执行。
+func (s *eioSession) dispatchFast(job mcJob) {
+	if job.event != "auth" && job.event != "stream/auth" {
+		s.mu.Lock()
+		authed := s.authed
+		s.mu.Unlock()
+		if !authed {
+			// 认证前到达的只读事件先暂存，等 auth 成功后再放行（见 flushPreAuth）。
+			// 直接回退到有序队列是不行的：那个位置可能排在 auth **之前**。
+			s.holdMu.Lock()
+			if len(s.hold) < mcJobBatch*4 {
+				s.hold = append(s.hold, job)
+			}
+			if s.holdTimer == nil {
+				// 兜底：一直不认证的会话不能把这些请求无限挂起，
+				// 超时后照常分发（认证门禁会给出「未通过节点密钥认证」）。
+				s.holdTimer = time.AfterFunc(mcHoldPreAuthFor, func() { flushPreAuthJobs(s) })
+			}
+			s.holdMu.Unlock()
+			return
+		}
+	}
+	s.dispatch(job.event, job.uuid, job.data)
 }
 
 // emitPacket 组装并发送一个事件包 {"uuid","status","event","data"}。

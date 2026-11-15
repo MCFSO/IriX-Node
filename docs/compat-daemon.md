@@ -361,7 +361,19 @@ MCDReforged 部署、SignalR 控制台与系统监视。
 go test ./cmd/irix-node -run TestCompat -count=1
 ```
 
-## 8. 排错
+## 8. 用真实面板/daemon 验收
+
+自造用例只能证明「协议解析对」，证明不了「真程序能用」。这里用两边的**官方发行版**
+跑端到端验收，结果与复现步骤见 `docs/compat-e2e-verification.md`，脚本在
+`scripts/e2e/`（`mcsm-panel.mjs`、`mslx-master.mjs`）。
+
+真机跑出来的问题往往在「形状细节」上，例如：
+请求包只有 `{uuid}` 没有 `data` 时不能丢 uuid；engine.io 的 WS 传输一帧只能一个包
+（`\x1e` 多包只适用于轮询）；面板不等 `auth` 回包就连发请求；停止要立刻回包不能
+同步等进程退出。这些都已在代码里修掉并补了回归用例
+（`cmd/irix-node/qa_compat_mcsm_regress_test.go`）。
+
+## 9. 排错
 
 | 现象 | 排查 |
 | --- | --- |

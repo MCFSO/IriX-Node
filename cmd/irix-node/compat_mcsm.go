@@ -132,6 +132,8 @@ func mcEventAuth(mc *mcsmCompat, s *eioSession, data json.RawMessage) (any, erro
 	s.mu.Lock()
 	s.authed = true
 	s.mu.Unlock()
+	// 认证完成：放行认证前暂存的只读事件（真实面板不等 auth 回包就发下一个请求）
+	flushPreAuthJobs(s)
 	mc.ensureWatcher()
 	alog.Printf("MCSManager 兼容层：来源 %s 认证成功", s.peerHint())
 	return true, nil
@@ -488,16 +490,13 @@ func mcInstanceBatch(mc *mcsmCompat, s *eioSession, data json.RawMessage, event 
 				mc.d.markDirty()
 			}
 		case "instance/stop":
-			err = mc.d.stopInstance(inst)
-			if errors.Is(err, errNotRunning) {
-				err = nil
-			}
+			// 停止是**异步**的：真实 MCSM daemon 只下发停止指令并立刻回包，
+			// 真正的关停（软关停等待 → 强杀）在后台推进。面板的请求超时是
+			// 6~30 秒，若在这里同步等进程退出，面板会先超时报错
+			// （实测「Request timeout!」后状态还停在停止中）。
+			mc.stopAsync(inst)
 		case "instance/restart":
-			err = mc.d.stopInstance(inst)
-			if err != nil && !errors.Is(err, errNotRunning) {
-				break
-			}
-			err = mc.d.startInstance(inst)
+			mc.restartAsync(inst)
 		case "instance/kill":
 			err = mc.killInstance(inst)
 		}
@@ -516,6 +515,40 @@ func mcInstanceBatch(mc *mcsmCompat, s *eioSession, data json.RawMessage, event 
 		return nil, lastErr
 	}
 	return map[string]any{"instanceUuid": req.InstanceUUIDs[0], "instances": instances}, nil
+}
+
+// stopAsync 后台停止实例（面板请求立刻回包）。
+func (mc *mcsmCompat) stopAsync(inst *Instance) {
+	target := inst
+	safeGo("MCSM 兼容层异步停止", func() {
+		if err := mc.d.stopInstance(target); err != nil && !errors.Is(err, errNotRunning) {
+			alog.Printf("MCSM 兼容层：实例 %s 后台停止失败: %v", target.InstanceUuid, err)
+			return
+		}
+		mc.broadcast("instance/stop", map[string]any{
+			"instanceUuid": target.InstanceUuid,
+			"instances":    []any{},
+		})
+	})
+}
+
+// restartAsync 后台重启实例（面板请求立刻回包）。
+func (mc *mcsmCompat) restartAsync(inst *Instance) {
+	target := inst
+	safeGo("MCSM 兼容层异步重启", func() {
+		if err := mc.d.stopInstance(target); err != nil && !errors.Is(err, errNotRunning) {
+			alog.Printf("MCSM 兼容层：实例 %s 后台重启（停止阶段）失败: %v", target.InstanceUuid, err)
+			return
+		}
+		if err := mc.d.startInstance(target); err != nil {
+			alog.Printf("MCSM 兼容层：实例 %s 后台重启（启动阶段）失败: %v", target.InstanceUuid, err)
+			return
+		}
+		target.mu.Lock()
+		target.Started++
+		target.mu.Unlock()
+		mc.d.markDirty()
+	})
 }
 
 // killInstance 强制终止实例（实现见 Daemon.compatKillInstance，两层共用）。

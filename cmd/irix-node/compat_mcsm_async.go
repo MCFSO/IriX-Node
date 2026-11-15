@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // mcJobQueueCap 单会话任务队列上限（超出丢最旧，绝不阻塞调用方）。
@@ -25,6 +26,12 @@ const mcJobBatch = 64
 
 // mcFastLaneWorkers 并发通道的工作协程数（只读事件并行度）。
 const mcFastLaneWorkers = 4
+
+// mcHoldPreAuthFor 认证前只读事件的最长暂存时间。
+//
+// 真实面板不等 auth 回包就连发请求（毫秒级即可完成认证），但一直不认证的
+// 客户端不能无限挂起：超时后照常分发，由认证门禁给出明确拒绝。
+const mcHoldPreAuthFor = 3 * time.Second
 
 // mcJobQueue 非阻塞任务队列（环形缓冲 + 单信号唤醒）。
 //
@@ -175,15 +182,22 @@ type wsOutbox struct {
 	sig     chan struct{}
 	dropped atomic.Uint64
 	pumping sync.Once
-	join    []byte // 帧之间的分隔符（engine.io 用 \x1e）
+	join    []byte // 帧之间的分隔符（SignalR 用 \x1e）
 	end     []byte // 合并帧的结尾（SignalR 每条记录以 \x1e 结尾）
+	noMerge bool   // 每帧独立写出（engine.io WS 传输要求一帧一包）
 }
 
 // newWSOutbox 创建出站队列（conn 为空时忽略所有写入）。
 //
 // 默认按 engine.io 的方式合并：帧之间用 \x1e 分隔、末尾不加分隔符。
+// engine.io 的 **WebSocket 传输每帧只承载一个包**：多包合并（\x1e 分隔）只适用于
+// HTTP 轮询的 payload，socket.io-client 在 WS 上按单包解析，合并帧会被判为
+// 解析失败（实测真实 MCSManager 面板因此每 6 秒超时重连，且收不到任何回包）。
+// 因此这里不做合并，只把写入从业务协程挪到写协程（异步化），保持一帧一包。
 func newWSOutbox(conn *wsConn) *wsOutbox {
-	return newWSOutboxFramed(conn, []byte{0x1e}, nil)
+	o := newWSOutboxFramed(conn, nil, nil)
+	o.noMerge = true
+	return o
 }
 
 // newWSOutboxFramed 创建自定义分帧方式的出站队列。
@@ -249,15 +263,25 @@ func (o *wsOutbox) pump() {
 			continue
 		}
 		var err error
-		var buf bytes.Buffer
-		for i, f := range frames {
-			if i > 0 && len(o.join) > 0 {
-				buf.Write(o.join)
+		if o.noMerge {
+			// 一帧一包：逐帧写出，失败即判定连接已坏
+			var werr error
+			for _, f := range frames {
+				if werr = o.conn.writeText(string(f)); werr != nil {
+					break
+				}
 			}
-			buf.Write(f)
+			if werr != nil {
+				o.close()
+				_ = o.conn.Close()
+				return
+			}
+			continue
 		}
-		if len(o.end) > 0 {
-			buf.Write(o.end)
+		payloads := o.encode(frames)
+		var buf bytes.Buffer
+		for _, pl := range payloads {
+			buf.Write(pl)
 		}
 		err = o.conn.writeText(buf.String())
 		if err != nil {
@@ -267,6 +291,29 @@ func (o *wsOutbox) pump() {
 			return
 		}
 	}
+}
+
+// encode 把一批帧编码成「要写出的 WS 文本帧内容」列表。
+//
+//   - noMerge（engine.io）：每帧独立成一个 payload，调用方逐帧写出；
+//   - 合并模式（SignalR）：多帧拼成一个 payload，帧间加 join、末尾加 end。
+func (o *wsOutbox) encode(frames [][]byte) [][]byte {
+	if o.noMerge {
+		out := make([][]byte, len(frames))
+		copy(out, frames)
+		return out
+	}
+	var buf bytes.Buffer
+	for i, f := range frames {
+		if i > 0 && len(o.join) > 0 {
+			buf.Write(o.join)
+		}
+		buf.Write(f)
+	}
+	if len(o.end) > 0 {
+		buf.Write(o.end)
+	}
+	return [][]byte{buf.Bytes()}
 }
 
 // close 关闭出站队列。
