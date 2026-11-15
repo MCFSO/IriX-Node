@@ -786,21 +786,26 @@ func (ms *mslxCompat) handleInstanceAction(w http.ResponseWriter, r *http.Reques
 		ms.d.markDirty()
 		mslxOK(w, nil, "服务器已启动")
 	case "stop":
-		if err := ms.d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
-			mslxOK(w, nil, "服务器停止失败："+err.Error())
-			return
-		}
+		// 停止是异步的：软关停等待可达 30 秒，同步等会让面板请求超时、状态卡在「停止中」
+		target := inst
+		safeGo("MSLX 兼容层异步停止", func() {
+			if err := ms.d.stopInstance(target); err != nil && !errors.Is(err, errNotRunning) {
+				alog.Printf("MSLX 兼容层：实例 %s 后台停止失败: %v", target.InstanceUuid, err)
+			}
+		})
 		mslxOK(w, nil, "已发送停止服务器指令")
 	case "restart":
-		err := ms.d.stopInstance(inst)
-		if err != nil && !errors.Is(err, errNotRunning) {
-			mslxOK(w, nil, "服务器重启失败："+err.Error())
-			return
-		}
-		if err := ms.d.startInstance(inst); err != nil {
-			mslxOK(w, nil, "服务器重启失败："+err.Error())
-			return
-		}
+		// 同样异步：先停后启，请求立刻回包
+		target := inst
+		safeGo("MSLX 兼容层异步重启", func() {
+			if err := ms.d.stopInstance(target); err != nil && !errors.Is(err, errNotRunning) {
+				alog.Printf("MSLX 兼容层：实例 %s 重启（停止阶段）失败: %v", target.InstanceUuid, err)
+				return
+			}
+			if err := ms.d.startInstance(target); err != nil {
+				alog.Printf("MSLX 兼容层：实例 %s 重启（启动阶段）失败: %v", target.InstanceUuid, err)
+			}
+		})
 		mslxOK(w, nil, "服务器已重启")
 	case "forceExit":
 		if err := ms.d.compatKillInstance(inst); err != nil {

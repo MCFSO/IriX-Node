@@ -956,7 +956,13 @@ func (d *Daemon) stopInstance(inst *Instance) error {
 		return fmt.Errorf("实例正在执行其他操作")
 	}
 	if inst.Proc == nil || !inst.Proc.IsRunning() {
+		// 没有进程在跑：把可能残留的过渡态（停止中/启动中）归位到「已停止」，
+		// 否则面板会一直显示“停止中”（它的状态完全来自我们回报的值）。
+		if inst.Status == StatusStopping || inst.Status == StatusStarting || inst.Status == StatusBusy {
+			inst.Status = StatusStopped
+		}
 		inst.mu.Unlock()
+		_ = d.Save()
 		return errNotRunning
 	}
 	inst.Busy = true

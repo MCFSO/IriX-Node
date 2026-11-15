@@ -144,6 +144,13 @@ type mslxInstanceSample struct {
 }
 
 // startInstanceMonitor 启动实例状态监视（随兼容层启动，只启动一次）。
+//
+// 两件事：
+//  1. 状态**稳定**变化（运行中 / 已停止）时写一行控制台通知并推送——面板只在这
+//     类通知到达时才重新拉取实例信息；若在「停止中」这种过渡态通知，面板刷新
+//     拿到的仍是 1/3，就会一直停在“停止中”。
+//  2. 运行中每 2 秒推 `ReceiveStatus(instanceId, cpu%, memBytes)`，供顶部
+//     CPU/内存与「监控」页使用。
 func (ms *mslxCompat) startInstanceMonitor() {
 	ms.monitorOnce.Do(func() {
 		ms.monitorMu.Lock()
@@ -157,6 +164,7 @@ func (ms *mslxCompat) startInstanceMonitor() {
 			defer t.Stop()
 			lastStatusPush := map[string]time.Time{}
 			samples := map[string]*mslxInstanceSample{}
+			lastStable := map[string]int{}
 			for range t.C {
 				ms.d.mu.Lock()
 				instances := make([]*Instance, len(ms.d.Instances))
@@ -165,6 +173,7 @@ func (ms *mslxCompat) startInstanceMonitor() {
 				for _, inst := range instances {
 					inst.mu.Lock()
 					proc := inst.Proc
+					status := inst.Status
 					running := proc != nil && proc.IsRunning()
 					pid := 0
 					if proc != nil && proc.cmd != nil && proc.cmd.Process != nil {
@@ -173,26 +182,33 @@ func (ms *mslxCompat) startInstanceMonitor() {
 					nickname := inst.Config.Nickname
 					inst.mu.Unlock()
 
-					ms.monitorMu.Lock()
-					prev, seen := ms.lastRun[inst.InstanceUuid]
-					if !seen || prev != running {
-						ms.lastRun[inst.InstanceUuid] = running
-						ms.monitorMu.Unlock()
-						// 生命周期变化：写通知行并推给正在看控制台的连接
+					// 兜底归位：没有进程却在「停止中/启动中」，说明某条路径没把状态
+					// 收尾（例如重复 stop 命中 errNotRunning）。放任不管面板会一直
+					// 显示“停止中”，所以这里主动归位到「已停止」。
+					if !running && (status == StatusStopping || status == StatusStarting || status == StatusBusy) {
+						inst.mu.Lock()
+						if inst.Proc == nil {
+							inst.Status = StatusStopped
+							status = StatusStopped
+						}
+						inst.mu.Unlock()
+					}
+					stable := mslxStatus(status)
+					// 只在稳定态（0 未启动 / 2 运行中）且发生变化时写通知行
+					if (stable == 0 || stable == 2) && lastStable[inst.InstanceUuid] != stable {
+						lastStable[inst.InstanceUuid] = stable
 						var text string
-						if running {
+						if stable == 2 {
 							text = fmt.Sprintf("[MSLX] 服务器进程已启动，PID: %d", pid)
 						} else {
 							text = "[MSLX] 服务器进程已停止"
 						}
 						ms.emitConsoleNotice(inst.InstanceUuid, text)
 						alog.Printf("MSLX 兼容层：实例 %s %s", nickname, strings.TrimPrefix(text, "[MSLX] "))
-						if !running {
+						if stable == 0 {
 							delete(samples, inst.InstanceUuid)
 						}
-						continue
 					}
-					ms.monitorMu.Unlock()
 
 					if !running || pid <= 0 {
 						continue

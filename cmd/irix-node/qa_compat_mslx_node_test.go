@@ -614,9 +614,16 @@ func TestCompatMSLXCreateServerAndTasks(t *testing.T) {
 		t.Fatalf("实例列表应包含新建实例: %s", lraw)
 	}
 
-	// 目录与 eula 已就绪
-	if _, err := os.Stat(filepath.Join(cwd, "eula.txt")); err != nil {
-		t.Fatalf("应写入 eula.txt: %v", err)
+	// 目录与 eula 已就绪（创建是异步的：后台准备完成后才写 eula，需轮询）
+	eulaDeadline := time.Now().Add(8 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(cwd, "eula.txt")); err == nil {
+			break
+		}
+		if time.Now().After(eulaDeadline) {
+			t.Fatal("应写入 eula.txt（后台准备超时）")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// 任务列表：创建任务应显示为已完成（state=2），面板据此停止轮询

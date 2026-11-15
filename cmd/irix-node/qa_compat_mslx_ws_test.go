@@ -449,3 +449,121 @@ func TestMSLXConsoleLifecycleNotice(t *testing.T) {
 		t.Fatal("启动后应收到 [MSLX] ... 已启动 的控制台通知行（面板靠它刷新状态）")
 	}
 }
+
+// TestMSLXSendPtyInputCtrlCStops PTERM 里按 Ctrl+C（\x03）必须按「停止实例」处理，
+// 不能当命令写进标准输入（服务端会打印 "Unknown or incomplete command ... ^c"）。
+func TestMSLXSendPtyInputCtrlCStops(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	// 不用 t.TempDir()：停止是异步的，子进程可能短暂占用工作目录导致清理报错
+	cwd, err := os.MkdirTemp("", "irix-mslx-ctrlc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+	instID := d.compatMSLX.idFor(inst.InstanceUuid)
+
+	status, resp := mslxDo(t, http.MethodPost,
+		base+"/api/hubs/instanceControlHub/negotiate?negotiateVersion=1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("协商失败: %d %s", status, resp)
+	}
+	var neg struct {
+		ConnectionToken string `json:"connectionToken"`
+	}
+	if err := json.Unmarshal(resp, &neg); err != nil || neg.ConnectionToken == "" {
+		t.Fatalf("协商响应异常: %s", resp)
+	}
+	ws := dialTestWS(t, base+"/api/hubs/instanceControlHub?id="+url.QueryEscape(neg.ConnectionToken))
+	defer ws.conn.Close()
+	rd := &hubReader{t: t, ws: ws}
+	ws.sendText(`{"protocol":"json","version":1}` + srRecordSep)
+	rd.next(5 * time.Second)
+
+	// 模拟终端按 Ctrl+C
+	ctrlC, _ := json.Marshal(map[string]any{
+		"type": 1, "invocationId": "c1", "target": "SendPtyInput",
+		"arguments": []any{instID, "\u0003"},
+	})
+	ws.sendText(string(ctrlC) + srRecordSep)
+
+	// 应触发异步停止
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		inst.mu.Lock()
+		st := inst.Status
+		inst.mu.Unlock()
+		// 停止是异步的（软关停等待 → 强杀），进入 Stopping 即说明 Ctrl+C 生效
+		if st == StatusStopping || st == StatusStopped {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("SendPtyInput 收到 \\x03 应停止实例")
+}
+
+// TestMSLXStatusSettlesAfterStop 停止完成后状态必须收敛到「已停止」，
+// 不能停在「停止中」——面板的状态完全来自我们回报的值，卡住就一直显示停止中。
+func TestMSLXStatusSettlesAfterStop(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	cwd, err := os.MkdirTemp("", "irix-mslx-stop-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) })
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+	instID := d.compatMSLX.idFor(inst.InstanceUuid)
+	d.compatMSLX.startInstanceMonitor()
+
+	// 面板停止：必须立刻回包（异步关停）
+	start := time.Now()
+	actionBody, _ := json.Marshal(map[string]any{"id": instID, "action": "stop"})
+	status, resp := mslxDo(t, http.MethodPost, base+"/api/instance/action", token, actionBody)
+	if status != http.StatusOK {
+		t.Fatalf("停止请求失败: %d %s", status, resp)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("停止请求耗时 %s，必须异步回包", elapsed)
+	}
+
+	// 等状态收敛：信息接口回报的 status 必须是 MSLX 语义的 0（未启动）
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		_, body := mslxDo(t, http.MethodGet, base+fmt.Sprintf("/api/instance/info?id=%d", instID), token, nil)
+		var env struct {
+			Data struct {
+				Status int `json:"status"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &env)
+		if env.Data.Status == 0 {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatal("停止后状态必须收敛到 0（未启动），不能一直停留在 1（停止中）")
+}

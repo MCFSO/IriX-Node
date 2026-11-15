@@ -511,6 +511,22 @@ func (c *mslxHubConn) handleInvocation(msg srMessage) {
 			return
 		}
 		if data, err := hubStringArg(msg.Arguments, 1); err == nil {
+			// Ctrl+C（\x03 / ^c）不能当命令写进标准输入：服务端会打印
+			// 「Unknown or incomplete command ... ^c<--[HERE]」并卡在停止中。
+			// 与 MCSM 兼容层一致，按「停止实例」处理。
+			if isConsoleInterrupt(data) {
+				if inst := c.instanceByHubID(instanceID); inst != nil {
+					alog.Printf("兼容层：控制台收到 Ctrl+C，按停止处理（实例 %s）", inst.Config.Nickname)
+					safeGo("MSLX 兼容层控制台中断", func() {
+						if err := c.srv.d.stopInstance(inst); err != nil && !errors.Is(err, errNotRunning) {
+							alog.Printf("MSLX 兼容层：Ctrl+C 停止实例失败（%s）：%v", inst.Config.Nickname, err)
+						}
+					})
+					c.sendInvocation("ReceiveLog", "[MSLX] 收到 Ctrl+C：已向实例发送停止指令")
+				}
+				c.complete(msg.InvocationID, nil, "")
+				return
+			}
 			clean := strings.Trim(data, "\r\n")
 			if clean != "" {
 				_, _ = c.sendCommand(instanceID, clean)
