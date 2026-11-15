@@ -1108,21 +1108,6 @@ func mcEventUpgradeUnsupported(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) 
 	return nil, errors.New("irix-node 不提供远程自更新")
 }
 
-// mcEventScheduleRegister 计划任务：本节点不支持 MCSM 的计划任务，明确拒绝。
-func mcEventScheduleRegister(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return nil, errors.New("本节点不支持 MCSManager 计划任务，请在面板侧关闭该功能")
-}
-
-// mcEventScheduleList 计划任务列表：始终为空。
-func mcEventScheduleList(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return []any{}, nil
-}
-
-// mcEventScheduleDelete 计划任务删除：无任务，直接成功。
-func mcEventScheduleDelete(_ *mcsmCompat, _ *eioSession, _ json.RawMessage) (any, error) {
-	return true, nil
-}
-
 // mcJavaList 输出 MCSM 面板可读的 Java 运行时列表（读取 {data}/runtime 目录）。
 func (d *Daemon) mcJavaList() []map[string]any {
 	root := filepath.Join(d.DataDir, "runtime")

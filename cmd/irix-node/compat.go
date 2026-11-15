@@ -85,6 +85,9 @@ type mcsmCompat struct {
 	chartMu   sync.Mutex
 	chart     []mcChartPoint
 	chartOnce sync.Once
+
+	// schedules 面板「计划任务」表（持久化于 {data}/compat-mcsm-schedules.json）
+	schedules mcScheduleStore
 }
 
 // mcChartPoint 系统曲线上的一个采样点（字段名与 MCSM 完全一致）。
@@ -185,6 +188,7 @@ type mslxCompat struct {
 	uploads mslxUploadRegistry
 	// cron 面板「定时任务」表（持久化于 {data}/compat-mslx-tasks.json）
 	cron mslxCronStore
+
 	// hubConns 活跃 SignalR 连接（系统监视共享采样广播）
 	hubMu       sync.Mutex
 	hubConns    map[string]*mslxHubConn
@@ -527,6 +531,8 @@ func (d *Daemon) startCompatServers() {
 	if d.compatMC != nil {
 		// 系统曲线从启动就开采样（与 MCSM daemon 一致），面板一进来就有历史
 		d.compatMC.ensureChart()
+		// 计划任务：恢复任务表并启动秒级调度
+		d.compatMC.loadSchedules()
 		d.startCompatListener("MCSManager", d.compatMC.bind, d.compatMC.port,
 			d.compatMC.handler(),
 			func(addr string) { d.compatMC.addr = addr },
@@ -594,6 +600,9 @@ func (d *Daemon) stopCompatServers(ctx context.Context) error {
 	// 先停调度循环，避免关停过程中还去碰实例
 	if d.compatMSLX != nil {
 		d.compatMSLX.stopCronScheduler()
+	}
+	if d.compatMC != nil {
+		d.compatMC.stopScheduleLoop()
 	}
 
 	d.compatMu.Lock()

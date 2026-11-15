@@ -62,6 +62,21 @@ MSLX Daemon v1.7.8 主节点（17 项全过）：
 ✅ 主节点解除链接 → 主节点异步回呼 remove-link → 子节点 linked=false
 ```
 
+## 计划任务（MCSManager）
+
+面板「计划任务」页走 `/api/protected_schedule`，面板后端转发 daemon 的
+`schedule/register|list|delete`。实测（真实面板 v10.22.1）：
+
+```
+✅ 注册（Specific Time Task，type=3）      → 200 true
+✅ 列表                                    → 字段齐全（instanceUuid/name/count/time/actions/type）
+✅ 删除（task_name 查询参数）              → 200 true
+✅ 到点真实触发（2 秒后 start 动作）       → 实例状态 0 → 3
+✅ count=1 执行后自动删除任务              → 剩余任务数 0
+```
+
+脚本：`scripts/e2e/mcsm-schedule.mjs`（用面板 API，走完整转发链路）。
+
 ## 这一轮真机跑出来的 5 个缺陷（都已修 + 补回归用例）
 
 | # | 现象 | 根因 | 修复 |

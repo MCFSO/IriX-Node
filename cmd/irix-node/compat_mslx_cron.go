@@ -518,8 +518,10 @@ type cronField struct {
 	names map[string]int
 }
 
-// cronSpec 完整表达式。
+// cronSpec 完整表达式（second 仅在 6 段表达式里生效）。
 type cronSpec struct {
+	second                        cronField
+	hasSec                        bool
 	minute, hour, dom, month, dow cronField
 }
 
@@ -532,11 +534,24 @@ var cronDowNames = map[string]int{
 	"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
 }
 
-// parseCronSpec 解析 5 段 cron 表达式。
+// parseCronSpec 解析 cron 表达式：支持 5 段（分 时 日 月 周）与
+// 6 段（秒 分 时 日 月 周，MCSManager 的 node-schedule 表达式就是 6 段）。
 func parseCronSpec(expr string) (*cronSpec, error) {
 	fields := strings.Fields(strings.TrimSpace(expr))
-	if len(fields) != 5 {
-		return nil, fmt.Errorf("需要 5 段（分 时 日 月 周），实际 %d 段", len(fields))
+	var sec cronField
+	hasSec := false
+	switch len(fields) {
+	case 5:
+	case 6:
+		hasSec = true
+		var err error
+		sec, err = parseCronField(fields[0], 0, 59, nil)
+		if err != nil {
+			return nil, fmt.Errorf("秒字段: %v", err)
+		}
+		fields = fields[1:]
+	default:
+		return nil, fmt.Errorf("需要 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周），实际 %d 段", len(fields))
 	}
 	minute, err := parseCronField(fields[0], 0, 59, nil)
 	if err != nil {
@@ -558,7 +573,7 @@ func parseCronSpec(expr string) (*cronSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("星期段: %v", err)
 	}
-	return &cronSpec{minute: minute, hour: hour, dom: dom, month: month, dow: dow}, nil
+	return &cronSpec{second: sec, hasSec: hasSec, minute: minute, hour: hour, dom: dom, month: month, dow: dow}, nil
 }
 
 // parseCronField 解析单个字段（支持 *、n、a-b、*/n、a-b/n、逗号列表、名称）。
@@ -643,6 +658,9 @@ func parseCronValue(s string, lo, hi int, names map[string]int) (int, error) {
 
 // match 判断给定时间是否命中表达式（日与周按 cron 惯例取「或」）。
 func (s *cronSpec) match(t time.Time) bool {
+	if s.hasSec && !s.second.bits[t.Second()] {
+		return false
+	}
 	if !s.minute.bits[t.Minute()] || !s.hour.bits[t.Hour()] || !s.month.bits[int(t.Month())] {
 		return false
 	}
@@ -663,12 +681,18 @@ func (s *cronSpec) match(t time.Time) bool {
 
 // nextRun 计算下一次触发时间（最多向后找一年，用于面板展示与自检）。
 func (s *cronSpec) nextRun(from time.Time) (time.Time, bool) {
-	t := from.Truncate(time.Minute).Add(time.Minute)
-	for i := 0; i < 366*24*60; i++ {
+	step := time.Minute
+	limit := 366 * 24 * 60
+	if s.hasSec {
+		step = time.Second
+		limit = 366 * 24 * 60 * 60
+	}
+	t := from.Truncate(step).Add(step)
+	for i := 0; i < limit; i++ {
 		if s.match(t) {
 			return t, true
 		}
-		t = t.Add(time.Minute)
+		t = t.Add(step)
 	}
 	return time.Time{}, false
 }
