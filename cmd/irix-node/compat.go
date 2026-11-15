@@ -200,6 +200,9 @@ type mslxCompat struct {
 	samplerStop chan struct{}
 	// hubTickets SignalR negotiate 发放的一次性连接凭据（2 分钟有效）。
 	hubTickets map[string]*mslxHubTicket
+	// streamMu/streams 控制台输出流（按实例，带游标与断档检测）
+	streamMu sync.Mutex
+	streams  map[string]*mslxConsoleStream
 }
 
 // compatListener 一条兼容层独立监听（随节点一起优雅关停）。
@@ -559,7 +562,18 @@ func (d *Daemon) startCompatServers() {
 func (d *Daemon) startCompatListener(name, bind string, port int, handler http.Handler,
 	setAddr func(string), disable func()) {
 	addr := d.compatListenAddr(bind, port)
-	ln, err := net.Listen("tcp", addr)
+	// 绑定重试：节点重启时上一个进程的监听套接字可能还没完全释放
+	// （TIME_WAIT/进程退出竞态），实测会导致兼容层直接判定「未启动」。
+	// 这里短退避重试几次，仍然失败才放弃。
+	var ln net.Listener
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		ln, err = net.Listen("tcp", addr)
+		if err == nil {
+			break
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
 	if err != nil {
 		alog.Printf("警告: %s 兼容层未启动：监听 %s 失败（%v）；端口可能被占用，可改 compat 块里的 port",
 			name, addr, err)

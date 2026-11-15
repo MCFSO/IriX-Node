@@ -449,12 +449,25 @@ func (c *mslxHubConn) handleInvocation(msg srMessage) {
 			return
 		}
 		c.subscribeConsole(instanceID)
+		// 历史回放同样要带游标，否则前端 receiveFrame 直接 return
+		if inst := c.instanceByHubID(instanceID); inst != nil {
+			stream := c.srv.consoleStreamOf(inst.InstanceUuid)
+			snapshot := stream.replay(nil)
+			if frames, ok := snapshot["frames"].([]mslxConsoleFrame); ok {
+				for _, f := range frames {
+					c.sendInvocation("ReceiveLog", f.Text, consoleCursorPayload(mslxConsoleCursor{
+						StreamID: snapshot["streamId"].(string), Sequence: f.Sequence,
+					}))
+				}
+			}
+		}
 		c.sendInvocation("PtyStatus", map[string]any{
 			"isPty":     false,
 			"isRunning": c.instanceRunning(instanceID),
 			"enablePty": false,
 		})
 		c.complete(msg.InvocationID, nil, "")
+
 	case "LeaveGroup", "LeavePtyGroup":
 		if argsErr != nil {
 			c.complete(msg.InvocationID, nil, argsErr.Error())
@@ -516,13 +529,28 @@ func (c *mslxHubConn) handleInvocation(msg srMessage) {
 		})
 		c.complete(msg.InvocationID, nil, "")
 	case "ResumeConsole":
+		// 面板 v1.7.6+ 的主路径：带游标恢复控制台。
+		// 回包 log 必须是 ConsoleReplay 对象（{streamId,sequence,gap,frames}）；
+		// 早先返回的是字符串，前端 snapshot.frames.length 直接抛
+		// 「Cannot read properties of undefined (reading 'length')」。
 		if argsErr != nil {
 			c.complete(msg.InvocationID, nil, argsErr.Error())
 			return
 		}
 		c.subscribeConsole(instanceID)
+		var logCursor *mslxConsoleCursor
+		if raw := hubArg(msg.Arguments, 1); len(raw) > 0 {
+			var cur mslxConsoleCursor
+			if json.Unmarshal(raw, &cur) == nil && cur.StreamID != "" {
+				logCursor = &cur
+			}
+		}
+		var log any
+		if inst := c.instanceByHubID(instanceID); inst != nil {
+			log = c.srv.consoleStreamOf(inst.InstanceUuid).replay(logCursor)
+		}
 		c.complete(msg.InvocationID, map[string]any{
-			"log": c.consoleReplay(instanceID),
+			"log": log,
 			"pty": nil,
 			"status": map[string]any{
 				"isPty":     false,
@@ -556,6 +584,14 @@ func (c *mslxHubConn) hubInstanceArg(args []json.RawMessage, n int) (uint32, err
 	default:
 		return 0, fmt.Errorf("实例 id 参数格式错误")
 	}
+}
+
+// hubArg 取第 n 个原始参数（不做类型转换），没有则返回 nil。
+func hubArg(args []json.RawMessage, n int) json.RawMessage {
+	if n < 0 || n >= len(args) {
+		return nil
+	}
+	return args[n]
 }
 
 // hubStringArg 取第 n 个字符串参数。
@@ -646,7 +682,14 @@ func (c *mslxHubConn) subscribeConsole(id uint32) {
 				close(procStop)
 			}()
 			// 与 MCSM 兼容层一致：按 30ms 窗口合并输出，避免高输出速率把面板冲垮
-			mcPumpOutputSelect(ch, procStop, func(text string) { c.sendInvocation("ReceiveLog", text) })
+			// 新进程：换 streamId，前端据此重建缓冲（与 MSLX 一致）
+			c.srv.resetConsoleStreamOf(inst.InstanceUuid)
+			stream := c.srv.consoleStreamOf(inst.InstanceUuid)
+			mcPumpOutputSelect(ch, procStop, func(text string) {
+				payload, cursor := stream.append(text)
+				// 面板 v1.7.6+ 要求 ReceiveLog(text, cursor)：不带游标会被前端丢弃
+				c.sendInvocation("ReceiveLog", payload, consoleCursorPayload(cursor))
+			})
 			cancel()
 			select {
 			case <-stop:
@@ -671,21 +714,6 @@ func (c *mslxHubConn) unsubscribeConsole(id uint32) {
 	if ok && cancel != nil {
 		cancel()
 	}
-}
-
-// consoleReplay 返回实例当前日志尾部（供 ResumeConsole 回放）。
-func (c *mslxHubConn) consoleReplay(id uint32) string {
-	inst := c.instanceByHubID(id)
-	if inst == nil {
-		return ""
-	}
-	inst.mu.Lock()
-	proc := inst.Proc
-	inst.mu.Unlock()
-	if proc == nil {
-		return ""
-	}
-	return proc.Log.Tail(0)
 }
 
 // sendCommand 向实例下发命令。

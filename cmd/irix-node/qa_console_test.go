@@ -65,10 +65,16 @@ func dialTestWS(t *testing.T, rawURL string) *wsTestClient {
 // sendFrame 发送掩码帧（测试载荷 < 126 字节）。
 func (c *wsTestClient) sendFrame(opcode int, payload []byte) {
 	c.t.Helper()
-	if len(payload) >= 126 {
-		c.t.Fatalf("测试客户端仅支持 <126 字节载荷")
+	// 支持 7 位与 16 位长度（SignalR 的合理载荷经常超过 125 字节）
+	var hdr []byte
+	switch {
+	case len(payload) < 126:
+		hdr = []byte{0x80 | byte(opcode), 0x80 | byte(len(payload))}
+	case len(payload) <= 0xffff:
+		hdr = []byte{0x80 | byte(opcode), 0x80 | 126, byte(len(payload) >> 8), byte(len(payload))}
+	default:
+		c.t.Fatalf("测试客户端仅支持 <64KiB 载荷")
 	}
-	hdr := []byte{0x80 | byte(opcode), 0x80 | byte(len(payload))}
 	key := []byte{0x11, 0x22, 0x33, 0x44}
 	masked := make([]byte, len(payload))
 	for i := range payload {

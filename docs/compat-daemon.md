@@ -323,6 +323,7 @@ MSLX 的 SignalR 通道按同一套思路改造：
 | --- | --- |
 | 调用分派 | 读循环只解析记录并入队（非阻塞队列），由每连接一个工作协程按到达顺序执行 `handleInvocation`；`JoinGroup`→`SendCommand` 的顺序语义不变 |
 | 出站 | 每连接一个出站队列，同一时刻的多条记录合并成一个 WS 文本帧；**每条记录都以 `0x1e` 结尾**（SignalR JSON 协议的分帧方式，join 与 end 都是分隔符——只给 end 会把两条记录粘在一起） |
+| 控制台游标 | 面板 v1.7.6+ 用带游标的控制台：`ReceiveLog(text, {streamId,sequence})` 与 `ResumeConsole(instanceId, logCursor, ptyCursor, pty, cols, rows)`。**不带游标的 `ReceiveLog` 会被前端直接丢弃**；`ResumeConsole.log` 必须是 `{streamId,sequence,gap,frames[]}` 对象（早先返回字符串会让前端抛 `Cannot read properties of undefined (reading 'length')`）。每个实例维护一个输出流（2000 帧环形、进程重启换 `streamId`），回放算法与 MSLX 的 `ConsoleOutputBuffer.Replay` 一致 |
 | 系统监视 | 全局采样器每 3 秒采样一次并广播给所有在监视的连接（原来每个连接各自 ticker + 各自 sysinfo，N 个标签页就采 N 次）；连接加入时先推一份，面板不用等第一个周期 |
 
 ## 5. 兼容层的范围与边界（已确定）

@@ -248,3 +248,122 @@ func TestMSLXHubInvocationQueuedAsync(t *testing.T) {
 		t.Log("调用已被工作协程取空")
 	}
 }
+
+// TestMSLXConsoleCursorProtocol 面板 v1.7.6+ 的控制台游标协议：
+// ResumeConsole 必须返回 ConsoleReplay 对象（streamId/sequence/gap/frames），
+// 且实时 ReceiveLog 必须带 cursor —— 早先返回字符串 / 不带游标，前端会报
+// 「Cannot read properties of undefined (reading length)」并丢掉所有输出帧。
+func TestMSLXConsoleCursorProtocol(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	base := setupTestMSLX(t, d)
+	token := mslxLogin(t, base)
+
+	cwd := filepath.Join(worldDir(t), "srv-mslx-cursor")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inst := sampleInst(1, cwd)
+	inst.Config.StartCommand = echoCommand()
+	inst.Config.StopCommand = "stop"
+	if err := d.Add(inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.startInstance(inst); err != nil {
+		t.Fatalf("启动实例失败: %v", err)
+	}
+	t.Cleanup(func() { stopTestProc(t, inst) })
+	instID := d.compatMSLX.idFor(inst.InstanceUuid)
+
+	status, resp := mslxDo(t, http.MethodPost,
+		base+"/api/hubs/instanceControlHub/negotiate?negotiateVersion=1", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("协商失败: %d %s", status, resp)
+	}
+	var neg struct {
+		ConnectionToken string `json:"connectionToken"`
+	}
+	if err := json.Unmarshal(resp, &neg); err != nil || neg.ConnectionToken == "" {
+		t.Fatalf("协商响应异常: %s", resp)
+	}
+	ws := dialTestWS(t, base+"/api/hubs/instanceControlHub?id="+url.QueryEscape(neg.ConnectionToken))
+	defer ws.conn.Close()
+	rd := &hubReader{t: t, ws: ws}
+	ws.sendText(`{"protocol":"json","version":1}` + srRecordSep)
+	rd.next(5 * time.Second)
+
+	// ResumeConsole（游标为 null，模拟首次进入）
+	resume, _ := json.Marshal(map[string]any{
+		"type": 1, "invocationId": "r1", "target": "ResumeConsole",
+		"arguments": []any{instID, nil, nil, false, 80, 24},
+	})
+	ws.sendText(string(resume) + srRecordSep)
+
+	var result map[string]any
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) && result == nil {
+		rec := rd.next(time.Until(deadline))
+		if rec["type"] == float64(3) && rec["invocationId"] == "r1" {
+			result, _ = rec["result"].(map[string]any)
+		}
+	}
+	if result == nil {
+		t.Fatal("ResumeConsole 没有回包")
+	}
+	log, ok := result["log"].(map[string]any)
+	if !ok {
+		t.Fatalf("ResumeConsole.log 必须是对象（ConsoleReplay），实际 %T：%v", result["log"], result["log"])
+	}
+	for _, field := range []string{"streamId", "sequence", "gap", "frames"} {
+		if _, ok := log[field]; !ok {
+			t.Fatalf("ConsoleReplay 缺少字段 %s: %v", field, log)
+		}
+	}
+	if _, ok := log["frames"].([]any); !ok {
+		t.Fatalf("frames 必须是数组: %v", log["frames"])
+	}
+	statusObj, _ := result["status"].(map[string]any)
+	if statusObj == nil || statusObj["isRunning"] != true {
+		t.Fatalf("status.isRunning 应为 true: %v", result["status"])
+	}
+
+	// 实时输出必须带 cursor（第二个参数是 {streamId, sequence}）
+	logArgs := rd.waitTarget("ReceiveLog", 8*time.Second)
+	if len(logArgs) < 2 {
+		t.Fatalf("ReceiveLog 必须带 cursor 参数（否则前端丢弃），实际只有 %d 个参数", len(logArgs))
+	}
+	cursor, ok := logArgs[1].(map[string]any)
+	if !ok {
+		t.Fatalf("ReceiveLog 第二个参数应为 cursor 对象，实际 %T", logArgs[1])
+	}
+	if _, ok := cursor["streamId"].(string); !ok {
+		t.Fatalf("cursor.streamId 缺失: %v", cursor)
+	}
+	if _, ok := cursor["sequence"].(float64); !ok {
+		t.Fatalf("cursor.sequence 缺失: %v", cursor)
+	}
+
+	// 带同一游标再 Resume：应回放“之后”的帧且不报 gap
+	resume2, _ := json.Marshal(map[string]any{
+		"type": 1, "invocationId": "r2", "target": "ResumeConsole",
+		"arguments": []any{instID, map[string]any{"streamId": cursor["streamId"], "sequence": cursor["sequence"]}, nil, false, 80, 24},
+	})
+	ws.sendText(string(resume2) + srRecordSep)
+	deadline = time.Now().Add(8 * time.Second)
+	var got2 map[string]any
+	for time.Now().Before(deadline) && got2 == nil {
+		rec := rd.next(time.Until(deadline))
+		if rec["type"] == float64(3) && rec["invocationId"] == "r2" {
+			got2, _ = rec["result"].(map[string]any)
+		}
+	}
+	if got2 == nil {
+		t.Fatal("第二次 ResumeConsole 没有回包")
+	}
+	log2, _ := got2["log"].(map[string]any)
+	if log2 == nil {
+		t.Fatalf("第二次回放缺少 log: %v", got2)
+	}
+	if log2["gap"] == true {
+		t.Fatalf("游标连续时不应报 gap: %v", log2)
+	}
+}
